@@ -203,6 +203,26 @@ async fn session(
     }
 }
 
+// Supplemental guild presences are nested arrays; normal presences are flat.
+fn seed_presences(value: &Value, event_tx: &EventTx) {
+    if let Some(entries) = value.as_array() {
+        for entry in entries {
+            seed_presences(entry, event_tx);
+        }
+    } else if let (Some(user_id), Some(status)) = (
+        value
+            .pointer("/user/id")
+            .or_else(|| value.get("user_id"))
+            .and_then(Value::as_str),
+        value.get("status").and_then(Value::as_str),
+    ) {
+        event_tx.send(UiEvent::PresenceUpdate {
+            user_id: user_id.to_owned(),
+            status: status.to_owned(),
+        });
+    }
+}
+
 fn dispatch(value: Value, event_tx: &EventTx, voice_tx: &UnboundedSender<Wire>, session_id: &str) {
     let kind = value.get("t").and_then(Value::as_str).unwrap_or("");
     log::debug!("gateway dispatch: {kind}");
@@ -211,6 +231,7 @@ fn dispatch(value: Value, event_tx: &EventTx, voice_tx: &UnboundedSender<Wire>, 
     };
     match kind {
         "READY" => {
+            seed_presences(&data["presences"], event_tx);
             let user = data.pointer("/user").cloned().unwrap_or(Value::Null);
             if let Ok(user) = serde_json::from_value::<User>(user) {
                 event_tx.send(UiEvent::Ready { user });
@@ -219,6 +240,7 @@ fn dispatch(value: Value, event_tx: &EventTx, voice_tx: &UnboundedSender<Wire>, 
             // sidebar roster with them (empty list clears stale state).
             if let Some(guilds) = data.get("guilds").and_then(Value::as_array) {
                 for guild in guilds {
+                    seed_presences(&guild["presences"], event_tx);
                     let Some(id) = guild.get("id").and_then(Value::as_str) else {
                         continue;
                     };
@@ -236,7 +258,12 @@ fn dispatch(value: Value, event_tx: &EventTx, voice_tx: &UnboundedSender<Wire>, 
         }
         // A guild came back from an outage or was just joined (full guild,
         // with its voice states), or went away (roster cleared).
+        "READY_SUPPLEMENTAL" => {
+            seed_presences(&data["merged_presences"]["friends"], event_tx);
+            seed_presences(&data["merged_presences"]["guilds"], event_tx);
+        }
         "GUILD_CREATE" | "GUILD_DELETE" => {
+            seed_presences(&data["presences"], event_tx);
             let Some(id) = data.get("id").and_then(Value::as_str) else {
                 return;
             };
@@ -249,6 +276,9 @@ fn dispatch(value: Value, event_tx: &EventTx, voice_tx: &UnboundedSender<Wire>, 
                 guild_id: id.to_string(),
                 states,
             });
+        }
+        "RELATIONSHIP_ADD" | "RELATIONSHIP_UPDATE" | "RELATIONSHIP_REMOVE" => {
+            event_tx.send(UiEvent::RelationshipsChanged);
         }
         "MESSAGE_CREATE" => {
             if let Ok(message) = serde_json::from_value::<Message>(data) {
@@ -478,12 +508,45 @@ async fn handle_command(api: &Api, command: Command, event_tx: &EventTx, write: 
             }
             Err(err) => report(api, err, event_tx, "carregar canais").await,
         },
+        Command::LoadRelationships => match api.relationships().await {
+            Ok(relationships) => event_tx.send(UiEvent::RelationshipsLoaded { relationships }),
+            Err(error) => event_tx.send(UiEvent::RelationshipError {
+                error: error.to_string(),
+            }),
+        },
+        Command::RequestFriend { username } => match api.request_friend(&username).await {
+            Ok(()) => event_tx.send(UiEvent::RelationshipsChanged),
+            Err(error) => event_tx.send(UiEvent::RelationshipError {
+                error: error.to_string(),
+            }),
+        },
+        Command::AcceptFriend { user_id } => match api.accept_friend(&user_id).await {
+            Ok(()) => event_tx.send(UiEvent::RelationshipsChanged),
+            Err(error) => event_tx.send(UiEvent::RelationshipError {
+                error: error.to_string(),
+            }),
+        },
+        Command::RemoveRelationship { user_id } => match api.remove_relationship(&user_id).await {
+            Ok(()) => event_tx.send(UiEvent::RelationshipsChanged),
+            Err(error) => event_tx.send(UiEvent::RelationshipError {
+                error: error.to_string(),
+            }),
+        },
+        Command::OpenDm { user_id } => match api.open_dm(&user_id).await {
+            Ok(channel) => event_tx.send(UiEvent::DmOpened { channel }),
+            Err(error) => event_tx.send(UiEvent::RelationshipError {
+                error: error.to_string(),
+            }),
+        },
         Command::LoadMessages {
             channel_id,
             before,
             after,
         } => {
-            match api.messages(&channel_id, before.as_deref(), after.as_deref()).await {
+            match api
+                .messages(&channel_id, before.as_deref(), after.as_deref())
+                .await
+            {
                 Ok(messages) => {
                     let _ = event_tx.send(UiEvent::MessagesLoaded {
                         older: before.is_some(),
@@ -588,7 +651,10 @@ async fn handle_command(api: &Api, command: Command, event_tx: &EventTx, write: 
             }
         }
         Command::SubscribeGuild { guild_id } => {
-            if let Err(err) = write.send(WsMessage::text(subscribe_payload(&guild_id))).await {
+            if let Err(err) = write
+                .send(WsMessage::text(subscribe_payload(&guild_id)))
+                .await
+            {
                 log::warn!("falha ao assinar a guild {guild_id}: {err}");
             }
         }
@@ -603,6 +669,7 @@ async fn handle_command(api: &Api, command: Command, event_tx: &EventTx, write: 
         Command::LoadSoundboard { guild_id } => match api.soundboard_sounds(&guild_id).await {
             Ok(sounds) => event_tx.send(UiEvent::SoundboardLoaded { guild_id, sounds }),
             Err(err) => event_tx.send(UiEvent::SoundboardError {
+                guild_id: Some(guild_id),
                 error: format!("não consegui carregar os sons: {err}"),
             }),
         },
@@ -616,6 +683,7 @@ async fn handle_command(api: &Api, command: Command, event_tx: &EventTx, write: 
                 .await;
             if let Err(err) = sent {
                 event_tx.send(UiEvent::SoundboardError {
+                    guild_id: None,
                     error: format!("não consegui tocar o som: {err}"),
                 });
             }
@@ -637,6 +705,27 @@ async fn report(api: &Api, err: ApiError, event_tx: &EventTx, context: &str) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn initial_presence_handles_flat_and_supplemental_lists() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let events = super::EventTx::new(tx, egui::Context::default());
+        super::seed_presences(
+            &serde_json::json!([
+                {"user": {"id": "1"}, "status": "online"},
+                [{"user_id": "2", "status": "idle"}],
+                {"user_id": "3"}
+            ]),
+            &events,
+        );
+        assert!(
+            matches!(rx.try_recv().unwrap(), super::UiEvent::PresenceUpdate { user_id, status } if user_id == "1" && status == "online")
+        );
+        assert!(
+            matches!(rx.try_recv().unwrap(), super::UiEvent::PresenceUpdate { user_id, status } if user_id == "2" && status == "idle")
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
     use super::*;
 
     /// VOICE_STATE_UPDATE real shape: flattened state + embedded member.

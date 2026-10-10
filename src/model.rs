@@ -33,6 +33,14 @@ impl User {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Relationship {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub kind: u8,
+    pub user: User,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Guild {
     pub id: String,
     pub name: String,

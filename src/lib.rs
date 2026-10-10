@@ -10,6 +10,7 @@ pub mod backend;
 pub mod image_cache;
 pub mod markup;
 pub mod model;
+pub mod notifications;
 pub mod paths;
 pub mod settings;
 pub mod theme;

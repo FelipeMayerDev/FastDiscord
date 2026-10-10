@@ -69,42 +69,47 @@ impl Effects {
     }
 }
 
-/// The client's own notification tones (Discord's files are theirs).
+/// Voice notification sounds from the official Discord client.
 #[derive(Clone, Copy, Debug)]
 pub enum Sound {
     Join,
     Leave,
+    Disconnect,
     StreamStart,
     StreamStop,
 }
 
 pub fn play_sound(sound: Sound) {
-    // (frequency Hz, duration s) per note.
-    let notes: &[(f32, f32)] = match sound {
-        Sound::Join => &[(587.3, 0.09), (880.0, 0.14)],
-        Sound::Leave => &[(880.0, 0.09), (587.3, 0.14)],
-        Sound::StreamStart => &[(659.3, 0.07), (784.0, 0.07), (1046.5, 0.12)],
-        Sound::StreamStop => &[(1046.5, 0.07), (784.0, 0.07), (659.3, 0.12)],
+    let index = match sound {
+        Sound::Join => 0,
+        Sound::Leave => 1,
+        Sound::Disconnect => 2,
+        Sound::StreamStart => 3,
+        Sound::StreamStop => 4,
     };
-    EFFECTS.play(tone(notes), 0.25);
+    // The first MP3 decode must not stall the UI or the voice event loop.
+    if let Err(error) = std::thread::Builder::new()
+        .name("voice-sound".into())
+        .spawn(move || {
+            if let Some(clip) = &VOICE_SOUNDS[index] {
+                EFFECTS.play(Arc::clone(clip), 0.5);
+            }
+        })
+    {
+        log::warn!("Não foi possível tocar som de voz: {error}");
+    }
 }
 
-/// Sine notes with a short attack and exponential decay, as stereo.
-fn tone(notes: &[(f32, f32)]) -> Arc<[f32]> {
-    let rate = VOICE_RATE as f32;
-    let mut out = Vec::new();
-    for &(freq, secs) in notes {
-        let len = (secs * rate) as usize;
-        for i in 0..len {
-            let t = i as f32 / rate;
-            let attack = (t / 0.005).min(1.0);
-            let decay = (-4.0 * t / secs).exp();
-            let sample = (std::f32::consts::TAU * freq * t).sin() * attack * decay;
-            out.extend([sample, sample]);
-        }
-    }
-    out.into()
-}
+static VOICE_SOUNDS: LazyLock<[Option<Arc<[f32]>>; 5]> = LazyLock::new(|| {
+    let assets: [&[u8]; 5] = [
+        include_bytes!("../../../assets/sounds/user_join.mp3"),
+        include_bytes!("../../../assets/sounds/user_leave.mp3"),
+        include_bytes!("../../../assets/sounds/disconnect.mp3"),
+        include_bytes!("../../../assets/sounds/stream_started.mp3"),
+        include_bytes!("../../../assets/sounds/stream_ended.mp3"),
+    ];
+    assets.map(|bytes| decode(bytes.to_vec()))
+});
 
 /// Decodes an MP3/Ogg file (soundboard sounds) to 48 kHz stereo.
 pub fn decode(bytes: Vec<u8>) -> Option<Arc<[f32]>> {
@@ -199,5 +204,16 @@ mod tests {
 
         // 24 kHz → 48 kHz doubles the frame count.
         assert_eq!(resample(&[0.0; 8], 24_000).len(), 16);
+    }
+
+    #[test]
+    fn official_sounds_decode_to_finite_stereo_audio() {
+        for clip in VOICE_SOUNDS.iter() {
+            let clip = clip.as_ref().expect("bundled Discord sound must decode");
+            assert!(!clip.is_empty());
+            assert_eq!(clip.len() % 2, 0);
+            assert!(clip.iter().all(|sample| sample.is_finite()));
+            assert!(clip.iter().any(|sample| sample.abs() > 0.001));
+        }
     }
 }

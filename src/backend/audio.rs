@@ -7,6 +7,7 @@
 
 use std::collections::VecDeque;
 use std::io::{Read, Seek, SeekFrom};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -23,7 +24,7 @@ pub use linux::{AudioLinks, list_devices, start};
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub use windows::{AudioLinks, list_devices, start};
+pub use windows::{AudioLinks, echo_cancel_status, list_devices, start};
 
 /// Discord voice runs at 48 kHz.
 pub const VOICE_RATE: u32 = 48_000;
@@ -50,6 +51,7 @@ const SPEAKING_FLOOR: f32 = 0.01;
 pub struct Ring {
     samples: Mutex<VecDeque<f32>>,
     cap: usize,
+    volume: AtomicU8,
 }
 
 impl Ring {
@@ -57,6 +59,7 @@ impl Ring {
         Arc::new(Self {
             samples: Mutex::new(VecDeque::with_capacity(cap.min(4096))),
             cap,
+            volume: AtomicU8::new(100),
         })
     }
 
@@ -84,6 +87,15 @@ impl Ring {
         }
     }
 
+    pub fn set_volume(&self, percent: u8) {
+        self.volume.store(percent.min(200), Ordering::Relaxed);
+    }
+
+    /// Gain is applied after effects so every local voice sound follows it.
+    fn apply_volume(&self, samples: &mut [f32]) {
+        apply_volume(samples, self.volume.load(Ordering::Relaxed));
+    }
+
     pub fn clear(&self) {
         self.samples.lock().unwrap().clear();
     }
@@ -105,6 +117,7 @@ pub struct Capture {
     denoised: [f32; DenoiseState::FRAME_SIZE],
     frame: Vec<f32>,
     sensitivity: f32,
+    input_volume: u8,
     open_until: Option<Instant>,
     /// AGC + compressor/limiter on what leaves the gate.
     dynamics: dynamics::Dynamics,
@@ -119,6 +132,10 @@ pub struct Capture {
 impl Capture {
     pub fn set_sensitivity(&mut self, sensitivity: u8) {
         self.sensitivity = f32::from(sensitivity) / 100.0;
+    }
+
+    pub fn set_volume(&mut self, percent: u8) {
+        self.input_volume = percent.min(200);
     }
 
     pub fn set_dynamics(&mut self, auto_gain: bool, compressor: bool) {
@@ -141,6 +158,7 @@ impl Capture {
             denoised: [0.0; DenoiseState::FRAME_SIZE],
             frame: Vec::with_capacity(DenoiseState::FRAME_SIZE),
             sensitivity: f32::from(sensitivity) / 100.0,
+            input_volume: 100,
             open_until: None,
             dynamics: dynamics::Dynamics::default(),
             ring,
@@ -164,6 +182,7 @@ impl Capture {
 
             // nnnoiseless works on 16-bit-scaled floats and produces
             // silence for clipped input — limit hot signals into its range.
+            let input_rms = rms(&frame);
             let denoised = self.denoiser.is_some();
             if denoised {
                 let frame_rms = rms(&frame).max(0.001);
@@ -186,7 +205,7 @@ impl Capture {
             };
 
             let now = Instant::now();
-            self.peak = self.peak.max(rms(&frame).min(1.0));
+            self.peak = self.peak.max(input_rms);
             if self.last_log.elapsed() >= Duration::from_secs(1) {
                 log::info!(
                     "mic: rms_pico={:.4} limiar={:.2} ring={}",
@@ -212,11 +231,19 @@ impl Capture {
                     frame
                 };
                 self.dynamics.process(&mut out);
+                apply_volume(&mut out, self.input_volume);
                 self.ring.push(&out);
             } else {
                 self.ring.clear();
             }
         }
+    }
+}
+
+fn apply_volume(samples: &mut [f32], percent: u8) {
+    let gain = f32::from(percent.min(200)) / 100.0;
+    for sample in samples {
+        *sample = (*sample * gain).clamp(-1.0, 1.0);
     }
 }
 
@@ -246,26 +273,20 @@ impl MicSource {
 
 impl Read for MicSource {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        // One 20 ms packet per read, never padded beyond availability:
-        // symphonia's stream grows its fetch block up to 64 kB, and serving
-        // that in full would dilute the mic with padded silence (the
-        // "cortando"). A zero-byte read would read as EOF, so a starved
-        // call still yields one silent sample.
+        // Cap Symphonia's read-ahead at one tick. Pad starvation in one read
+        // instead of making the decoder fetch hundreds of single samples.
         let want = (buf.len() / 4).min(VOICE_RATE as usize / 50);
         if want == 0 {
             return Ok(0);
         }
-        let have = self.ring.len().min(want).max(1);
-        if self.scratch.len() < have {
-            self.scratch.resize(have, 0.0);
-        }
-        let (block, _) = self.scratch.split_at_mut(have);
+        self.scratch.resize(want, 0.0);
+        let block = &mut self.scratch[..want];
         self.ring.pop(block);
         EFFECTS.add_send(block);
         for (i, sample) in block.iter().enumerate() {
             buf[i * 4..i * 4 + 4].copy_from_slice(&sample.to_le_bytes());
         }
-        Ok(have * 4)
+        Ok(want * 4)
     }
 }
 
@@ -285,5 +306,75 @@ impl MediaSource for MicSource {
 
     fn byte_len(&self) -> Option<u64> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn input_volume_scales_processed_microphone_without_changing_gate() {
+        let ring = Ring::detached();
+        let mut capture = Capture::new(30, false, ring.clone());
+        let speaking = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let indicator = speaking.clone();
+        capture.on_speaking = Some(Box::new(move |value| {
+            indicator.store(value, Ordering::Relaxed);
+        }));
+        for (volume, expected) in [(0, 0.0), (50, 0.2), (100, 0.4), (200, 0.8)] {
+            capture.set_volume(volume);
+            capture.feed(&vec![0.4; DenoiseState::FRAME_SIZE]);
+            assert!(speaking.load(Ordering::Relaxed));
+            let mut samples = vec![0.0; DenoiseState::FRAME_SIZE];
+            ring.pop(&mut samples);
+            assert!(
+                samples
+                    .iter()
+                    .all(|sample| (*sample - expected).abs() < 0.0001)
+            );
+        }
+    }
+
+    #[test]
+    fn output_volume_mutes_boosts_and_limits_the_final_mix() {
+        let ring = Ring::new(16);
+        for (volume, expected) in [
+            (0, [0.0, 0.0]),
+            (50, [0.4, -0.4]),
+            (100, [0.8, -0.8]),
+            (255, [1.0, -1.0]),
+        ] {
+            let mut mix = [0.8, -0.8];
+            ring.set_volume(volume);
+            ring.apply_volume(&mut mix);
+            assert_eq!(mix, expected);
+        }
+    }
+
+    #[test]
+    fn microphone_reads_one_tick_and_pads_short_capture() {
+        let ring = Ring::detached();
+        ring.push(&vec![0.25; 480]);
+        let mut mic = MicSource::new(ring.clone());
+        let mut bytes = vec![0; 65_536];
+        assert_eq!(mic.read(&mut bytes).unwrap(), 960 * 4);
+        let samples: Vec<_> = bytes[..960 * 4]
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+            .collect();
+        assert!(samples[..480].iter().all(|&s| s == 0.25));
+        assert!(samples[480..].iter().all(|&s| s == 0.0));
+        assert!(ring.is_empty());
+        assert_eq!(mic.read(&mut bytes).unwrap(), 960 * 4);
+    }
+
+    #[test]
+    fn microphone_does_not_read_ahead_more_than_twenty_ms() {
+        let ring = Ring::detached();
+        ring.push(&vec![0.25; 1920]);
+        let mut mic = MicSource::new(ring.clone());
+        assert_eq!(mic.read(&mut vec![0; 65_536]).unwrap(), 960 * 4);
+        assert_eq!(ring.len(), 960);
     }
 }

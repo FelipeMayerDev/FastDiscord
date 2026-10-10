@@ -75,10 +75,12 @@ pub enum Wire {
 }
 
 /// Everything the audio path can tweak from the settings window.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AudioConfig {
     pub input_device: Option<String>,
     pub output_device: Option<String>,
+    pub input_volume: u8,
+    pub output_volume: u8,
     pub sensitivity: u8,
     pub noise_suppression: bool,
     /// Opus send bitrate, kbps.
@@ -86,6 +88,23 @@ pub struct AudioConfig {
     pub auto_gain: bool,
     pub compressor: bool,
     pub echo_cancellation: bool,
+}
+
+impl Default for AudioConfig {
+    fn default() -> Self {
+        Self {
+            input_device: None,
+            output_device: None,
+            input_volume: 100,
+            output_volume: 100,
+            sensitivity: 0,
+            noise_suppression: false,
+            bitrate_kbps: 0,
+            auto_gain: false,
+            compressor: false,
+            echo_cancellation: false,
+        }
+    }
 }
 
 /// State shared between the driver's event handlers and the task loop.
@@ -535,10 +554,12 @@ fn ensure_audio(
     }
     if let Some(links) = links {
         links.set_echo_cancel(cfg.echo_cancellation);
+        links.output_ring.set_volume(cfg.output_volume);
     }
     driver.set_bitrate(Bitrate::Bits(i32::from(cfg.bitrate_kbps.max(8)) * 1000));
     let mut capture = shared.capture.lock().unwrap();
     capture.set_sensitivity(cfg.sensitivity);
+    capture.set_volume(cfg.input_volume);
     capture.set_noise_suppression(cfg.noise_suppression);
     capture.set_dynamics(cfg.auto_gain, cfg.compressor);
 }
@@ -700,6 +721,8 @@ async fn handle_wire(
                             driver.leave();
                             pause_audio(shared, audio_links);
                             *conn = Conn::Pending(pending);
+                            try_connect(driver, conn, shared, event_tx, audio_links, audio_cfg)
+                                .await;
                             return;
                         }
                         if info.channel_id.to_string() != *channel_id {
@@ -756,6 +779,7 @@ async fn handle_wire(
                 driver.leave();
                 pause_audio(shared, audio_links);
                 *conn = Conn::Pending(pending);
+                try_connect(driver, conn, shared, event_tx, audio_links, audio_cfg).await;
             }
             _ => {}
         },

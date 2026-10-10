@@ -10,7 +10,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -332,6 +332,13 @@ fn run_pulse(
         fragsize: PACKET_BYTES as u32,
     };
 
+    // Capture is mono: sharing the stereo fragment doubles each burst
+    // to 40 ms and starves the 20 ms sender on alternate ticks.
+    let input_attrs = BufferAttr {
+        fragsize: (VOICE_RATE / 50) * 4,
+        ..attrs
+    };
+
     mainloop.lock();
 
     // Schedule our stream in 20 ms ticks (960 frames): the server then
@@ -367,7 +374,6 @@ fn run_pulse(
         return;
     }
     let out_stream = Rc::new(RefCell::new(out_stream));
-    let prime = Arc::new(AtomicU32::new(8));
     {
         let out_ring = Arc::clone(&output_ring);
         let callback_stream = Rc::clone(&out_stream);
@@ -378,17 +384,11 @@ fn run_pulse(
             underruns: 0,
             buffering: true,
         }));
-        let prime = Arc::clone(&prime);
         out_stream
             .borrow_mut()
             .set_write_callback(Some(Box::new(move |_| {
                 let mut player = player.borrow_mut();
-                player_fill(
-                    &mut player,
-                    &mut callback_stream.borrow_mut(),
-                    &out_ring,
-                    &prime,
-                );
+                player_fill(&mut player, &mut callback_stream.borrow_mut(), &out_ring);
             })));
     }
 
@@ -406,7 +406,7 @@ fn run_pulse(
     }
     if let Err(err) = in_stream.connect_record(
         input_device.as_deref(),
-        Some(&attrs),
+        Some(&input_attrs),
         StreamFlagSet::ADJUST_LATENCY,
     ) {
         log::warn!("pulse: entrada falhou: {err}");
@@ -496,8 +496,6 @@ fn run_pulse(
                 let _ = out_stream.borrow_mut().cork(None);
             } else {
                 let _ = out_stream.borrow_mut().uncork(None);
-                // Fresh call: rebuild the playback cushion.
-                prime.store(8, Ordering::Relaxed);
             }
             mainloop.unlock();
             out_corked = corked;
@@ -556,7 +554,10 @@ fn retarget(
         let _ = in_stream.borrow_mut().disconnect();
         let res = in_stream.borrow_mut().connect_record(
             inp.as_deref(),
-            Some(attrs),
+            Some(&BufferAttr {
+                fragsize: (VOICE_RATE / 50) * 4,
+                ..*attrs
+            }),
             StreamFlagSet::ADJUST_LATENCY,
         );
         match res {
@@ -614,7 +615,7 @@ struct Player {
     buffering: bool,
 }
 
-fn player_fill(player: &mut Player, stream: &mut Stream, ring: &Ring, prime: &AtomicU32) {
+fn player_fill(player: &mut Player, stream: &mut Stream, ring: &Ring) {
     let Some(writable) = stream.writable_size() else {
         return;
     };
@@ -627,12 +628,6 @@ fn player_fill(player: &mut Player, stream: &mut Stream, ring: &Ring, prime: &At
     // those shortfalls with zeros is the crackle. Instead, play from a
     // PREBUFFER cushion and only fall back to silence once it is fully dry.
     let want = (writable / 4).max(1);
-    if prime.load(Ordering::Relaxed) > 0 {
-        prime.fetch_sub(1, Ordering::Relaxed);
-        let block = vec![0.0f32; want];
-        let _ = stream.write_copy(&block_as_bytes(&block), 0, SeekMode::Relative);
-        return;
-    }
     if player.buffering && ring.len() >= PREBUFFER {
         player.buffering = false;
     }
@@ -649,6 +644,7 @@ fn player_fill(player: &mut Player, stream: &mut Stream, ring: &Ring, prime: &At
         }
     }
     EFFECTS.mix_into(&mut block);
+    ring.apply_volume(&mut block);
 
     let now = Instant::now();
     player.peak = player.peak.max(rms(&block));

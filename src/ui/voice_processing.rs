@@ -24,21 +24,32 @@ pub fn voice_processing_settings(app: &mut VesktopApp, ui: &mut egui::Ui) {
         .checkbox(&mut settings.compressor, "Compressor e limitador")
         .on_hover_text("Segura picos e gritos, sem estourar o áudio.")
         .changed();
-    ui.add_enabled_ui(cfg!(target_os = "linux"), |ui| {
-        changed |= ui
-            .checkbox(&mut settings.echo_cancellation, "Cancelamento de eco")
-            .on_hover_text(
-                "Remove do microfone o som que sai dos alto-falantes (WebRTC AEC do servidor de som).",
-            )
-            .on_disabled_hover_text("Ainda não disponível no Windows.")
-            .changed();
-    });
+    changed |= ui
+        .checkbox(&mut settings.echo_cancellation, "Cancelamento de eco")
+        .on_hover_text(
+            "Remove do microfone o som que sai dos alto-falantes. Depende do suporte do sistema e do dispositivo.",
+        )
+        .changed();
     if settings.echo_cancellation && cfg!(target_os = "linux") {
         ui.label(
             RichText::new("Usa o module-echo-cancel do PipeWire/PulseAudio.")
                 .small()
                 .color(theme::MUTED),
         );
+    }
+    #[cfg(windows)]
+    if settings.echo_cancellation {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(500));
+        if let Some(status) = crate::backend::audio::echo_cancel_status() {
+            ui.label(RichText::new(status).small().color(theme::MUTED));
+        } else {
+            ui.label(
+                RichText::new("O suporte ao cancelamento de eco será verificado ao conectar.")
+                    .small()
+                    .color(theme::MUTED),
+            );
+        }
     }
     if changed {
         app.settings.save();

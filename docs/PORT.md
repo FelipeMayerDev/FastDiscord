@@ -37,15 +37,16 @@ meaning without a browser engine and were dropped. `zoom` maps to egui's
 
 ## Not ported yet (roadmap)
 
-- **Voice & screenshare** — the largest gap; planned on songbird following
-  the Acheron model, see [VOICE.md](VOICE.md).
+- **Voice & screenshare validation** — voice and sharing are implemented;
+  validate real devices, DAVE transitions and Windows AEC on compatible
+  hardware. See [VOICE.md](VOICE.md) and [SCREENSHARE.md](SCREENSHARE.md).
 - **Vencord plugins** — a native plugin story needs design; the Electron
   plugin runtime cannot be reused.
 - **Gateway RESUME** — reconnects currently re-IDENTIFY.
 - **Keyring token storage** — the spotifast pattern (`keyring-core`);
   the token currently sits in `settings.json`.
-- **Clickable links, image previews, reactions, threads, pins, nitro
-  emojis** — chat rendering is text-first right now.
+- **Reactions, threads, pins and full custom-emoji rendering** — links,
+  image previews, animated GIFs and an image viewer are implemented.
 - **UI/UX pass** — splash, QR login layout, server rail, chat timeline:
   see [UI.md](UI.md).
 - **arRPC** (Rich Presence bridge), **autostart**, **app badge**,

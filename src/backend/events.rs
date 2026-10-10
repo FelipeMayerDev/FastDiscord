@@ -34,6 +34,19 @@ impl EventTx {
 pub enum Command {
     LoadGuilds,
     LoadDmChannels,
+    LoadRelationships,
+    RequestFriend {
+        username: String,
+    },
+    AcceptFriend {
+        user_id: String,
+    },
+    RemoveRelationship {
+        user_id: String,
+    },
+    OpenDm {
+        user_id: String,
+    },
     LoadGuildChannels {
         guild_id: String,
     },
@@ -115,6 +128,16 @@ pub enum UiEvent {
     GuildsLoaded {
         guilds: Vec<Guild>,
     },
+    RelationshipsLoaded {
+        relationships: Vec<crate::model::Relationship>,
+    },
+    RelationshipsChanged,
+    RelationshipError {
+        error: String,
+    },
+    DmOpened {
+        channel: Channel,
+    },
     DmChannelsLoaded {
         channels: Vec<Channel>,
     },
@@ -131,6 +154,15 @@ pub enum UiEvent {
     /// A message fetch failed; frees the channel to be fetched again.
     MessagesFailed {
         channel_id: String,
+    },
+    AttachmentPickerClosed {
+        channel_id: String,
+        path: Option<std::path::PathBuf>,
+        error: Option<String>,
+    },
+    AttachmentSent {
+        message: Message,
+        content: String,
     },
     MessageCreated {
         message: Message,
@@ -171,6 +203,7 @@ pub enum UiEvent {
         sounds: Vec<crate::backend::soundboard::SoundboardSound>,
     },
     SoundboardError {
+        guild_id: Option<String>,
         error: String,
     },
     /// Someone (us included) played a soundboard sound in our channel.

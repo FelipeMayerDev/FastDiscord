@@ -10,7 +10,16 @@ use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
+#[path = "windows_aec.rs"]
+mod aec;
+
 use super::{Capture, EFFECTS, INPUT_CAP, OUTPUT_CAP, PREBUFFER, Ring, VOICE_RATE};
+
+static ECHO_STATUS: Mutex<Option<String>> = Mutex::new(None);
+
+pub fn echo_cancel_status() -> Option<String> {
+    ECHO_STATUS.lock().unwrap().clone()
+}
 
 static INPUT_DEVICES: OnceLock<Vec<(String, String)>> = OnceLock::new();
 static OUTPUT_DEVICES: OnceLock<Vec<(String, String)>> = OnceLock::new();
@@ -53,6 +62,7 @@ fn enumerate(output: bool) -> Vec<(String, String)> {
 struct Requests {
     retarget: Mutex<Option<(Option<String>, Option<String>)>>,
     corked: AtomicBool,
+    echo_cancel: AtomicBool,
 }
 
 /// Opened voice audio: the rings other code writes/reads plus the thread
@@ -75,12 +85,10 @@ impl AudioLinks {
         self.requests.corked.store(corked, Ordering::Relaxed);
     }
 
-    /// ponytail: no echo cancellation on Windows — cpal can't open WASAPI
-    /// streams in the Communications category (where the OS applies its
-    /// AEC); needs raw IAudioClient2 with AudioCategory_Communications.
+    /// Native communications capture; unsupported endpoints fall back to CPAL.
     pub fn set_echo_cancel(&self, on: bool) {
-        if on {
-            log::warn!("cancelamento de eco ainda não é suportado no Windows");
+        if self.requests.echo_cancel.swap(on, Ordering::Relaxed) != on {
+            *ECHO_STATUS.lock().unwrap() = on.then(|| "Ativando cancelamento de eco…".into());
         }
     }
 }
@@ -143,19 +151,58 @@ fn run(
     let host = cpal::default_host();
     let mut streams = open(&host, &devices, output_ring, capture);
     let mut corked = [false; 2];
+    let mut echo_cancel = false;
+    let mut native: Option<aec::AecCapture> = None;
     while !stop.load(Ordering::Relaxed) {
         std::thread::sleep(Duration::from_millis(100));
+        let mut retargeted = false;
         if let Some(wanted) = requests.retarget.lock().unwrap().take()
             && wanted != devices
         {
             devices = wanted;
+            native = None;
             drop(streams);
             streams = open(&host, &devices, output_ring, capture);
             log::info!("áudio retargetado: {devices:?}");
             // Fresh streams play; the check below pauses them if corked.
             corked = [false; 2];
+            retargeted = true;
+        }
+        let wanted_echo = requests.echo_cancel.load(Ordering::Relaxed);
+        if wanted_echo != echo_cancel || (retargeted && wanted_echo) {
+            echo_cancel = wanted_echo;
+            streams[1] = None;
+            native = None;
+            if wanted_echo {
+                match aec::AecCapture::start(
+                    devices.clone(),
+                    Arc::clone(capture),
+                    requests.corked.load(Ordering::Relaxed),
+                ) {
+                    Ok(stream) => native = Some(stream),
+                    Err(error) => {
+                        *ECHO_STATUS.lock().unwrap() = Some(format!(
+                            "Cancelamento de eco indisponível: {error}. Microfone sem cancelamento."
+                        ));
+                        streams[1] = recording(&host, &devices.1, capture);
+                    }
+                }
+            } else {
+                streams[1] = recording(&host, &devices.1, capture);
+                *ECHO_STATUS.lock().unwrap() = None;
+            }
+            corked[1] = false;
+        }
+        if native.as_ref().is_some_and(|stream| stream.finished()) {
+            native = None;
+            streams[1] = recording(&host, &devices.1, capture);
+            corked[1] = false;
         }
         let want = requests.corked.load(Ordering::Relaxed);
+        if let Some(native) = &native {
+            native.set_corked(want);
+        }
+
         // [output, input]: the output stays open while effects play (the
         // leave tone after a call ends).
         let want = [want && !EFFECTS.busy(), want];
@@ -177,32 +224,45 @@ fn open(
     output_ring: &Arc<Ring>,
     capture: &Arc<Mutex<Capture>>,
 ) -> [Option<cpal::Stream>; 2] {
-    let find = |id: &Option<String>, output: bool| {
-        id.as_deref()
-            .and_then(|id| id.parse().ok())
-            .and_then(|id| host.device_by_id(&id))
-            .or_else(|| {
-                if output {
-                    host.default_output_device()
-                } else {
-                    host.default_input_device()
-                }
-            })
-    };
-    let playback = find(output, true).and_then(|device| {
+    let playback = find(host, output, true).and_then(|device| {
         open_playback(&device, Arc::clone(output_ring))
             .inspect_err(|err| log::warn!("saída de áudio falhou: {err}"))
             .ok()
     });
-    let recording = find(input, false).and_then(|device| {
-        open_recording(&device, Arc::clone(capture))
-            .inspect_err(|err| log::warn!("entrada de áudio falhou: {err}"))
-            .ok()
-    });
-    for stream in [&playback, &recording].into_iter().flatten() {
+    let recording = recording(host, input, capture);
+    if let Some(stream) = &playback {
         let _ = stream.play();
     }
     [playback, recording]
+}
+
+fn find(host: &cpal::Host, id: &Option<String>, output: bool) -> Option<cpal::Device> {
+    id.as_deref()
+        .and_then(|id| id.parse().ok())
+        .and_then(|id| host.device_by_id(&id))
+        .or_else(|| {
+            if output {
+                host.default_output_device()
+            } else {
+                host.default_input_device()
+            }
+        })
+}
+
+fn recording(
+    host: &cpal::Host,
+    input: &Option<String>,
+    capture: &Arc<Mutex<Capture>>,
+) -> Option<cpal::Stream> {
+    find(host, input, false).and_then(|device| {
+        open_recording(&device, Arc::clone(capture))
+            .and_then(|stream| {
+                stream.play()?;
+                Ok(stream)
+            })
+            .inspect_err(|err| log::warn!("entrada de áudio falhou: {err}"))
+            .ok()
+    })
 }
 
 fn config(device: &cpal::Device, output: bool) -> Result<cpal::StreamConfig, cpal::Error> {
@@ -243,6 +303,7 @@ fn open_playback(device: &cpal::Device, ring: Arc<Ring>) -> Result<cpal::Stream,
                 ring.pop(&mut stereo[..have]);
             }
             EFFECTS.mix_into(&mut stereo);
+            ring.apply_volume(&mut stereo);
             for (frame, lr) in out.chunks_mut(channels).zip(stereo.chunks(2)) {
                 match frame {
                     [mono] => *mono = (lr[0] + lr[1]) / 2.0,

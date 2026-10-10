@@ -1,6 +1,6 @@
 //! The voice action row's soundboard picker (#12) and the DJ window (#15).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use egui::RichText;
 
@@ -15,12 +15,22 @@ use crate::theme;
 #[derive(Default)]
 pub struct VoiceExtras {
     pub soundboard_open: bool,
-    /// Sounds per guild; an empty entry means "loading".
+    /// Successfully loaded sounds per guild, including genuinely empty lists.
     pub sounds: HashMap<String, Vec<SoundboardSound>>,
+    pub soundboard_loading: HashSet<String>,
+    pub soundboard_errors: HashMap<String, String>,
     pub soundboard_error: Option<String>,
     pub music: Music,
     pub music_open: bool,
     pub music_input: String,
+}
+
+impl VoiceExtras {
+    fn begin_soundboard_load(&mut self, guild_id: &str) -> bool {
+        !self.sounds.contains_key(guild_id)
+            && !self.soundboard_errors.contains_key(guild_id)
+            && self.soundboard_loading.insert(guild_id.to_string())
+    }
 }
 
 pub fn show(app: &mut VesktopApp, ctx: &egui::Context) {
@@ -40,8 +50,7 @@ pub fn show(app: &mut VesktopApp, ctx: &egui::Context) {
 }
 
 fn soundboard(app: &mut VesktopApp, ctx: &egui::Context, guild_id: &str, channel_id: &str) {
-    if !app.extras.sounds.contains_key(guild_id) {
-        app.extras.sounds.insert(guild_id.to_string(), Vec::new());
+    if app.extras.begin_soundboard_load(guild_id) {
         app.send(Command::LoadSoundboard {
             guild_id: guild_id.to_string(),
         });
@@ -56,24 +65,45 @@ fn soundboard(app: &mut VesktopApp, ctx: &egui::Context, guild_id: &str, channel
             if let Some(error) = &app.extras.soundboard_error {
                 ui.label(RichText::new(error).small().color(theme::RED));
             }
-            let sounds = &app.extras.sounds[guild_id];
-            if sounds.is_empty() {
+            if let Some(error) = app.extras.soundboard_errors.get(guild_id) {
+                ui.label(RichText::new(error).small().color(theme::RED));
+                if ui.button("Tentar de novo").clicked() {
+                    app.extras.soundboard_errors.remove(guild_id);
+                    app.extras.soundboard_loading.insert(guild_id.to_string());
+                    app.send(Command::LoadSoundboard {
+                        guild_id: guild_id.to_string(),
+                    });
+                }
+                return;
+            }
+            if app.extras.soundboard_loading.contains(guild_id) {
                 ui.label(RichText::new("Carregando sons…").color(theme::MUTED));
                 return;
             }
-            egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    for sound in sounds.iter().filter(|sound| sound.available) {
-                        let label = match &sound.emoji_name {
-                            Some(emoji) => format!("{emoji} {}", sound.name),
-                            None => sound.name.clone(),
-                        };
-                        if ui.button(label).clicked() {
-                            play = Some(sound.clone());
+            let Some(sounds) = app.extras.sounds.get(guild_id) else {
+                return;
+            };
+            if !sounds.iter().any(|sound| sound.available) {
+                ui.label(
+                    RichText::new("Nenhum som disponível neste servidor.").color(theme::MUTED),
+                );
+                return;
+            }
+            egui::ScrollArea::vertical()
+                .max_height(320.0)
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        for sound in sounds.iter().filter(|sound| sound.available) {
+                            let label = match &sound.emoji_name {
+                                Some(emoji) => format!("{emoji} {}", sound.name),
+                                None => sound.name.clone(),
+                            };
+                            if ui.button(label).clicked() {
+                                play = Some(sound.clone());
+                            }
                         }
-                    }
+                    });
                 });
-            });
         });
     app.extras.soundboard_open = open;
     if let Some(sound) = play {
@@ -112,7 +142,11 @@ fn music_window(app: &mut VesktopApp, ctx: &egui::Context) {
                 (
                     state.now.clone(),
                     state.paused,
-                    state.queue.iter().map(|t| music::label(t)).collect::<Vec<_>>(),
+                    state
+                        .queue
+                        .iter()
+                        .map(|t| music::label(t))
+                        .collect::<Vec<_>>(),
                     state.error.clone(),
                 )
             };
@@ -124,7 +158,10 @@ fn music_window(app: &mut VesktopApp, ctx: &egui::Context) {
                 Some(title) => {
                     ui.label(RichText::new(format!("▶ {title}")).strong());
                     ui.horizontal(|ui| {
-                        if ui.button(if paused { "Continuar" } else { "Pausar" }).clicked() {
+                        if ui
+                            .button(if paused { "Continuar" } else { "Pausar" })
+                            .clicked()
+                        {
                             extras.music.toggle_pause();
                         }
                         if ui.button("Pular").clicked() {
@@ -141,7 +178,11 @@ fn music_window(app: &mut VesktopApp, ctx: &egui::Context) {
             }
             let mut volume = *extras.music.volume.lock().unwrap() * 100.0;
             if ui
-                .add(egui::Slider::new(&mut volume, 0.0..=100.0).text("Volume").suffix("%"))
+                .add(
+                    egui::Slider::new(&mut volume, 0.0..=100.0)
+                        .text("Volume")
+                        .suffix("%"),
+                )
                 .changed()
             {
                 *extras.music.volume.lock().unwrap() = volume / 100.0;
@@ -163,11 +204,7 @@ fn music_window(app: &mut VesktopApp, ctx: &egui::Context) {
 
 /// The tone for another member's voice-state change, seen from our
 /// channel: arriving, leaving, or starting/stopping a stream in it.
-pub fn roster_sound(
-    my_channel: &str,
-    old: Option<&VoiceState>,
-    new: &VoiceState,
-) -> Option<Sound> {
+pub fn roster_sound(my_channel: &str, old: Option<&VoiceState>, new: &VoiceState) -> Option<Sound> {
     let here = |state: &VoiceState| state.channel_id.as_deref() == Some(my_channel);
     let was_here = old.is_some_and(here);
     let streamed = old.is_some_and(|old| was_here && old.self_stream);
@@ -193,16 +230,47 @@ mod tests {
     }
 
     #[test]
+    fn soundboard_load_is_deduplicated_and_empty_success_is_final() {
+        let mut extras = VoiceExtras::default();
+        assert!(extras.begin_soundboard_load("a"));
+        assert!(!extras.begin_soundboard_load("a"));
+        extras.soundboard_loading.remove("a");
+        extras
+            .soundboard_errors
+            .insert("a".into(), "offline".into());
+        assert!(!extras.begin_soundboard_load("a"));
+        // Explicit retry permits a new request, without retrying every frame.
+        extras.soundboard_errors.remove("a");
+        assert!(extras.begin_soundboard_load("a"));
+        extras.soundboard_loading.remove("a");
+        extras.sounds.insert("a".into(), Vec::new());
+        assert!(!extras.begin_soundboard_load("a"));
+        assert!(extras.begin_soundboard_load("b"));
+    }
+
+    #[test]
     fn roster_changes_map_to_tones() {
         let here = state(Some("c"), false);
         let live = state(Some("c"), true);
         let away = state(Some("x"), false);
         let gone = state(None, false);
         assert!(matches!(roster_sound("c", None, &here), Some(Sound::Join)));
-        assert!(matches!(roster_sound("c", Some(&away), &here), Some(Sound::Join)));
-        assert!(matches!(roster_sound("c", Some(&here), &gone), Some(Sound::Leave)));
-        assert!(matches!(roster_sound("c", Some(&here), &live), Some(Sound::StreamStart)));
-        assert!(matches!(roster_sound("c", Some(&live), &here), Some(Sound::StreamStop)));
+        assert!(matches!(
+            roster_sound("c", Some(&away), &here),
+            Some(Sound::Join)
+        ));
+        assert!(matches!(
+            roster_sound("c", Some(&here), &gone),
+            Some(Sound::Leave)
+        ));
+        assert!(matches!(
+            roster_sound("c", Some(&here), &live),
+            Some(Sound::StreamStart)
+        ));
+        assert!(matches!(
+            roster_sound("c", Some(&live), &here),
+            Some(Sound::StreamStop)
+        ));
         assert!(roster_sound("c", Some(&here), &here).is_none());
         assert!(roster_sound("c", Some(&away), &gone).is_none());
     }

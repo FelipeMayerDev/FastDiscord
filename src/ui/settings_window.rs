@@ -150,8 +150,7 @@ fn appearance_settings(app: &mut VesktopApp, ui: &mut egui::Ui) {
     });
     ui.horizontal(|ui| {
         ui.label("Zoom:");
-        let response =
-            ui.add(egui::Slider::new(&mut app.settings.zoom, 0.5..=2.0).step_by(0.05));
+        let response = ui.add(egui::Slider::new(&mut app.settings.zoom, 0.5..=2.0).step_by(0.05));
         if response.changed() {
             app.settings.save();
         }
@@ -189,6 +188,8 @@ fn voice_settings(app: &mut VesktopApp, ui: &mut egui::Ui) {
         ui.label("Entrada:");
         changed |= device_combo(app, ui, false);
     });
+    changed |= volume_control(app, ui, true);
+    changed |= volume_control(app, ui, false);
     changed |= input_controls(app, ui);
     if changed {
         apply_voice_change(app);
@@ -214,6 +215,8 @@ pub fn voice_devices_menu(app: &mut VesktopApp, ui: &mut egui::Ui, output: bool)
     ui.menu_button(device_label(&devices, current), |ui| {
         changed |= device_choices(app, ui, &devices, output);
     });
+    ui.separator();
+    changed |= volume_control(app, ui, output);
     if !output {
         ui.separator();
         changed |= input_controls(app, ui);
@@ -287,6 +290,16 @@ fn device_choices(
         }
     }
     changed
+}
+
+fn volume_control(app: &mut VesktopApp, ui: &mut egui::Ui, output: bool) -> bool {
+    let (volume, label) = if output {
+        (&mut app.settings.output_volume, "Volume de saída")
+    } else {
+        (&mut app.settings.input_volume, "Volume de entrada")
+    };
+    ui.add(egui::Slider::new(volume, 0..=200).text(label).suffix("%"))
+        .changed()
 }
 
 /// Sensitivity slider and noise suppression; true when either changed.

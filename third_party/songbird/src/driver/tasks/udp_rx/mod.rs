@@ -102,7 +102,10 @@ impl UdpRx {
                                 }
                             },
                             Err(e) => {
-                                warn!("Decode error for SSRC {ssrc}: {e:?}");
+                                match &e {
+                                    super::error::Error::Opus(opus) => warn!("Opus decode error for SSRC {ssrc}: {opus}"),
+                                    _ => warn!("Decode error for SSRC {ssrc}: {e:?}"),
+                                }
                                 tick.silent.insert(*ssrc);
                             },
                         }
@@ -225,7 +228,7 @@ impl UdpRx {
 
                         let has_marker = body_length >= 11 && body[body_length - DAVE_MAGIC_MARKER.len()..] == DAVE_MAGIC_MARKER[..];
 
-                        if decrypted && dave_active {
+                        if decrypted && (dave_active || has_marker) {
                             if has_marker {
                                 let mut decrypted_successfully = false;
                                 // FastDiscord diagnostics: why an E2EE frame
@@ -279,7 +282,17 @@ impl UdpRx {
                 }
 
                 if should_drop {
-                    return; 
+                    // Desync detection needs arrivals even when MLS cannot decode them.
+                    let (payload_offset, payload_end_pad, _) = packet_data.unwrap();
+                    drop(rtp);
+                    drop(interconnect.events.send(EventMessage::FireCoreEvent(
+                        CoreContext::RtpPacket(InternalRtpPacket {
+                            packet: packet.freeze(),
+                            payload_offset,
+                            payload_end_pad,
+                        }),
+                    )));
+                    return;
                 }
 
                 let (rtp_body_start, rtp_body_tail, decrypted) = packet_data.unwrap_or_else(|| {

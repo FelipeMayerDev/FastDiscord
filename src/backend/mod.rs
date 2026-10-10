@@ -6,6 +6,7 @@ pub mod audio;
 pub mod capture;
 pub mod encode;
 pub mod events;
+pub mod file_picker;
 pub mod fockytv;
 pub mod gateway;
 pub mod music;

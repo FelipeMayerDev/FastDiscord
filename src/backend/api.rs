@@ -5,7 +5,7 @@
 use serde::de::DeserializeOwned;
 
 use crate::backend::soundboard::SoundboardSound;
-use crate::model::{Channel, Guild, Member, Message, User};
+use crate::model::{Channel, Guild, Member, Message, Relationship, User};
 
 pub const REST_BASE: &str = "https://discord.com/api/v10";
 pub const USER_AGENT: &str = concat!(
@@ -114,6 +114,80 @@ impl Api {
         self.get_json("/users/@me/channels", &[]).await
     }
 
+    pub async fn relationships(&self) -> ApiResult<Vec<Relationship>> {
+        self.get_json("/users/@me/relationships", &[]).await
+    }
+
+    pub async fn request_friend(&self, username: &str) -> ApiResult<()> {
+        let resp = self
+            .http
+            .post(format!("{REST_BASE}/users/@me/relationships"))
+            .header(reqwest::header::AUTHORIZATION, &self.token)
+            .json(&serde_json::json!({ "username": username, "discriminator": null }))
+            .send()
+            .await?;
+        Self::check_status(resp).await?;
+        Ok(())
+    }
+
+    pub async fn accept_friend(&self, user_id: &str) -> ApiResult<()> {
+        let resp = self
+            .http
+            .put(format!("{REST_BASE}/users/@me/relationships/{user_id}"))
+            .header(reqwest::header::AUTHORIZATION, &self.token)
+            .json(&serde_json::json!({ "type": 1 }))
+            .send()
+            .await?;
+        Self::check_status(resp).await?;
+        Ok(())
+    }
+
+    pub async fn remove_relationship(&self, user_id: &str) -> ApiResult<()> {
+        let resp = self
+            .http
+            .delete(format!("{REST_BASE}/users/@me/relationships/{user_id}"))
+            .header(reqwest::header::AUTHORIZATION, &self.token)
+            .send()
+            .await?;
+        Self::check_status(resp).await?;
+        Ok(())
+    }
+
+    pub async fn open_dm(&self, user_id: &str) -> ApiResult<Channel> {
+        let resp = self
+            .http
+            .post(format!("{REST_BASE}/users/@me/channels"))
+            .header(reqwest::header::AUTHORIZATION, &self.token)
+            .json(&serde_json::json!({ "recipient_id": user_id }))
+            .send()
+            .await?;
+        Ok(Self::check_status(resp).await?.json().await?)
+    }
+
+    pub async fn send_attachment(
+        &self,
+        channel_id: &str,
+        content: &str,
+        path: &std::path::Path,
+    ) -> ApiResult<Message> {
+        let (filename, bytes) = read_attachment(path)?;
+        let payload = serde_json::json!({ "content": content, "attachments": [{ "id": 0, "filename": filename }] });
+        let form = reqwest::multipart::Form::new()
+            .text("payload_json", payload.to_string())
+            .part(
+                "files[0]",
+                reqwest::multipart::Part::bytes(bytes).file_name(filename.to_owned()),
+            );
+        let resp = self
+            .http
+            .post(format!("{REST_BASE}/channels/{channel_id}/messages"))
+            .header(reqwest::header::AUTHORIZATION, &self.token)
+            .multipart(form)
+            .send()
+            .await?;
+        Ok(Self::check_status(resp).await?.json().await?)
+    }
+
     pub async fn guild_channels(&self, guild_id: &str) -> ApiResult<Vec<Channel>> {
         self.get_json(&format!("/guilds/{guild_id}/channels"), &[])
             .await
@@ -138,7 +212,7 @@ impl Api {
         let mut messages: Vec<Message> = self
             .get_json(&format!("/channels/{channel_id}/messages"), &query)
             .await?;
-        messages.reverse();
+        messages.sort_by(|a, b| (a.id.len(), &a.id).cmp(&(b.id.len(), &b.id)));
         Ok(messages)
     }
 
@@ -193,7 +267,9 @@ impl Api {
     ) -> ApiResult<()> {
         let resp = self
             .http
-            .post(format!("{REST_BASE}/channels/{channel_id}/send-soundboard-sound"))
+            .post(format!(
+                "{REST_BASE}/channels/{channel_id}/send-soundboard-sound"
+            ))
             .header(reqwest::header::AUTHORIZATION, &self.token)
             .json(&serde_json::json!({
                 "sound_id": sound_id,
@@ -210,5 +286,55 @@ impl Api {
     pub async fn guild_member(&self, guild_id: &str, user_id: &str) -> ApiResult<Member> {
         self.get_json(&format!("/guilds/{guild_id}/members/{user_id}"), &[])
             .await
+    }
+}
+
+fn read_attachment(path: &std::path::Path) -> anyhow::Result<(String, Vec<u8>)> {
+    use std::io::Read;
+    const LIMIT: u64 = 10 * 1024 * 1024;
+    let metadata = std::fs::metadata(path)?;
+    anyhow::ensure!(metadata.is_file(), "Escolha um arquivo regular");
+    anyhow::ensure!(metadata.len() <= LIMIT, "Arquivo maior que 10 MB");
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("Nome de arquivo inválido"))?
+        .to_owned();
+    let file = std::fs::File::open(path)?;
+    anyhow::ensure!(file.metadata()?.is_file(), "Escolha um arquivo regular");
+    let mut bytes = Vec::new();
+    file.take(LIMIT + 1).read_to_end(&mut bytes)?;
+    anyhow::ensure!(bytes.len() as u64 <= LIMIT, "Arquivo maior que 10 MB");
+    Ok((filename, bytes))
+}
+
+#[cfg(test)]
+mod attachment_tests {
+    use super::*;
+
+    #[test]
+    fn attachment_rejects_directories_and_large_files_and_preserves_bytes() {
+        let dir = std::env::temp_dir().join(format!(
+            "fastdiscord-upload-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        assert!(read_attachment(&dir).is_err());
+        let path = dir.join("imagem.png");
+        std::fs::write(&path, b"content").unwrap();
+        assert_eq!(
+            read_attachment(&path).unwrap(),
+            ("imagem.png".into(), b"content".to_vec())
+        );
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(10 * 1024 * 1024 + 1)
+            .unwrap();
+        assert!(read_attachment(&path).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -2,8 +2,8 @@
 //! circle icons that morph to a rounded square on hover, pill indicators on
 //! the left edge and a red badge for mentions.
 
-use egui::{Align2, CornerRadius, FontId, Image, Sense, TextureHandle, Vec2, pos2};
 use egui::Id;
+use egui::{Align2, CornerRadius, FontId, Image, Sense, TextureHandle, Vec2, pos2};
 
 use crate::app::{ChannelRef, VesktopApp};
 use crate::theme;
@@ -128,6 +128,9 @@ fn rail_button(
         Vec2::splat(BUTTON),
     );
     let response = ui.interact(rect, id, Sense::click());
+    let press =
+        ctx.animate_bool_with_time(id.with("press"), response.is_pointer_button_down_on(), 0.08);
+    let rect = rect.shrink(2.0 * press);
 
     let t = ctx.animate_bool_with_time(id.with("shape"), selected || response.hovered(), ANIM);
     let radius = RADIUS_IDLE + (RADIUS_ACTIVE - RADIUS_IDLE) * t;
