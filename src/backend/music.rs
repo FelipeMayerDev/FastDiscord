@@ -1,7 +1,8 @@
 //! The DJ (#15): a queue of links or searches streamed through
 //! `yt-dlp | ffmpeg` as 48 kHz stereo PCM — nothing is saved to disk — into
 //! the channel (mixed with the mic, `EFFECTS.send`) and our own speakers
-//! (`EFFECTS.music`). yt-dlp and ffmpeg are runtime dependencies.
+//! (`EFFECTS.music`). Windows packages ship the helpers under tools/;
+//! source/Linux builds use the tools installed on PATH.
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read};
@@ -267,7 +268,13 @@ impl Drop for Kill {
 
 /// No console window flashing up for the helpers on Windows.
 fn hidden(program: &str) -> Command {
-    #[cfg_attr(not(windows), allow(unused_mut))]
+    #[cfg(windows)]
+    let bundled = std::env::current_exe()
+        .ok()
+        .and_then(|exe| bundled_tool(program, &exe));
+    #[cfg(windows)]
+    let mut command = Command::new(bundled.as_deref().unwrap_or(std::path::Path::new(program)));
+    #[cfg(not(windows))]
     let mut command = Command::new(program);
     #[cfg(unix)]
     {
@@ -278,8 +285,40 @@ fn hidden(program: &str) -> Command {
     {
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        if program == "yt-dlp" {
+            configure_bundled_downloader(&mut command, bundled.as_deref());
+        }
     }
     command
+}
+
+#[cfg(any(windows, test))]
+fn bundled_tool(program: &str, exe: &std::path::Path) -> Option<std::path::PathBuf> {
+    if !matches!(program, "yt-dlp" | "ffmpeg" | "ffprobe" | "deno") {
+        return None;
+    }
+    let directory = exe.parent()?;
+    let name = format!("{program}.exe");
+    [directory.join("tools").join(&name), directory.join(name)]
+        .into_iter()
+        .find(|path| path.is_file())
+}
+
+#[cfg(any(windows, test))]
+fn configure_bundled_downloader(command: &mut Command, bundled: Option<&std::path::Path>) {
+    let Some(directory) = bundled.and_then(std::path::Path::parent) else {
+        return;
+    };
+    command.args(["--ignore-config", "--no-update", "--no-remote-components"]);
+    if directory.join("ffmpeg.exe").is_file() {
+        command.arg("--ffmpeg-location").arg(directory);
+    }
+    let deno = directory.join("deno.exe");
+    if deno.is_file() {
+        let mut runtime = std::ffi::OsString::from("deno:");
+        runtime.push(deno);
+        command.arg("--js-runtimes").arg(runtime);
+    }
 }
 
 fn kill_child(child: &mut Child) {
@@ -304,6 +343,53 @@ fn kill_child(child: &mut Child) {
             .status();
     }
     let _ = child.kill();
+}
+
+#[cfg(test)]
+mod bundled_tool_tests {
+    use super::*;
+
+    #[test]
+    fn bundled_helpers_resolve_without_path_and_keep_unicode_paths_literal() {
+        let directory = std::env::temp_dir().join(format!(
+            "fastdiscord DJ ç {}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let exe = directory.join("fastdiscord.exe");
+        assert!(bundled_tool("yt-dlp", &exe).is_none());
+        // Source/custom builds can also place a helper directly beside the app.
+        std::fs::write(directory.join("yt-dlp.exe"), []).unwrap();
+        assert_eq!(
+            bundled_tool("yt-dlp", &exe),
+            Some(directory.join("yt-dlp.exe"))
+        );
+        let tools = directory.join("tools");
+        std::fs::create_dir(&tools).unwrap();
+        for program in ["yt-dlp", "ffmpeg", "ffprobe", "deno"] {
+            std::fs::write(tools.join(format!("{program}.exe")), []).unwrap();
+            assert_eq!(
+                bundled_tool(program, &exe),
+                Some(tools.join(format!("{program}.exe")))
+            );
+        }
+        assert!(bundled_tool("taskkill", &exe).is_none());
+        let mut command = Command::new("yt-dlp");
+        configure_bundled_downloader(&mut command, bundled_tool("yt-dlp", &exe).as_deref());
+        let args = command.get_args().collect::<Vec<_>>();
+        assert_eq!(args[4], tools.as_os_str());
+        let mut deno = std::ffi::OsString::from("deno:");
+        deno.push(tools.join("deno.exe"));
+        assert_eq!(args[6], deno);
+        let mut fallback = Command::new("yt-dlp");
+        configure_bundled_downloader(&mut fallback, None);
+        assert_eq!(fallback.get_args().count(), 0);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 }
 
 #[cfg(all(test, unix))]

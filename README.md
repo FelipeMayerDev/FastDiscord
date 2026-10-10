@@ -25,7 +25,9 @@ e o Discord é falado nativamente — REST + Gateway sobre tokio.
 - Cancelamento de eco pelo servidor de som no Linux e por WASAPI no Windows
   quando o sistema e o dispositivo oferecem AEC; a interface informa quando
   o Windows precisa usar captura sem cancelamento.
-- Soundboard e DJ com fila, pausa e cancelamento; o DJ requer `yt-dlp` e `ffmpeg`.
+- Soundboard e DJ com fila, pausa e cancelamento; o pacote Windows inclui
+  `yt-dlp`, `ffmpeg`, `ffprobe` e Deno. No Linux/build local, instale as ferramentas
+  do DJ no sistema (Deno dá suporte completo ao YouTube no `yt-dlp` atual).
 - Compartilhamento de tela pelo FockyTV, sons do Discord, notificações de DMs e
   menções, configurações em abas e animações de hover, seleção e clique.
 - Configurações persistentes e bandeja experimental (`--features tray`).
@@ -42,6 +44,8 @@ Baixe na [página de releases](https://github.com/FelipeMayerDev/FastDiscord/rel
 (Windows, um único executável que se extrai em
 `%LOCALAPPDATA%\FastDiscord\<versão>` na primeira execução). Um `.desktop` de
 referência fica em [packaging/fastdiscord.desktop](packaging/fastdiscord.desktop).
+As versões, licenças e fontes dos auxiliares do DJ no Windows estão em
+[packaging/windows-dj.md](packaging/windows-dj.md).
 
 ## Build from Source
 

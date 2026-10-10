@@ -3,6 +3,7 @@
 pub mod channel_sidebar;
 pub mod chat;
 pub mod friends;
+pub mod icons;
 pub mod image_viewer;
 pub mod login;
 pub mod screen_share;
@@ -14,9 +15,21 @@ pub mod voice_processing;
 
 use egui::{Align2, Color32, CornerRadius, FontId, Image, Rect, Sense, TextureHandle, Vec2, pos2};
 
-/// Discord's hover fade: `from` → `to` over 100 ms while `on` holds.
+/// Reduced motion changes state immediately and schedules no animation frames.
+pub fn animate_bool(ctx: &egui::Context, id: egui::Id, on: bool, seconds: f32) -> f32 {
+    if ctx.data(|data| {
+        data.get_temp::<bool>(egui::Id::new("reduce_motion"))
+            .unwrap_or(false)
+    }) {
+        if on { 1.0 } else { 0.0 }
+    } else {
+        ctx.animate_bool_with_time(id, on, seconds)
+    }
+}
+
+/// Our short hover fade: `from` → `to` over 100 ms while `on` holds.
 pub fn fade(ui: &egui::Ui, id: egui::Id, on: bool, from: Color32, to: Color32) -> Color32 {
-    let t = ui.ctx().animate_bool_with_time(id.with("fade"), on, 0.1);
+    let t = animate_bool(ui.ctx(), id.with("fade"), on, 0.1);
     from.lerp_to_gamma(to, t)
 }
 
@@ -121,10 +134,9 @@ pub fn control_bg(ui: &egui::Ui, response: &egui::Response, selected: bool) -> C
         Color32::TRANSPARENT,
         crate::theme::HOVER,
     );
-    let selection = ui
-        .ctx()
-        .animate_bool_with_time(response.id.with("selection"), selected, 0.12);
-    let press = ui.ctx().animate_bool_with_time(
+    let selection = animate_bool(ui.ctx(), response.id.with("selection"), selected, 0.12);
+    let press = animate_bool(
+        ui.ctx(),
         response.id.with("press"),
         response.is_pointer_button_down_on(),
         0.08,
@@ -132,4 +144,16 @@ pub fn control_bg(ui: &egui::Ui, response: &egui::Response, selected: bool) -> C
     hover
         .lerp_to_gamma(crate::theme::SELECTED, selection)
         .lerp_to_gamma(crate::theme::BLURPLE.gamma_multiply(0.35), press)
+}
+
+#[cfg(test)]
+mod motion_tests {
+    #[test]
+    fn reduced_motion_uses_final_state_immediately() {
+        let ctx = egui::Context::default();
+        ctx.data_mut(|data| data.insert_temp(egui::Id::new("reduce_motion"), true));
+        let id = egui::Id::new("test_motion");
+        assert_eq!(super::animate_bool(&ctx, id, true, 0.12), 1.0);
+        assert_eq!(super::animate_bool(&ctx, id, false, 0.12), 0.0);
+    }
 }

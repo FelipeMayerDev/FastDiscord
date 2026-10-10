@@ -155,6 +155,18 @@ fn appearance_settings(app: &mut VesktopApp, ui: &mut egui::Ui) {
             app.settings.save();
         }
     });
+    if ui
+        .checkbox(
+            &mut app.settings.reduce_motion,
+            "Reduzir movimento da interface e GIFs",
+        )
+        .changed()
+    {
+        app.settings.save();
+        ui.ctx().data_mut(|data| {
+            data.insert_temp(egui::Id::new("reduce_motion"), app.settings.reduce_motion)
+        });
+    }
 }
 
 fn behavior_settings(app: &mut VesktopApp, ui: &mut egui::Ui) {
@@ -375,6 +387,13 @@ fn screen_share_settings(app: &mut VesktopApp, ui: &mut egui::Ui) {
                 changed = true;
             }
         });
+        ui.label(
+            RichText::new("Nick: até 32 letras sem acentos, números, _, - ou .; sem espaços.")
+                .color(theme::MUTED),
+        );
+        if let Err(error) = crate::backend::fockytv::validate_stream_key(&app.fockytv_nick()) {
+            ui.label(RichText::new(error).color(theme::RED));
+        }
     });
     if changed {
         app.settings.save();

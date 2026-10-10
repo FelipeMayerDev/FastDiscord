@@ -35,6 +35,46 @@ cp target/release/fastdiscord.exe "$OUT/"
 # the exe, where Windows looks for the plugins' dependencies too.
 cp "$GST"/bin/*.dll "$OUT/"
 
+echo "── DJ helpers"
+TOOLS=.cache/windows-dj
+mkdir -p "$TOOLS" "$OUT/tools" "$OUT/licenses"
+# Pin executable downloads and verify cached files too.
+# shortcut: BtbN retains monthly builds for two years; refresh this pin before 2028-09.
+download() {
+    local url=$1 file=$2 checksum=$3
+    if [ -f "$file" ] && printf '%s  %s\n' "$checksum" "$file" | sha256sum -c --status; then
+        return
+    fi
+    curl -fLsS --retry 3 -o "$file" "$url"
+    printf '%s  %s\n' "$checksum" "$file" | sha256sum -c
+}
+download https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp.exe \
+    "$TOOLS/yt-dlp.exe" 66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c0562af101dd3e7a
+download https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-30-13-08/ffmpeg-n9.0.2-17-g2a571b6068-win64-lgpl-shared-9.0.zip \
+    "$TOOLS/ffmpeg.zip" 7157177b8a6cb2174c1650ba8c71b363f2c78cba5330f88c4c02cf5b2b880646
+download https://github.com/denoland/deno/releases/download/v2.9.7/deno-x86_64-pc-windows-msvc.zip \
+    "$TOOLS/deno.zip" a0c3101b4158d1dfb7d6a78a7bf0f3de80c96bb423c152beec8beb22786f2238
+rm -rf "$TOOLS/ffmpeg"
+7z x -y "-o$TOOLS/ffmpeg" "$TOOLS/ffmpeg.zip" >/dev/null
+FFMPEG="$TOOLS/ffmpeg/ffmpeg-n9.0.2-17-g2a571b6068-win64-lgpl-shared-9.0"
+# Keep FFmpeg DLLs away from GStreamer's DLLs, and omit the unused ffplay.
+cp "$FFMPEG"/bin/*.dll "$FFMPEG/bin/ffmpeg.exe" "$FFMPEG/bin/ffprobe.exe" "$OUT/tools/"
+cp "$TOOLS/yt-dlp.exe" "$OUT/tools/"
+7z x -y "-o$OUT/tools" "$TOOLS/deno.zip" >/dev/null
+cp "$FFMPEG/LICENSE.txt" "$OUT/licenses/ffmpeg-LICENSE.txt"
+for document in LICENSE THIRD_PARTY_LICENSES.txt; do
+    curl -fLsS --retry 3 "https://raw.githubusercontent.com/yt-dlp/yt-dlp/2026.08.19/$document" \
+        -o "$OUT/licenses/yt-dlp-$document"
+done
+curl -fLsS --retry 3 https://raw.githubusercontent.com/denoland/deno/v2.9.7/LICENSE.md \
+    -o "$OUT/licenses/deno-LICENSE.md"
+cp packaging/windows-dj.md "$OUT/licenses/DJ-SOURCES.md"
+# Fail the Windows build here if any bundled helper or its DLLs cannot run.
+"$OUT/tools/yt-dlp.exe" --ignore-config --version
+"$OUT/tools/ffmpeg.exe" -version
+"$OUT/tools/ffprobe.exe" -version
+"$OUT/tools/deno.exe" --version
+
 declare -A SEEN
 copy_plugin() {
     local so

@@ -1,126 +1,53 @@
-# UI/UX plan: splash, QR login, server rail and chat timeline
+# Interface: referências do Discord e implementação
 
-The only UI Electron Vesktop draws itself is the **splash**
-(`src/main/splash.ts`, `static/views/splash.html`): a 300×350 frameless
-window with the animated `static/splash.webp` (128 px), "Loading
-Vesktop..." and a status line (`updateSplashMessage`, e.g. "Failed to load
-Discord: …"). Everything else (QR login, server rail, timeline) is
-discord.com's UI, so Discord web is the reference there.
+Pesquisa atualizada em 10 de outubro de 2026. A interface é nativa em egui;
+os desenhos são vetoriais próprios, sem depender de fontes de emoji ou de
+arquivos de animação proprietários do Discord.
 
-APIs checked against the pinned versions: `egui::Image::corner_radius`,
-`ctx.animate_bool`, `egui_extras` animated WebP loader (`webp` feature),
-`qrcode` `EcLevel::H`.
+## Referências
 
-## 1. Startup splash
+- [Discord Design Systems, agosto de 2026](https://discord.com/blog/improving-mobile-with-squircles-styles-and-spacing):
+  pessoas e DMs usam círculos; servidores e apps usam formas com cantos
+  arredondados. O artigo também descreve a redução de controles na barra
+  de mensagens para deixar mais espaço para escrever.
+- [Justin Lemmon, animações de ícones para Discord](https://www.justinlemmon.com/projects/test-icon-animations):
+  animações durante interações, com movimento simples, rápido e coerente
+  entre os ícones. O trabalho original usa vetores exportados em JSON.
+- [Discord, redução de movimento](https://support.discord.com/hc/en-us/articles/360040613412-Reduced-Motion-Setting):
+  opção de acessibilidade para reduzir animações da interface.
 
-Today, with a saved token the app opens on the login screen showing
-"Conectando…" next to the token field.
+As durações usadas no FastDiscord são escolhas da implementação; as fontes
+acima não publicam valores exatos para cada controle.
 
-- Dedicated splash state: saved token and no `READY` yet → splash, not
-  login.
-- The FastDiscord logo pulsing (`static/splash.webp`, animated via
-  `egui_extras` with the `webp` + `image` features), "Carregando
-  FastDiscord…" under it, plus a status line.
-- Status follows the real steps: "Conectando ao Discord…", "Carregando
-  servidores…", "Reconectando em 5s…"; on error, **Tentar de novo** and
-  **Sair da conta** buttons.
-- Lives inside the main window rather than a separate one: Vesktop's splash
-  window covers Electron's slow startup, egui opens instantly.
+## Aplicação no cliente
 
-## 2. QR login
+Avatares continuam circulares, com status visível nas conversas individuais.
+Servidores mantêm cantos arredondados e indicadores laterais de seleção e
+mensagens não lidas. Os controles vetoriais usam cores do tema, contornos
+consistentes e tooltips em português.
 
-Follow Discord's layout:
+Hover, seleção e pressão têm transições curtas, sem animação permanente em
+controles parados. A opção **Reduzir movimento da interface e GIFs**, em
+Configurações → Aparência, torna essas transições imediatas e mantém os GIFs
+no primeiro quadro. Transmissões de vídeo continuam sendo conteúdo reproduzido.
 
-- Two-column card: left, "Boas-vindas de volta!" and token login collapsed
-  as an advanced option; right, the QR with "Entrar com código QR" and
-  "Escaneie com o app do Discord no celular". Stacks on narrow windows.
-- FastDiscord logo in the middle of the QR; switch to `EcLevel::H` so it still
-  scans.
-- After scanning: avatar and name from `pending_ticket` (it carries id and
-  avatar hash), "Confirme no seu celular" and a "Começar de novo" link.
-- On expiry: regenerate silently, as Discord does. The retry button is
-  only for real failures.
+**Atividades** está fora da interface enquanto não houver implementação.
+As ações de voz disponíveis são compartilhamento de tela, soundboard e DJ;
+não deve haver um espaço reservado para uma quarta ação.
 
-## 3. Server rail
+## Já implementado
 
-- **Scrolling:** Home (DMs) button and a separator pinned on top, guilds in
-  a `ScrollArea` with a hidden scrollbar.
-- **Order:** Discord's own. `/users/@me/guilds` ignores the user's order;
-  the real one is `user_settings.guild_folders` in `READY`. Folders render
-  as in Discord (2×2 mini icons in the folder color, expand on click).
-  **Validated (outubro/2026):** user-account `READY` no longer carries
-  `guild_folders` as JSON — `user_guild_settings` only has per-guild
-  overrides; the folders live solely in `user_settings_proto` (protobuf),
-  so rendering them means decoding that blob (prost schema). Deferred
-  until the settings-proto work in PORT.md.
-- **Rounded icons** (`src/ui/server_rail.rs` draws them square today):
-  - Circle via `Image::corner_radius(24)`, animating to a rounded square
-    (radius 16) on hover/selection with `animate_bool`.
-  - Discord's left pill: 8 px dot for unread, 20 px bar on hover, 40 px
-    when selected.
-  - Mentions as a red badge with the count.
-- **Drag to reorder:** later; persisting order means writing Discord's
-  settings proto.
+- Noto Sans e família em negrito; cores e espaçamento compartilhados.
+- Separadores de datas, agrupamento de mensagens, respostas, indicador de
+  novas mensagens, digitação, caixa multilinha e links clicáveis.
+- Avatares e status, convites com cartão, GIFs e visualizador de imagens.
+- Amigos e solicitações, busca no histórico em cache, arquivos, emoji básico
+  e envio de GIF por URL.
+- Canal de voz ativo verde, tempo conectado, soundboard e DJ.
 
-## 4. DM chat timeline, Discord-style
+## Pendências de paridade
 
-Today every message repeats a square avatar, name and time.
-
-- **Date separators:** a horizontal rule with "6 de outubro de 2026" in the
-  middle (`util::day_label` already exists, unused).
-- **Grouping:** consecutive messages from the same author, under 7 minutes
-  apart and not replies, render compact (no avatar or name); hovering
-  shows the time in the left gutter.
-- **Header times:** "Hoje às 14:32", "Ontem às 09:10" or the full date,
-  exact time in the tooltip.
-- **New messages:** red "NOVAS" divider at the first unread, and a "Ir para
-  o presente" button when scrolled up.
-- **Conversation start:** once there's no more history, large avatar, name
-  and "Este é o começo do seu histórico de mensagens diretas com @fulano",
-  replacing the "Carregar mensagens anteriores" button.
-- **Replies:** curved connector with a mini avatar and an excerpt of the
-  original above the message; `model.rs` reads `message_reference` and
-  `referenced_message`.
-- **Round avatars** everywhere; hover highlights the whole message row.
-- **DM sidebar:** ordered by most recent conversation (`last_message_id`,
-  not read by `model.rs` yet), round avatar and a status dot.
-- **"Fulano está digitando…"** under the compose box from `TYPING_START`;
-  send ours via `POST /typing`.
-- **Compose box:** Enter sends, Shift+Enter adds a newline (single-line
-  today); rounded, Discord's background.
-
-## 5. General
-
-- **User panel** at the bottom of the channel sidebar replacing the status
-  bar: avatar, name, status, mic/headset/settings buttons. It's the same
-  panel voice phase 1 needs ([VOICE.md](VOICE.md)).
-- **Inline image attachments** (the `ImageCache` exists), **clickable
-  links** and **embeds** with their color bar (already on the
-  [PORT.md](PORT.md) roadmap).
-- **Visual consistency:** single spacing and corner-radius tokens in
-  `theme.rs`, pointer cursor on everything clickable, consistent tooltips.
-- **Shortcuts:** Alt+↑/↓ to switch channels, Esc closes settings, Ctrl+K
-  quick switcher (last).
-
-## Order
-
-1. Server rail: rounded icons, scrolling, pill indicators. Quick and
-   visible.
-2. Chat timeline: separators, grouping, date headers. Biggest daily impact.
-3. Splash and the new QR login.
-4. Server order and folders (depends on validating `READY`).
-5. Replies, typing indicator, multiline compose and the rest.
-
-## 6. Discord parity pass (#5, #17)
-
-Done: Noto Sans (OFL, `assets/fonts`) with a bold family for names and
-headings (egui's `strong()` only brightens), muted read channels with the
-white unread pill, 34/42 px channel/DM rows, category chevrons, author name
-followed by the time, mention pills in `--mention-*` colors, the yellow
-highlight + bar on messages that ping you, embed cards with their color
-bar, and 100 ms hover fades (`ui::fade`) on rows, icon buttons and messages.
-The rail's pill and icon morph were already animated.
-
-Left out: gg sans itself (proprietary), embed fields/footer/author/
-thumbnail, reactions, role colors for names (needs guild members + roles),
-the channel-row icons as SVG (still text glyphs), and the member list.
+Pastas e ordem de servidores dependem do settings protobuf do Discord.
+Reações, threads, pins e renderização completa de emojis personalizados
+continuam no roteiro de [PORT.md](PORT.md). Os nomes e capacidades dos
+controles devem acompanhar recursos realmente implementados.

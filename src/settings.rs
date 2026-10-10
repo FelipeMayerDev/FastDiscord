@@ -23,6 +23,7 @@ pub struct Settings {
     pub theme: Theme,
     /// Interface zoom multiplier on top of the native scale factor.
     pub zoom: f32,
+    pub reduce_motion: bool,
     pub selected_guild_id: Option<String>,
     pub selected_channel_id: Option<String>,
     /// Last open channel per guild, so switching servers restores context.
@@ -69,6 +70,7 @@ impl Default for Settings {
             token: None,
             theme: Theme::Dark,
             zoom: 1.0,
+            reduce_motion: false,
             selected_guild_id: None,
             selected_channel_id: None,
             last_channel_by_guild: HashMap::new(),
@@ -135,6 +137,7 @@ mod tests {
         let mut settings = Settings::default();
         settings.theme = Theme::Light;
         settings.zoom = 1.25;
+        settings.reduce_motion = true;
         settings.input_volume = 75;
         settings.output_volume = 150;
         settings.token = Some("abc".to_string());
@@ -146,6 +149,7 @@ mod tests {
         let back: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(back.theme, Theme::Light);
         assert_eq!(back.zoom, 1.25);
+        assert!(back.reduce_motion);
         assert_eq!(back.input_volume, 75);
         assert_eq!(back.output_volume, 150);
         assert_eq!(back.token.as_deref(), Some("abc"));
@@ -159,6 +163,7 @@ mod tests {
     fn partial_json_fills_defaults() {
         let back: Settings = serde_json::from_str("{}").unwrap();
         assert_eq!(back.theme, Theme::Dark);
+        assert!(!back.reduce_motion);
         assert!((back.zoom - 1.0).abs() < f32::EPSILON);
         assert_eq!(back.token, None);
         assert_eq!(back.input_volume, 100);

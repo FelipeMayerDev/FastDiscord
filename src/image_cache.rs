@@ -92,7 +92,12 @@ impl ImageCache {
         }
 
         let entry = self.textures.get(url)?;
-        if entry.frames.len() == 1 {
+        if entry.frames.len() == 1
+            || ctx.data(|data| {
+                data.get_temp::<bool>(egui::Id::new("reduce_motion"))
+                    .unwrap_or(false)
+            })
+        {
             return entry.frames.first().cloned();
         }
         let now = Duration::from_secs_f64(ctx.input(|input| input.time));
@@ -169,6 +174,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn reduced_motion_keeps_gif_on_first_frame() {
+        let ctx = egui::Context::default();
+        ctx.data_mut(|data| data.insert_temp(egui::Id::new("reduce_motion"), true));
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let first = ctx.load_texture(
+            "first",
+            egui::ColorImage::new([1, 1], vec![egui::Color32::RED]),
+            egui::TextureOptions::LINEAR,
+        );
+        let second = ctx.load_texture(
+            "second",
+            egui::ColorImage::new([1, 1], vec![egui::Color32::BLUE]),
+            egui::TextureOptions::LINEAR,
+        );
+        let mut cache = ImageCache::new(64);
+        cache.textures.insert(
+            "cached".into(),
+            Entry {
+                frames: vec![first.clone(), second],
+                delays: vec![Duration::from_millis(50); 2],
+            },
+        );
+        assert_eq!(
+            cache.get(&ctx, rt.handle(), "cached").unwrap().id(),
+            first.id()
+        );
+    }
+
+    #[test]
     fn gif_frames_decode_and_play_in_order() {
         let mut bytes = Vec::new();
         {
@@ -187,8 +223,17 @@ mod tests {
 
         let delays: Vec<_> = frames.iter().map(|(_, delay)| *delay).collect();
         assert_eq!(delays, [Duration::from_millis(50); 2]);
-        assert_eq!(frame_at(&delays, Duration::from_millis(10)), (0, Duration::from_millis(40)));
-        assert_eq!(frame_at(&delays, Duration::from_millis(60)), (1, Duration::from_millis(40)));
-        assert_eq!(frame_at(&delays, Duration::from_millis(110)), (0, Duration::from_millis(40)));
+        assert_eq!(
+            frame_at(&delays, Duration::from_millis(10)),
+            (0, Duration::from_millis(40))
+        );
+        assert_eq!(
+            frame_at(&delays, Duration::from_millis(60)),
+            (1, Duration::from_millis(40))
+        );
+        assert_eq!(
+            frame_at(&delays, Duration::from_millis(110)),
+            (0, Duration::from_millis(40))
+        );
     }
 }

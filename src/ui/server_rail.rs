@@ -1,5 +1,5 @@
 //! Left rail: the DMs home button and the guild icon list, Discord-style —
-//! circle icons that morph to a rounded square on hover, pill indicators on
+//! rounded square icons with short hover responses, pill indicators on
 //! the left edge and a red badge for mentions.
 
 use egui::Id;
@@ -10,10 +10,9 @@ use crate::theme;
 use crate::util;
 
 const BUTTON: f32 = 48.0;
-/// Idle icons are circles (radius = half the size); hover/selection morphs
-/// them into Discord's rounded square.
-const RADIUS_IDLE: f32 = 24.0;
-const RADIUS_ACTIVE: f32 = 16.0;
+/// Servers keep rounded square silhouettes, with a small hover response.
+const RADIUS_IDLE: f32 = 16.0;
+const RADIUS_ACTIVE: f32 = 14.0;
 const ANIM: f32 = 0.12;
 
 pub fn paint(app: &mut VesktopApp, ui: &mut egui::Ui) {
@@ -128,11 +127,15 @@ fn rail_button(
         Vec2::splat(BUTTON),
     );
     let response = ui.interact(rect, id, Sense::click());
-    let press =
-        ctx.animate_bool_with_time(id.with("press"), response.is_pointer_button_down_on(), 0.08);
+    let press = crate::ui::animate_bool(
+        &ctx,
+        id.with("press"),
+        response.is_pointer_button_down_on(),
+        0.08,
+    );
     let rect = rect.shrink(2.0 * press);
 
-    let t = ctx.animate_bool_with_time(id.with("shape"), selected || response.hovered(), ANIM);
+    let t = crate::ui::animate_bool(&ctx, id.with("shape"), selected || response.hovered(), ANIM);
     let radius = RADIUS_IDLE + (RADIUS_ACTIVE - RADIUS_IDLE) * t;
 
     // Discord's background only appears while hovered or selected.
@@ -153,7 +156,7 @@ fn rail_button(
                 .paint_at(ui, rect);
         }
         None => {
-            // Icon-less guilds (and Home) sit on a gray circle that turns
+            // Icon-less guilds (and Home) sit on a gray tile that turns
             // blurple on hover, as in Discord.
             ui.painter()
                 .rect_filled(rect, radius, theme::CHAT.lerp_to_gamma(theme::BLURPLE, t));
@@ -168,8 +171,8 @@ fn rail_button(
     }
 
     // Left pill: 8px dot when unread, 20px bar on hover, 40px when selected.
-    let t_sel = ctx.animate_bool_with_time(id.with("pill_sel"), selected, ANIM);
-    let t_hov = ctx.animate_bool_with_time(id.with("pill_hov"), response.hovered(), ANIM);
+    let t_sel = crate::ui::animate_bool(&ctx, id.with("pill_sel"), selected, ANIM);
+    let t_hov = crate::ui::animate_bool(&ctx, id.with("pill_hov"), response.hovered(), ANIM);
     let base = if unread { 8.0 } else { 0.0 };
     let height = t_sel * 40.0 + (1.0 - t_sel) * (base + t_hov * (20.0 - base));
     if height > 1.0 {

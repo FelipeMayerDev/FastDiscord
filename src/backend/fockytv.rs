@@ -45,6 +45,19 @@ impl Drop for Publisher {
     }
 }
 
+/// Matches the FockyTV API's `^[\w.-]{1,32}$` ASCII key rule.
+pub fn validate_stream_key(key: &str) -> Result<(), String> {
+    if (1..=32).contains(&key.len())
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+    {
+        Ok(())
+    } else {
+        Err("Nick inválido no FockyTV: use de 1 a 32 letras sem acentos, números, _, - ou . (sem espaços). Exemplo: Discord-RUST.".into())
+    }
+}
+
 /// Starts publishing `frames` as `key` to `server` (e.g.
 /// `https://tv.huestavo.com`), capped at `fps` (the settings offer 60, 30
 /// and 15, like fockytv-share). The pipeline runs on its own thread.
@@ -82,6 +95,7 @@ fn run(
     frames: &Shared,
     stop: &AtomicBool,
 ) -> Result<(), String> {
+    validate_stream_key(key)?;
     gst::init().map_err(|err| format!("gstreamer: {err}"))?;
     // rtph264pay's default 1400-byte MTU plus SRTP/UDP/IP overflows a VPN
     // tunnel (~1420): MediaMTX logged constant loss and "invalid FU-A
@@ -109,7 +123,7 @@ fn run(
         ! h264parse
         ! rtph264pay pt=96 config-interval=-1 mtu=1200
         ! queue leaky=downstream max-size-time=1000000000
-        ! whipsink name=whip whip-endpoint="{server}/api/whip" auth-token="{key}" use-link-headers=true
+        ! whipsink name=whip use-link-headers=true
         "#,
         encoder = encoder.props(bitrate, fps * 2),
     );
@@ -117,6 +131,9 @@ fn run(
         .map_err(|err| format!("pipeline: {err}"))?
         .dynamic_cast::<gst::Pipeline>()
         .map_err(|_| "pipeline não é um bin".to_string())?;
+    let whip = pipeline.by_name("whip").ok_or("whipsink não encontrado")?;
+    whip.set_property("whip-endpoint", format!("{server}/api/whip"));
+    whip.set_property("auth-token", key);
     enable_nack(&pipeline);
     let appsrc = pipeline
         .by_name("vid")
@@ -527,7 +544,24 @@ pub async fn live_keys(server: &str) -> Result<Vec<String>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::bitrate_for;
+    use super::{bitrate_for, validate_stream_key};
+
+    #[test]
+    fn stream_key_matches_server_rules() {
+        for key in ["Discord-RUST", "discord_rust.1", &"a".repeat(32)] {
+            assert!(validate_stream_key(key).is_ok(), "{key}");
+        }
+        for key in [
+            "",
+            "Discord RUST",
+            "á",
+            "nick/room",
+            "nick\n",
+            &"a".repeat(33),
+        ] {
+            assert!(validate_stream_key(key).is_err(), "{key}");
+        }
+    }
 
     #[test]
     fn bitrate_follows_source_size() {

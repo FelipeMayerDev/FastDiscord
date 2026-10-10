@@ -756,6 +756,10 @@ impl VesktopApp {
         };
         if self.settings.fockytv_share {
             let nick = self.fockytv_nick();
+            if crate::backend::fockytv::validate_stream_key(&nick).is_err() {
+                ui::settings_window::open_at(self, ui::settings_window::SettingsTab::ScreenShare);
+                return;
+            }
             let ctx = ctx.clone();
             let capture =
                 crate::backend::capture::start(self.handle.clone(), move || ctx.request_repaint());
@@ -808,6 +812,8 @@ impl VesktopApp {
             .filter(|nick| !nick.trim().is_empty())
             .or_else(|| self.me.as_ref().map(|me| me.username.clone()))
             .unwrap_or_default()
+            .trim()
+            .to_string()
     }
 
     /// Whether `user_id` is live, on Discord's Go Live or on FockyTV (by
@@ -841,6 +847,10 @@ impl VesktopApp {
         let Some(key) = fockytv_key else {
             return self.watch_stream(user_id);
         };
+        if crate::backend::fockytv::validate_stream_key(&self.fockytv_nick()).is_err() {
+            ui::settings_window::open_at(self, ui::settings_window::SettingsTab::ScreenShare);
+            return;
+        }
         self.stop_watching();
         let mut watch = GoLive::new(format!("fockytv:{key}"));
         watch.fockytv = Some(crate::backend::fockytv::watch(
@@ -1807,6 +1817,9 @@ impl eframe::App for VesktopApp {
 
     fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = &root.ctx().clone();
+        ctx.data_mut(|data| {
+            data.insert_temp(egui::Id::new("reduce_motion"), self.settings.reduce_motion)
+        });
         if self.applied_theme != Some(self.settings.theme) {
             theme::apply(ctx, self.settings.theme);
             self.applied_theme = Some(self.settings.theme);
@@ -1948,6 +1961,30 @@ mod tests {
 
     fn sample_message(id: u64) -> Message {
         serde_json::from_value(serde_json::json!({ "id": id.to_string(), "channel_id": "channel", "author": { "id": "9", "username": "member" } })).unwrap()
+    }
+
+    #[test]
+    fn invalid_share_nick_opens_settings_before_capture() {
+        let (_rt, mut app, mut commands, _) = test_app();
+        app.me = Some(
+            serde_json::from_value(serde_json::json!({"id":"9", "username":"member"})).unwrap(),
+        );
+        app.voice = VoiceConn::Connected {
+            guild_id: "guild".into(),
+            channel_id: "channel".into(),
+        };
+        app.settings.fockytv_nick = Some("Discord RUST".into());
+        app.toggle_screen_share(&Context::default());
+        assert!(app.screen.is_none());
+        assert!(app.fockytv.is_none());
+        assert!(app.settings_open);
+        assert_eq!(
+            app.settings_tab,
+            ui::settings_window::SettingsTab::ScreenShare
+        );
+        assert!(commands.try_recv().is_err());
+        app.settings.fockytv_nick = Some(" Discord-RUST ".into());
+        assert_eq!(app.fockytv_nick(), "Discord-RUST");
     }
 
     #[test]

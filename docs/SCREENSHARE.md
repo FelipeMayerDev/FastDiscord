@@ -52,7 +52,9 @@ Pitfalls hit:
 WHEP out, relay only) behind a Go `server/live-api` that keeps the
 broadcast-box API: `POST /api/whip`, `POST /api/whep?viewer=`,
 `GET /api/status`. The stream key **is** the nickname, sent as
-`Authorization: Bearer <key>`. Production: `https://tv.huestavo.com`
+`Authorization: Bearer <key>`. A chave deve ter de 1 a 32 caracteres ASCII:
+letras, números, `_`, `-` ou `.`, sem espaços (por exemplo, `Discord-RUST`).
+O cliente valida antes de iniciar a captura. Production: `https://tv.huestavo.com`
 (VPS `/opt/fockytv`; deploys only on explicit request, per its
 `AGENTS.md`).
 

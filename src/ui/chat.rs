@@ -287,7 +287,17 @@ pub fn paint(app: &mut VesktopApp, ui: &mut egui::Ui) {
                                         4.0,
                                         crate::ui::control_bg(ui, &smile, false),
                                     );
-                                    draw_smiley(ui.painter(), smile_rect.center(), theme::TEXT);
+                                    let motion = crate::ui::animate_bool(
+                                        ui.ctx(),
+                                        smile.id.with("smile_motion"),
+                                        smile.hovered(),
+                                        0.12,
+                                    );
+                                    draw_smiley(
+                                        ui.painter(),
+                                        smile_rect.center() - Vec2::new(0.0, motion),
+                                        theme::TEXT,
+                                    );
                                     if smile.on_hover_text("Inserir emoji").clicked() {
                                         tools.emoji_open = true;
                                     }

@@ -232,7 +232,7 @@ fn nav_plus_button(ui: &mut egui::Ui) -> bool {
 }
 
 /// The bottom block, kept in Discord's pattern (docs/UI.md §5): a "Voz
-/// conectada" status row, the mic/screen/activities/sound button row, and
+/// conectada" status row, the mic/screen/sound button row, and
 /// the user panel with mic/headset + chevrons.
 fn user_panel(app: &mut VesktopApp, ui: &mut egui::Ui) {
     let width = ui.available_width();
@@ -319,12 +319,12 @@ fn user_panel(app: &mut VesktopApp, ui: &mut egui::Ui) {
                 ui.spacing_mut().item_spacing = Vec2::ZERO;
                 ui.add_space(8.0);
                 if compact_button(ui, "Configurações", |painter, center, color| {
-                    painter.text(
+                    crate::ui::icons::draw(
+                        painter,
+                        crate::ui::icons::Icon::Settings,
                         center,
-                        egui::Align2::CENTER_CENTER,
-                        "⚙",
-                        egui::FontId::proportional(14.0),
                         color,
+                        0.0,
                     );
                 })
                 .clicked()
@@ -402,7 +402,13 @@ fn compact_button_accent(
     } else {
         theme::TEXT
     };
-    draw(ui.painter(), rect.center(), color);
+    let motion = crate::ui::animate_bool(
+        ui.ctx(),
+        response.id.with("icon_hover"),
+        response.hovered(),
+        0.12,
+    );
+    draw(ui.painter(), rect.center() - Vec2::new(0.0, motion), color);
     response.on_hover_text(tooltip).clicked()
 }
 
@@ -425,7 +431,13 @@ fn compact_button(
         theme::TEXT,
         theme::WHITE,
     );
-    draw(ui.painter(), rect.center(), color);
+    let motion = crate::ui::animate_bool(
+        ui.ctx(),
+        response.id.with("icon_hover"),
+        response.hovered(),
+        0.12,
+    );
+    draw(ui.painter(), rect.center() - Vec2::new(0.0, motion), color);
     response.on_hover_text(tooltip)
 }
 
@@ -565,7 +577,7 @@ fn draw_mail_icon(painter: &egui::Painter, center: egui::Pos2, color: egui::Colo
 
 /// The "Voz conectada" block above the user panel, Discord-style: a status
 /// row (signal icon, green title, "canal / servidor") plus the mic / screen
-/// share / activities / soundboard button row. Absent while disconnected;
+/// share / soundboard / music button row. Absent while disconnected;
 /// the phone button also dismisses a failed attempt.
 fn voice_panel(app: &mut VesktopApp, ui: &mut egui::Ui) {
     let status = app.voice.clone();
@@ -643,30 +655,24 @@ fn voice_panel(app: &mut VesktopApp, ui: &mut egui::Ui) {
         );
     }
     let mut leave = false;
-    ui.painter().text(
-        pos2(rect.right() - 22.0, rect.center().y),
-        egui::Align2::CENTER_CENTER,
-        "📴",
-        egui::FontId::proportional(15.0),
-        theme::RED,
-    );
     let disconnect = egui::Rect::from_center_size(
         pos2(rect.right() - 22.0, rect.center().y),
         Vec2::splat(28.0),
     );
-    if ui
-        .interact(
-            disconnect,
-            egui::Id::new("voice_disconnect"),
-            Sense::click(),
-        )
-        .on_hover_text("Desconectar da voz")
-        .clicked()
+    let mut disconnect_ui = ui.new_child(egui::UiBuilder::new().max_rect(disconnect));
+    if crate::ui::icons::button(
+        &mut disconnect_ui,
+        crate::ui::icons::Icon::Disconnect,
+        Vec2::splat(28.0),
+        false,
+        "Desconectar da voz",
+    )
+    .clicked()
     {
         leave = true;
     }
 
-    // Action row: screen share, activities, soundboard, DJ (mute lives in
+    // Action row: screen share, soundboard, DJ (mute lives in
     // the user panel below, as in Discord).
     if in_voice {
         ui.add_space(2.0);
@@ -677,20 +683,23 @@ fn voice_panel(app: &mut VesktopApp, ui: &mut egui::Ui) {
             |ui| {
                 ui.add_space(8.0);
                 let gap = 6.0;
-                let button_width = (width - 16.0 - 3.0 * gap) / 4.0;
-                let action = |ui: &mut egui::Ui, glyph: &str, color, tooltip: &str| {
-                    ui.add_sized(
-                        [button_width, VOICE_ACTIONS_H],
-                        egui::Button::new(RichText::new(glyph).color(color).size(15.0)),
+                ui.spacing_mut().item_spacing.x = gap;
+                let button_width = (width - 16.0 - 2.0 * gap) / 3.0;
+                let action = |ui: &mut egui::Ui, icon, selected, tooltip: &str| {
+                    crate::ui::icons::button(
+                        ui,
+                        icon,
+                        Vec2::new(button_width, VOICE_ACTIONS_H),
+                        selected,
+                        tooltip,
                     )
-                    .on_hover_text(tooltip)
                     .clicked()
                 };
                 let sharing = app.screen.is_some();
                 if action(
                     ui,
-                    "🖥️",
-                    if sharing { theme::GREEN } else { theme::TEXT },
+                    crate::ui::icons::Icon::Screen,
+                    sharing,
                     if sharing {
                         "Parar de compartilhar"
                     } else {
@@ -700,11 +709,20 @@ fn voice_panel(app: &mut VesktopApp, ui: &mut egui::Ui) {
                     app.toggle_screen_share(ui.ctx());
                 }
                 let extras = &mut app.extras;
-                let color = |open| if open { theme::GREEN } else { theme::TEXT };
-                if action(ui, "🔊", color(extras.soundboard_open), "Soundboard") {
+                if action(
+                    ui,
+                    crate::ui::icons::Icon::Soundboard,
+                    extras.soundboard_open,
+                    "Soundboard",
+                ) {
                     extras.soundboard_open = !extras.soundboard_open;
                 }
-                if action(ui, "🎵", color(extras.music_open), "Música (DJ)") {
+                if action(
+                    ui,
+                    crate::ui::icons::Icon::Music,
+                    extras.music_open,
+                    "Música (DJ)",
+                ) {
                     extras.music_open = !extras.music_open;
                 }
                 ui.add_space(8.0);
@@ -898,7 +916,7 @@ fn paint_dm_list(app: &mut VesktopApp, ui: &mut egui::Ui) {
             app,
             ui,
             Some(&channel),
-            "",
+            None,
             &name,
             selected,
             unread,
@@ -958,7 +976,19 @@ fn paint_guild_channels(app: &mut VesktopApp, ui: &mut egui::Ui) {
                         .map(|since| since.elapsed().as_secs())
                 })
                 .flatten();
-            if row(app, ui, None, "🔊", &name, active, unread, false, elapsed).clicked() {
+            if row(
+                app,
+                ui,
+                None,
+                Some(crate::ui::icons::Icon::Voice),
+                &name,
+                active,
+                unread,
+                false,
+                elapsed,
+            )
+            .clicked()
+            {
                 *clicked_voice = Some(channel.id.clone());
             }
             for member in app.voice_members(&channel.id) {
@@ -966,15 +996,15 @@ fn paint_guild_channels(app: &mut VesktopApp, ui: &mut egui::Ui) {
             }
         } else {
             let prefix = if channel.kind == crate::model::CHANNEL_KIND_ANNOUNCEMENT {
-                "📣 "
+                crate::ui::icons::Icon::Announcement
             } else {
-                "#"
+                crate::ui::icons::Icon::TextChannel
             };
             if row(
                 app,
                 ui,
                 None,
-                prefix,
+                Some(prefix),
                 &name,
                 is_selected,
                 unread,
@@ -1042,7 +1072,7 @@ fn row(
     app: &mut VesktopApp,
     ui: &mut egui::Ui,
     dm: Option<&Channel>,
-    prefix: &str,
+    prefix: Option<crate::ui::icons::Icon>,
     label: &str,
     selected: bool,
     unread: bool,
@@ -1057,9 +1087,12 @@ fn row(
     let bg = crate::ui::control_bg(ui, &response, selected);
     ui.painter().rect_filled(rect, theme::RADIUS_SM, bg);
     // Unread: the white pill on the sidebar's left edge, grown in.
-    let pill = ui
-        .ctx()
-        .animate_bool_with_time(response.id.with("pill"), unread && !selected, 0.12);
+    let pill = crate::ui::animate_bool(
+        ui.ctx(),
+        response.id.with("pill"),
+        unread && !selected,
+        0.12,
+    );
     if pill > 0.0 {
         let left = ui.clip_rect().left();
         ui.painter().rect_filled(
@@ -1109,13 +1142,20 @@ fn row(
         )
     };
     content.spacing_mut().item_spacing = Vec2::ZERO;
-    if !prefix.is_empty() {
+    if let Some(icon) = prefix {
         if elapsed.is_some() {
             let center = pos2(content.cursor().left() + 8.0, rect.center().y);
             signal_icon(&mut content, theme::GREEN, center);
             content.add_space(16.0);
         } else {
-            content.label(RichText::new(prefix).size(16.0).color(theme::MUTED));
+            let (icon_rect, _) = content.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
+            crate::ui::icons::draw(
+                content.painter(),
+                icon,
+                icon_rect.center(),
+                theme::MUTED,
+                0.0,
+            );
         }
         content.add_space(6.0);
     }
