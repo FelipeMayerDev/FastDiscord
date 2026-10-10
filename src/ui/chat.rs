@@ -16,7 +16,8 @@ use crate::markup::{self, Style};
 use crate::model::{Message, User};
 use crate::theme;
 use crate::ui::channel_sidebar::draw_search_icon;
-use crate::ui::round_avatar;
+use crate::ui::image_viewer::ImageViewer;
+use crate::ui::{fade, round_avatar};
 use crate::util;
 
 /// Left margin, avatar width and the content indent they add up to.
@@ -37,7 +38,7 @@ pub fn paint(app: &mut VesktopApp, ui: &mut egui::Ui) {
                 ui.label(
                     RichText::new("Nenhuma conversa selecionada")
                         .size(20.0)
-                        .strong()
+                        .family(theme::bold())
                         .color(theme::MUTED),
                 );
                 ui.label(
@@ -60,15 +61,14 @@ pub fn paint(app: &mut VesktopApp, ui: &mut egui::Ui) {
         ui.spacing_mut().item_spacing = Vec2::ZERO;
         ui.add_space(14.0);
         if is_dm {
-            let partner = app
+            let dm = app
                 .dm_channels
                 .iter()
                 .find(|channel| channel.id == channel_id)
-                .and_then(|channel| channel.recipients.first())
                 .cloned();
-            if let Some(partner) = partner {
-                let url = util::user_avatar_url(&partner);
-                let texture = app.images.get(ui.ctx(), &app.handle, &url);
+            if let Some(dm) = dm {
+                let texture = util::dm_icon_url(&dm)
+                    .and_then(|url| app.images.get(ui.ctx(), &app.handle, &url));
                 let (avatar_rect, _) = ui.allocate_exact_size(Vec2::splat(24.0), Sense::hover());
                 match texture {
                     Some(texture) => {
@@ -83,11 +83,14 @@ pub fn paint(app: &mut VesktopApp, ui: &mut egui::Ui) {
                         ui.painter().circle_filled(
                             avatar_rect.center(),
                             12.0,
-                            util::name_color(partner.display_name()),
+                            util::name_color(&name),
                         );
                     }
                 }
-                if let Some(status) = app.presence.get(&partner.id) {
+                if let Some(status) = dm
+                    .dm_partner()
+                    .and_then(|partner| app.presence.get(&partner.id))
+                {
                     let dot = pos2(avatar_rect.min.x + 20.0, avatar_rect.min.y + 20.0);
                     let color = match status.as_str() {
                         "online" => theme::GREEN,
@@ -100,12 +103,12 @@ pub fn paint(app: &mut VesktopApp, ui: &mut egui::Ui) {
                 }
                 ui.add_space(8.0);
             }
-            ui.label(RichText::new(&name).strong().size(16.0).color(theme::TEXT));
+            ui.label(RichText::new(&name).family(theme::bold()).size(16.0).color(theme::TEXT));
             if let Some(partner_status) = app
                 .dm_channels
                 .iter()
                 .find(|channel| channel.id == channel_id)
-                .and_then(|channel| channel.recipients.first())
+                .and_then(|channel| channel.dm_partner())
                 .and_then(|partner| app.presence.get(&partner.id))
             {
                 ui.add_space(8.0);
@@ -123,7 +126,7 @@ pub fn paint(app: &mut VesktopApp, ui: &mut egui::Ui) {
             ui.add_space(2.0);
             ui.label(
                 RichText::new(format!("{prefix} {name}"))
-                    .strong()
+                    .family(theme::bold())
                     .size(16.0)
                     .color(theme::TEXT),
             );
@@ -135,9 +138,11 @@ pub fn paint(app: &mut VesktopApp, ui: &mut egui::Ui) {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_space(14.0);
             let (rect, response) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::hover());
-            if response.hovered() {
-                ui.painter().rect_filled(rect, 4.0, theme::HOVER);
-            }
+            ui.painter().rect_filled(
+                rect,
+                4.0,
+                fade(ui, response.id, response.hovered(), Color32::TRANSPARENT, theme::HOVER),
+            );
             draw_search_icon(ui.painter(), rect.center(), theme::TEXT);
             let _ = response.on_hover_text("Buscar (em breve)");
         });
@@ -191,9 +196,11 @@ pub fn paint(app: &mut VesktopApp, ui: &mut egui::Ui) {
                             // Attachment plus, inside the box like Discord's.
                             let (plus_rect, plus) =
                                 ui.allocate_exact_size(Vec2::splat(24.0), Sense::click());
-                            if plus.hovered() {
-                                ui.painter().rect_filled(plus_rect, 4.0, theme::HOVER);
-                            }
+                            ui.painter().rect_filled(
+                                plus_rect,
+                                4.0,
+                                fade(ui, plus.id, plus.hovered(), Color32::TRANSPARENT, theme::HOVER),
+                            );
                             let pc = plus_rect.center();
                             let stroke = egui::Stroke::new(1.8, theme::TEXT);
                             ui.painter().line_segment(
@@ -228,16 +235,20 @@ pub fn paint(app: &mut VesktopApp, ui: &mut egui::Ui) {
                                     ui.spacing_mut().item_spacing = Vec2::ZERO;
                                     let (smile_rect, smile) =
                                         ui.allocate_exact_size(Vec2::splat(24.0), Sense::click());
-                                    if smile.hovered() {
-                                        ui.painter().rect_filled(smile_rect, 4.0, theme::HOVER);
-                                    }
+                                    ui.painter().rect_filled(
+                                smile_rect,
+                                4.0,
+                                fade(ui, smile.id, smile.hovered(), Color32::TRANSPARENT, theme::HOVER),
+                            );
                                     draw_smiley(ui.painter(), smile_rect.center(), theme::TEXT);
                                     let _ = smile.on_hover_text("Emoji (em breve)");
                                     let (gif_rect, gif) = ui
                                         .allocate_exact_size(Vec2::new(30.0, 24.0), Sense::click());
-                                    if gif.hovered() {
-                                        ui.painter().rect_filled(gif_rect, 4.0, theme::HOVER);
-                                    }
+                                    ui.painter().rect_filled(
+                                gif_rect,
+                                4.0,
+                                fade(ui, gif.id, gif.hovered(), Color32::TRANSPARENT, theme::HOVER),
+                            );
                                     ui.painter().text(
                                         gif_rect.center(),
                                         egui::Align2::CENTER_CENTER,
@@ -382,6 +393,14 @@ fn paint_message(
 ) {
     let row_top = ui.cursor().top();
     let author_name = message.author.display_name();
+    // Row background (hover fade, mention highlight) goes under the content:
+    // reserve its slot now, fill it once the row's height is known.
+    let background = ui.painter().add(Shape::Noop);
+    let mentions_me = message.mention_everyone
+        || app
+            .me
+            .as_ref()
+            .is_some_and(|me| message.mentions.iter().any(|user| user.id == me.id));
 
     let mut reply_band: Option<egui::Rect> = None;
     ui.vertical(|ui| {
@@ -405,8 +424,19 @@ fn paint_message(
         } else {
             ui.horizontal(|ui| {
                 ui.add_space(LEFT);
-                let avatar_url = util::user_avatar_url(&message.author);
-                let texture = app.images.get(ui.ctx(), &app.handle, &avatar_url);
+                // Animated avatars play on hover, like Discord; the still
+                // one stays up while the GIF loads.
+                let hovered = ui.rect_contains_pointer(egui::Rect::from_min_size(
+                    ui.cursor().min,
+                    Vec2::splat(AVATAR),
+                ));
+                let animated = util::animated_avatar_url(&message.author)
+                    .filter(|_| hovered)
+                    .and_then(|url| app.images.get(ui.ctx(), &app.handle, &url));
+                let texture = animated.or_else(|| {
+                    let avatar_url = util::user_avatar_url(&message.author);
+                    app.images.get(ui.ctx(), &app.handle, &avatar_url)
+                });
                 round_avatar(
                     ui,
                     texture.as_ref(),
@@ -416,30 +446,29 @@ fn paint_message(
                 );
                 ui.add_space(GAP);
                 ui.vertical(|ui| {
-                    // Author line with the timestamp pinned to the right
-                    // edge, Discord-style.
+                    // Author line: name, then the time right after it in
+                    // small muted text, Discord-style.
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing = Vec2::ZERO;
                         ui.add(
                             egui::Label::new(
                                 RichText::new(author_name)
-                                    .strong()
-                                    .size(14.5)
+                                    .family(theme::bold())
+                                    .size(15.0)
                                     .color(util::name_color(author_name)),
                             )
                             .truncate(),
                         );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.add_space(10.0);
-                            if message.edited_timestamp.is_some() {
-                                ui.label(RichText::new("(editada)").small().color(theme::MUTED));
-                            }
-                            let (label, exact) = util::header_time(&message.timestamp);
-                            if !label.is_empty() {
-                                ui.label(RichText::new(label).small().color(theme::MUTED))
-                                    .on_hover_text(exact);
-                            }
-                        });
+                        ui.add_space(8.0);
+                        let (label, exact) = util::header_time(&message.timestamp);
+                        if !label.is_empty() {
+                            ui.label(RichText::new(label).size(11.5).color(theme::MUTED))
+                                .on_hover_text(exact);
+                        }
+                        if message.edited_timestamp.is_some() {
+                            ui.add_space(6.0);
+                            ui.label(RichText::new("(editada)").size(11.0).color(theme::MUTED));
+                        }
                     });
                     paint_content(app, ui, message, channel_names);
                 });
@@ -457,8 +486,28 @@ fn paint_message(
         egui::Id::new(("msg_row", message.id.as_str())),
         Sense::hover(),
     );
+    let hover = fade(
+        ui,
+        response.id,
+        response.hovered(),
+        Color32::TRANSPARENT,
+        theme::ROW_HOVER,
+    );
+    let base = if mentions_me {
+        theme::MENTIONED_BG
+    } else {
+        Color32::TRANSPARENT
+    };
+    ui.painter()
+        .set(background, Shape::rect_filled(row, 0.0, base.blend(hover)));
+    if mentions_me {
+        ui.painter().rect_filled(
+            egui::Rect::from_min_size(row.min, Vec2::new(2.0, row.height())),
+            0.0,
+            theme::MENTIONED_BAR,
+        );
+    }
     if response.hovered() {
-        ui.painter().rect_filled(row, 0.0, theme::ROW_HOVER);
         // Grouped messages reveal their time in the left gutter.
         if grouped {
             ui.painter().text(
@@ -512,7 +561,7 @@ fn reply_excerpt(app: &mut VesktopApp, ui: &mut egui::Ui, message: &Message) {
         ui.label(
             RichText::new(&name)
                 .small()
-                .strong()
+                .family(theme::bold())
                 .color(util::name_color(&name)),
         );
         let excerpt = original.map(excerpt_text).unwrap_or_default();
@@ -548,7 +597,11 @@ fn paint_content(
     message: &Message,
     channel_names: &HashMap<String, String>,
 ) {
-    if !message.content.is_empty() {
+    // A bare Tenor/Giphy link shows only its GIF, like Discord.
+    let bare_gif = message.embeds.iter().any(|embed| {
+        embed.kind.as_deref() == Some("gifv") && embed.url.as_deref() == Some(message.content.trim())
+    });
+    if !message.content.is_empty() && !bare_gif {
         let job = content_job(&message.content, &app.user_cache, channel_names);
         ui.add(Label::new(job));
     }
@@ -573,21 +626,48 @@ fn paint_content(
         }
     }
     for embed in &message.embeds {
+        if let Some(url) = util::embed_picture_url(embed) {
+            inline_picture(app, ui, &url);
+        }
         if embed.title.is_none() && embed.description.is_none() {
             continue;
         }
-        ui.horizontal(|ui| {
-            let (bar, _) = ui.allocate_exact_size(Vec2::new(3.0, 30.0), Sense::hover());
-            ui.painter().rect_filled(bar, 1.5, theme::BLURPLE);
-            ui.vertical(|ui| {
+        // Discord's embed: a darker 4px-rounded card with its color bar on
+        // the left edge.
+        let bar_color = embed.color.map_or(theme::RAIL, |rgb| {
+            Color32::from_rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
+        });
+        let card = egui::Frame::new()
+            .fill(theme::SIDEBAR)
+            .corner_radius(4.0)
+            .inner_margin(egui::Margin { left: 16, right: 16, top: 8, bottom: 12 })
+            .show(ui, |ui| {
+                ui.set_max_width(INLINE_MAX);
+                ui.spacing_mut().item_spacing.y = 6.0;
                 if let Some(title) = &embed.title {
-                    ui.label(RichText::new(title).strong().color(theme::TEXT));
+                    let title = RichText::new(title).family(theme::bold()).size(15.0);
+                    match &embed.url {
+                        Some(url) => {
+                            if ui.link(title.color(theme::BLURPLE)).clicked() {
+                                open_url(ui, Some(url));
+                            }
+                        }
+                        None => {
+                            ui.label(title.color(theme::TEXT));
+                        }
+                    }
                 }
                 if let Some(description) = &embed.description {
-                    ui.label(RichText::new(description).small().color(theme::MUTED));
+                    ui.label(RichText::new(description).size(13.5).color(theme::TEXT));
                 }
-            });
-        });
+            })
+            .response
+            .rect;
+        ui.painter().rect_filled(
+            egui::Rect::from_min_size(card.min, Vec2::new(4.0, card.height())),
+            egui::CornerRadius { nw: 4, sw: 4, ne: 0, se: 0 },
+            bar_color,
+        );
     }
 }
 
@@ -611,19 +691,27 @@ fn inline_image(
     if !is_image {
         return false;
     }
+    inline_picture(app, ui, url);
+    true
+}
+
+/// An inline image (GIFs animate); a click opens it in the viewer.
+fn inline_picture(app: &mut VesktopApp, ui: &mut egui::Ui, url: &str) {
     let Some(texture) = app.images_large.get(ui.ctx(), &app.handle, url) else {
-        return true; // fetched: keep the line hidden while it loads
+        return; // fetched: keep the line hidden while it loads
     };
     let size = texture.size_vec2();
     let scale = (INLINE_MAX / size.x).min(300.0 / size.y).min(1.0);
-    let response = ui.add(
-        Image::new((texture.id(), size * scale))
-            .corner_radius(egui::CornerRadius::same(theme::RADIUS_SM as u8)),
-    );
+    let response = ui
+        .add(
+            Image::new((texture.id(), size * scale))
+                .corner_radius(egui::CornerRadius::same(theme::RADIUS_SM as u8))
+                .sense(Sense::click()),
+        )
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
     if response.clicked() {
-        open_url(ui, Some(url));
+        app.viewer = Some(ImageViewer::new(url.to_string()));
     }
-    true
 }
 
 fn open_url(ui: &egui::Ui, url: Option<&str>) {
@@ -635,18 +723,18 @@ fn open_url(ui: &egui::Ui, url: Option<&str>) {
 fn conversation_start(app: &mut VesktopApp, ui: &mut egui::Ui, channel_id: &str) {
     let is_dm = matches!(app.channel_index.get(channel_id), Some(ChannelRef::Dm));
     let name = app.channel_name(channel_id);
-    let texture = if is_dm {
+    let avatar_url = if is_dm {
         app.dm_channels
             .iter()
             .find(|channel| channel.id == channel_id)
-            .and_then(|channel| channel.recipients.first())
-            .map(|user| (user.display_name().to_string(), util::user_avatar_url(user)))
+            .and_then(util::dm_icon_url)
     } else {
         None
     };
-    let (avatar_name, avatar_url, avatar_color) = match &texture {
-        Some((name, url)) => (name.clone(), Some(url.clone()), util::name_color(name)),
-        None => (name.clone(), None, theme::BLURPLE),
+    let avatar_color = if is_dm {
+        util::name_color(&name)
+    } else {
+        theme::BLURPLE
     };
     let loaded = avatar_url
         .as_deref()
@@ -658,18 +746,18 @@ fn conversation_start(app: &mut VesktopApp, ui: &mut egui::Ui, channel_id: &str)
             ui,
             loaded.as_ref(),
             80.0,
-            if is_dm { &avatar_name } else { "#" },
+            if is_dm { &name } else { "#" },
             avatar_color,
         );
         ui.add_space(8.0);
         ui.label(
             RichText::new(if is_dm {
-                avatar_name.clone()
+                name.clone()
             } else {
                 format!("# {name}")
             })
-            .size(20.0)
-            .strong()
+            .size(26.0)
+            .family(theme::bold())
             .color(theme::TEXT),
         );
         ui.add_space(2.0);
@@ -778,15 +866,15 @@ fn content_job(
                 None
             }
             Style::Mention => {
-                format.color = theme::WHITE;
-                format.background = theme::BLURPLE.gamma_multiply(0.35);
+                format.color = theme::MENTION_TEXT;
+                format.background = theme::MENTION_BG;
                 users
                     .get(segment.text.trim_start_matches('@'))
                     .map(|user| format!("@{}", user.display_name()))
             }
             Style::ChannelName => {
-                format.color = theme::WHITE;
-                format.background = theme::BLURPLE.gamma_multiply(0.35);
+                format.color = theme::MENTION_TEXT;
+                format.background = theme::MENTION_BG;
                 channels
                     .get(segment.text.trim_start_matches('#'))
                     .map(|name| format!("#{name}"))

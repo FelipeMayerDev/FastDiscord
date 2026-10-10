@@ -9,8 +9,8 @@
 use std::os::fd::OwnedFd;
 use std::sync::{Arc, Mutex};
 
-use ashpd::desktop::{PersistMode, Session};
 use ashpd::desktop::screencast::{CursorMode, Screencast, SelectSourcesOptions, SourceType};
+use ashpd::desktop::{PersistMode, Session};
 use pipewire as pw;
 use pw::properties::properties;
 use pw::spa;
@@ -59,8 +59,8 @@ fn run(
         .block_on(open_portal())
         .map_err(|err| format!("portal: {err}"))?;
     log::info!("captura: portal entregou o nó {node_id}");
-    let streamed =
-        stream_frames(node_id, fd, slot, stop_rx, on_frame).map_err(|err| format!("pipewire: {err}"));
+    let streamed = stream_frames(node_id, fd, slot, stop_rx, on_frame)
+        .map_err(|err| format!("pipewire: {err}"));
     // The cached connection outlives us, so the portal would keep this
     // session (and its screencopy) alive unless it's closed explicitly.
     if let Err(err) = runtime.block_on(session.close()) {
@@ -288,7 +288,10 @@ mod tests {
             1, 2, 3, 0, 4, 5, 6, 0, 9, 9, 9, 9, //
             7, 8, 9, 0, 10, 11, 12, 0, 9, 9, 9, 9,
         ];
-        assert_eq!(pack(&src, 2, 2, 12).unwrap(), [1, 2, 3, 0, 4, 5, 6, 0, 7, 8, 9, 0, 10, 11, 12, 0]);
+        assert_eq!(
+            pack(&src, 2, 2, 12).unwrap(),
+            [1, 2, 3, 0, 4, 5, 6, 0, 7, 8, 9, 0, 10, 11, 12, 0]
+        );
         assert!(pack(&src[..19], 2, 2, 12).is_none());
     }
 }

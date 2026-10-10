@@ -42,17 +42,7 @@ else
 fi
 cp "$APPDIR/fastdiscord.png" "$APPDIR/.DirIcon"
 cp "$APPDIR/fastdiscord.png" "$APPDIR/usr/share/icons/hicolor/256x256/apps/"
-cat > "$APPDIR/fastdiscord.desktop" <<'EOF'
-[Desktop Entry]
-Type=Application
-Name=FastDiscord
-GenericName=Discord Client
-Comment=Cliente Discord nativo em Rust e egui
-Exec=fastdiscord
-Icon=fastdiscord
-Categories=Network;InstantMessaging;
-Terminal=false
-EOF
+cp packaging/fastdiscord.desktop "$APPDIR/"
 
 echo "── GStreamer plugins"
 declare -A SEEN

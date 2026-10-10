@@ -17,16 +17,11 @@ use std::time::{Duration, Instant};
 use libpulse_binding::context::{Context, FlagSet as ContextFlagSet, State as ContextState};
 use libpulse_binding::def::BufferAttr;
 use libpulse_binding::mainloop::threaded::Mainloop;
-use libpulse_binding::sample::{Format as SampleFormatPulse, Spec as SampleSpec};
 use libpulse_binding::proplist::Proplist;
-use libpulse_binding::stream::{
-    FlagSet as StreamFlagSet,
-    PeekResult,
-    SeekMode,
-    Stream,
-};
+use libpulse_binding::sample::{Format as SampleFormatPulse, Spec as SampleSpec};
+use libpulse_binding::stream::{FlagSet as StreamFlagSet, PeekResult, SeekMode, Stream};
 
-use super::{Capture, INPUT_CAP, OUTPUT_CAP, PREBUFFER, Ring, VOICE_RATE, rms};
+use super::{Capture, EFFECTS, INPUT_CAP, OUTPUT_CAP, PREBUFFER, Ring, VOICE_RATE, rms};
 
 const CHANNELS: u8 = 2;
 /// One 20 ms packet, in bytes — the quantum the sound server works in.
@@ -41,7 +36,6 @@ fn block_as_bytes(block: &[f32]) -> Vec<u8> {
     bytes
 }
 
-
 static INPUT_DEVICES: OnceLock<Vec<(String, String)>> = OnceLock::new();
 static OUTPUT_DEVICES: OnceLock<Vec<(String, String)>> = OnceLock::new();
 
@@ -49,7 +43,11 @@ static OUTPUT_DEVICES: OnceLock<Vec<(String, String)>> = OnceLock::new();
 /// desktop's sound settings show. Cached: the settings window calls this per
 /// frame.
 pub fn list_devices(output: bool) -> Vec<(String, String)> {
-    let cache = if output { &OUTPUT_DEVICES } else { &INPUT_DEVICES };
+    let cache = if output {
+        &OUTPUT_DEVICES
+    } else {
+        &INPUT_DEVICES
+    };
     cache.get_or_init(|| enumerate_devices(output)).clone()
 }
 
@@ -178,7 +176,14 @@ fn wait_for_ready(mainloop: &mut Mainloop, context: &mut Context, timeout: Durat
 struct Requests {
     retarget: Mutex<Option<(Option<String>, Option<String>)>>,
     corked: AtomicBool,
+    echo_cancel: AtomicBool,
 }
+
+/// Names of the echo-cancel pair the sound server's `module-echo-cancel`
+/// (WebRTC AEC) creates: we play into its sink — the far-end reference —
+/// and record from its source, the mic with our playback subtracted.
+const AEC_SINK: &str = "fastdiscord_aec_sink";
+const AEC_SOURCE: &str = "fastdiscord_aec_source";
 
 /// Opened voice audio: the rings other code writes/reads plus the pulse
 /// thread. The streams live for the whole task; device changes and
@@ -199,6 +204,11 @@ impl AudioLinks {
     /// Cork both streams (call ended) or uncork (joined).
     pub fn set_corked(&self, corked: bool) {
         self.requests.corked.store(corked, Ordering::Relaxed);
+    }
+
+    /// Route both streams through the sound server's echo canceller.
+    pub fn set_echo_cancel(&self, on: bool) {
+        self.requests.echo_cancel.store(on, Ordering::Relaxed);
     }
 }
 
@@ -273,6 +283,10 @@ fn run_pulse(
 ) {
     let mut current_output = output_device.clone();
     let mut current_input = input_device.clone();
+    // Devices the user picked; the streams sit on the echo-cancel pair
+    // instead while `aec` holds its module (index, masters it wraps).
+    let mut wanted = (output_device.clone(), input_device.clone());
+    let mut aec: Option<(u32, (Option<String>, Option<String>))> = None;
     let Some(mut mainloop) = Mainloop::new() else {
         log::warn!("pulse: sem mainloop");
         return;
@@ -330,9 +344,13 @@ fn run_pulse(
         return;
     };
     let _ = out_props.set_str("node.latency", "960/48000");
-    let Some(mut out_stream) =
-        Stream::new_with_proplist(&mut context, "fastdiscord-voz", &out_spec, None, &mut out_props)
-    else {
+    let Some(mut out_stream) = Stream::new_with_proplist(
+        &mut context,
+        "fastdiscord-voz",
+        &out_spec,
+        None,
+        &mut out_props,
+    ) else {
         mainloop.unlock();
         log::warn!("pulse: stream de saída não abriu");
         return;
@@ -361,10 +379,17 @@ fn run_pulse(
             buffering: true,
         }));
         let prime = Arc::clone(&prime);
-        out_stream.borrow_mut().set_write_callback(Some(Box::new(move |_| {
-            let mut player = player.borrow_mut();
-            player_fill(&mut player, &mut callback_stream.borrow_mut(), &out_ring, &prime);
-        })));
+        out_stream
+            .borrow_mut()
+            .set_write_callback(Some(Box::new(move |_| {
+                let mut player = player.borrow_mut();
+                player_fill(
+                    &mut player,
+                    &mut callback_stream.borrow_mut(),
+                    &out_ring,
+                    &prime,
+                );
+            })));
     }
 
     let Some(mut in_stream) = Stream::new(&mut context, "fastdiscord-mic", &in_spec, None) else {
@@ -379,9 +404,11 @@ fn run_pulse(
         capture.set_sensitivity(sensitivity);
         capture.set_noise_suppression(noise_suppression);
     }
-    if let Err(err) =
-        in_stream.connect_record(input_device.as_deref(), Some(&attrs), StreamFlagSet::ADJUST_LATENCY)
-    {
+    if let Err(err) = in_stream.connect_record(
+        input_device.as_deref(),
+        Some(&attrs),
+        StreamFlagSet::ADJUST_LATENCY,
+    ) {
         log::warn!("pulse: entrada falhou: {err}");
         mainloop.unlock();
         return;
@@ -390,13 +417,15 @@ fn run_pulse(
     {
         let capture = Arc::clone(&capture);
         let callback_stream = Rc::clone(&in_stream);
-        in_stream.borrow_mut().set_read_callback(Some(Box::new(move |_| {
-            capture_microphone(&mut callback_stream.borrow_mut(), &capture);
-        })));
+        in_stream
+            .borrow_mut()
+            .set_read_callback(Some(Box::new(move |_| {
+                capture_microphone(&mut callback_stream.borrow_mut(), &capture);
+            })));
     }
 
     mainloop.unlock();
-    let mut last_corked = false;
+    let (mut out_corked, mut in_corked) = (false, false);
 
     log::info!(
         "voz de áudio ativa: saída {:?}, entrada {:?}",
@@ -406,56 +435,72 @@ fn run_pulse(
 
     while !stop.load(Ordering::Relaxed) {
         std::thread::sleep(Duration::from_millis(100));
-        if let Some((out, inp)) = requests.retarget.lock().unwrap().take() {
+        if let Some(devices) = requests.retarget.lock().unwrap().take() {
+            wanted = devices;
+        }
+        let echo_cancel = requests.echo_cancel.load(Ordering::Relaxed);
+        if aec
+            .as_ref()
+            .is_some_and(|(_, masters)| !echo_cancel || *masters != wanted)
+        {
+            // Off, or wrapping stale devices: move off the pair first, then
+            // drop the module.
+            let (index, _) = aec.take().unwrap();
+            retarget(
+                &mut mainloop,
+                &out_stream,
+                &in_stream,
+                &attrs,
+                &wanted,
+                &mut current_output,
+                &mut current_input,
+            );
             mainloop.lock();
-            if out != current_output {
-                let _ = out_stream.borrow_mut().disconnect();
-                let res = out_stream.borrow_mut().connect_playback(
-                    out.as_deref(),
-                    Some(&attrs),
-                    StreamFlagSet::ADJUST_LATENCY,
-                    None,
-                    None,
-                );
-                match res {
-                    Ok(()) => {
-                        log::info!("saída retargetada: {:?}", out);
-                        current_output = out.clone();
-                    }
-                    Err(err) => log::warn!("retarget da saída falhou: {err}"),
-                }
-            }
-            if inp != current_input {
-                let _ = in_stream.borrow_mut().disconnect();
-                let res = in_stream.borrow_mut().connect_record(
-                    inp.as_deref(),
-                    Some(&attrs),
-                    StreamFlagSet::ADJUST_LATENCY,
-                );
-                match res {
-                    Ok(()) => {
-                        log::info!("entrada retargetada: {:?}", inp);
-                        current_input = inp.clone();
-                    }
-                    Err(err) => log::warn!("retarget da entrada falhou: {err}"),
-                }
-            }
+            context.introspect().unload_module(index, |_| {});
             mainloop.unlock();
         }
+        if echo_cancel && aec.is_none() {
+            aec = load_echo_cancel(&mut mainloop, &mut context, &wanted)
+                .map(|index| (index, wanted.clone()));
+        }
+        let target = match aec {
+            Some(_) => (Some(AEC_SINK.to_string()), Some(AEC_SOURCE.to_string())),
+            None => wanted.clone(),
+        };
+        retarget(
+            &mut mainloop,
+            &out_stream,
+            &in_stream,
+            &attrs,
+            &target,
+            &mut current_output,
+            &mut current_input,
+        );
         let corked = requests.corked.load(Ordering::Relaxed);
-        if corked != last_corked {
+        if corked != in_corked {
+            mainloop.lock();
+            let _ = if corked {
+                in_stream.borrow_mut().cork(None)
+            } else {
+                in_stream.borrow_mut().uncork(None)
+            };
+            mainloop.unlock();
+            in_corked = corked;
+        }
+        // The output stays open while effects play (the leave tone after
+        // a call ends).
+        let corked = corked && !EFFECTS.busy();
+        if corked != out_corked {
             mainloop.lock();
             if corked {
                 let _ = out_stream.borrow_mut().cork(None);
-                let _ = in_stream.borrow_mut().cork(None);
             } else {
                 let _ = out_stream.borrow_mut().uncork(None);
-                let _ = in_stream.borrow_mut().uncork(None);
                 // Fresh call: rebuild the playback cushion.
                 prime.store(8, Ordering::Relaxed);
             }
             mainloop.unlock();
-            last_corked = corked;
+            out_corked = corked;
         }
     }
 
@@ -467,9 +512,94 @@ fn run_pulse(
     in_stream.borrow_mut().set_read_callback(None);
     let _ = out_stream.borrow_mut().disconnect();
     let _ = in_stream.borrow_mut().disconnect();
+    if let Some((index, _)) = aec {
+        context.introspect().unload_module(index, |_| {});
+    }
     context.disconnect();
     mainloop.unlock();
     mainloop.stop();
+}
+
+/// Reconnects whichever stream isn't on its `target` device yet.
+#[allow(clippy::too_many_arguments)]
+fn retarget(
+    mainloop: &mut Mainloop,
+    out_stream: &RefCell<Stream>,
+    in_stream: &RefCell<Stream>,
+    attrs: &BufferAttr,
+    target: &(Option<String>, Option<String>),
+    current_output: &mut Option<String>,
+    current_input: &mut Option<String>,
+) {
+    let (out, inp) = target;
+    if out == current_output && inp == current_input {
+        return;
+    }
+    mainloop.lock();
+    if out != current_output {
+        let _ = out_stream.borrow_mut().disconnect();
+        let res = out_stream.borrow_mut().connect_playback(
+            out.as_deref(),
+            Some(attrs),
+            StreamFlagSet::ADJUST_LATENCY,
+            None,
+            None,
+        );
+        match res {
+            Ok(()) => log::info!("saída retargetada: {:?}", out),
+            Err(err) => log::warn!("retarget da saída falhou: {err}"),
+        }
+        // Failed or not, don't hammer the server every 100 ms.
+        current_output.clone_from(out);
+    }
+    if inp != current_input {
+        let _ = in_stream.borrow_mut().disconnect();
+        let res = in_stream.borrow_mut().connect_record(
+            inp.as_deref(),
+            Some(attrs),
+            StreamFlagSet::ADJUST_LATENCY,
+        );
+        match res {
+            Ok(()) => log::info!("entrada retargetada: {:?}", inp),
+            Err(err) => log::warn!("retarget da entrada falhou: {err}"),
+        }
+        current_input.clone_from(inp);
+    }
+    mainloop.unlock();
+}
+
+/// Loads `module-echo-cancel` (WebRTC AEC) around the chosen devices;
+/// `None` when the sound server refuses (no such module).
+fn load_echo_cancel(
+    mainloop: &mut Mainloop,
+    context: &mut Context,
+    (output, input): &(Option<String>, Option<String>),
+) -> Option<u32> {
+    let mut args = format!("aec_method=webrtc sink_name={AEC_SINK} source_name={AEC_SOURCE}");
+    if let Some(sink) = output {
+        args.push_str(&format!(" sink_master={sink}"));
+    }
+    if let Some(source) = input {
+        args.push_str(&format!(" source_master={source}"));
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    mainloop.lock();
+    context
+        .introspect()
+        .load_module("module-echo-cancel", &args, move |index| {
+            let _ = tx.send(index);
+        });
+    mainloop.unlock();
+    match rx.recv_timeout(Duration::from_secs(3)) {
+        Ok(index) if index != u32::MAX => {
+            log::info!("cancelamento de eco ativo (módulo {index})");
+            Some(index)
+        }
+        _ => {
+            log::warn!("o servidor de som não carregou module-echo-cancel");
+            None
+        }
+    }
 }
 
 /// Playback callback state: a 1 Hz diagnostic of the audio actually served
@@ -518,6 +648,7 @@ fn player_fill(player: &mut Player, stream: &mut Stream, ring: &Ring, prime: &At
             player.last_sample = block[have - 1];
         }
     }
+    EFFECTS.mix_into(&mut block);
 
     let now = Instant::now();
     player.peak = player.peak.max(rms(&block));
@@ -562,4 +693,3 @@ fn capture_microphone(stream: &mut Stream, capture: &Mutex<Capture>) {
         }
     }
 }
-

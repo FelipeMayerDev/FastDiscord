@@ -37,3 +37,17 @@ fn snowflakes_order_matches_time() {
     let late = util::snowflake_ms("4194304000").expect("snowflake");
     assert!(late > early);
 }
+
+#[test]
+fn gifv_embeds_play_as_gif() {
+    let embed: fastdiscord::model::Embed = serde_json::from_value(serde_json::json!({
+        "type": "gifv",
+        "thumbnail": { "url": "https://media.tenor.com/abcAAAAe/cat.png" },
+        "video": { "url": "https://media.tenor.com/abcAAAPo/cat.mp4" }
+    }))
+    .expect("embed");
+    assert_eq!(
+        util::embed_picture_url(&embed).as_deref(),
+        Some("https://media.tenor.com/abcAAAAC/cat.gif")
+    );
+}

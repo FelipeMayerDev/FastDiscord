@@ -7,9 +7,9 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::num::NonZeroU16;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::num::NonZeroU16;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
@@ -36,7 +36,9 @@ const MODE: &str = "aead_aes256_gcm_rtpsize";
 /// Which side of the stream we are.
 pub enum Role {
     /// Our own Go Live: we encode and send the capture's frames.
-    Stream { frames: crate::backend::capture::Shared },
+    Stream {
+        frames: crate::backend::capture::Shared,
+    },
     /// Watching `streamer`'s stream: decoded frames land in `frames`.
     Watch {
         streamer: u64,
@@ -66,9 +68,8 @@ pub async fn run(info: StreamInfo, role: Role) {
     }
 }
 
-type Ws = tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
->;
+type Ws =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 async fn send_json(ws: &mut Ws, value: Value) -> Result<(), String> {
     ws.send(Message::text(value.to_string()))
@@ -78,12 +79,16 @@ async fn send_json(ws: &mut Ws, value: Value) -> Result<(), String> {
 
 async fn send_event(ws: &mut Ws, event: Event) -> Result<(), String> {
     let text = serde_json::to_string(&event).map_err(|err| err.to_string())?;
-    ws.send(Message::text(text)).await.map_err(|err| format!("ws: {err}"))
+    ws.send(Message::text(text))
+        .await
+        .map_err(|err| format!("ws: {err}"))
 }
 
 async fn send_binary(ws: &mut Ws, event: Event) -> Result<(), String> {
     let bytes = serialize_binary_event(&event).map_err(|err| format!("{err:?}"))?;
-    ws.send(Message::binary(bytes)).await.map_err(|err| format!("ws: {err}"))
+    ws.send(Message::binary(bytes))
+        .await
+        .map_err(|err| format!("ws: {err}"))
 }
 
 /// Next JSON payload (`op`, `d`), skipping pings and stray binary frames.
@@ -107,7 +112,10 @@ async fn next_json(ws: &mut Ws) -> Result<(u64, Value), String> {
 }
 
 async fn connect(info: &StreamInfo, role: &Role) -> Result<(), String> {
-    let host = info.endpoint.trim_start_matches("wss://").trim_end_matches('/');
+    let host = info
+        .endpoint
+        .trim_start_matches("wss://")
+        .trim_end_matches('/');
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("wss://{host}/?v=4"))
         .await
         .map_err(|err| format!("falha ao conectar em {host}: {err}"))?;
@@ -158,7 +166,10 @@ async fn connect(info: &StreamInfo, role: &Role) -> Result<(), String> {
     if !modes.contains(&MODE) {
         return Err(format!("servidor não oferece {MODE}: {modes:?}"));
     }
-    let ip = ready.get("ip").and_then(Value::as_str).ok_or("ready sem ip")?;
+    let ip = ready
+        .get("ip")
+        .and_then(Value::as_str)
+        .ok_or("ready sem ip")?;
     let port = field(&ready, "port").ok_or("ready sem porta")? as u16;
     log::info!(
         "transmissão: ready ssrc áudio={audio_ssrc} vídeo={video_ssrc} rtx={rtx_ssrc} udp={ip}:{port}"
@@ -211,13 +222,23 @@ async fn connect(info: &StreamInfo, role: &Role) -> Result<(), String> {
     );
     let mut dave = Dave::new(info.user_id, info.rtc_channel_id, dave_version);
     if let Some(key_package) = dave.key_package()? {
-        send_binary(&mut ws, Event::DaveMlsKeyPackage(DaveMlsKeyPackage { key_package })).await?;
+        send_binary(
+            &mut ws,
+            Event::DaveMlsKeyPackage(DaveMlsKeyPackage { key_package }),
+        )
+        .await?;
     }
 
     let key: Vec<u8> = description
         .get("secret_key")
         .and_then(Value::as_array)
-        .map(|bytes| bytes.iter().filter_map(Value::as_u64).map(|b| b as u8).collect())
+        .map(|bytes| {
+            bytes
+                .iter()
+                .filter_map(Value::as_u64)
+                .map(|b| b as u8)
+                .collect()
+        })
         .unwrap_or_default();
     let cipher = Cipher::new(&key).ok_or("chave de transporte inválida")?;
     // ponytail: one counter for RTP and RTCP, as discord-native-voice does.
@@ -246,8 +267,11 @@ async fn connect(info: &StreamInfo, role: &Role) -> Result<(), String> {
                 }),
             )
             .await?;
-            send_json(&mut ws, json!({ "op": 5, "d": { "speaking": 2, "delay": 0, "ssrc": audio_ssrc } }))
-                .await?;
+            send_json(
+                &mut ws,
+                json!({ "op": 5, "d": { "speaking": 2, "delay": 0, "ssrc": audio_ssrc } }),
+            )
+            .await?;
         }
         Role::Watch { .. } => {
             send_json(
@@ -288,8 +312,9 @@ async fn connect(info: &StreamInfo, role: &Role) -> Result<(), String> {
     let mut keyframe_asked: Option<std::time::Instant> = None;
     let mut buf = vec![0u8; 2048];
 
-    let mut heartbeat =
-        tokio::time::interval(Duration::from_millis(heartbeat_ms.unwrap_or(13_750.0) as u64));
+    let mut heartbeat = tokio::time::interval(Duration::from_millis(
+        heartbeat_ms.unwrap_or(13_750.0) as u64,
+    ));
     let mut report = tokio::time::interval(Duration::from_secs(5));
     let mut was_ready = false;
     loop {
@@ -561,7 +586,9 @@ async fn discover_ip(udp: &UdpSocket, ssrc: u32) -> Result<(IpAddr, u16), String
     packet[..2].copy_from_slice(&1u16.to_be_bytes());
     packet[2..4].copy_from_slice(&70u16.to_be_bytes());
     packet[4..8].copy_from_slice(&ssrc.to_be_bytes());
-    udp.send(&packet).await.map_err(|err| format!("udp: {err}"))?;
+    udp.send(&packet)
+        .await
+        .map_err(|err| format!("udp: {err}"))?;
     let len = tokio::time::timeout(Duration::from_secs(5), udp.recv(&mut packet))
         .await
         .map_err(|_| "descoberta de IP sem resposta")?
@@ -597,7 +624,9 @@ fn describe_rtcp(rtcp: &[u8]) -> String {
         };
         if let Some(mut at) = blocks {
             for _ in 0..count {
-                let Some(block) = rest.get(at..at + 24) else { break };
+                let Some(block) = rest.get(at..at + 24) else {
+                    break;
+                };
                 line += &format!(
                     " [ssrc={} perda={} perdidos={} maior_seq={}]",
                     u32::from_be_bytes([block[0], block[1], block[2], block[3]]),
@@ -659,7 +688,9 @@ impl Dave {
     }
 
     fn is_ready(&self) -> bool {
-        self.session.as_ref().is_some_and(davey::DaveSession::is_ready)
+        self.session
+            .as_ref()
+            .is_some_and(davey::DaveSession::is_ready)
     }
 
     /// (Re)initializes the session for the current version and returns the

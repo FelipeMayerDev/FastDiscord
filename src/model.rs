@@ -55,6 +55,9 @@ pub struct Channel {
     pub position: i64,
     #[serde(default)]
     pub recipients: Vec<User>,
+    /// Group DM icon hash (`channel-icons/{id}/{icon}`).
+    #[serde(default)]
+    pub icon: Option<String>,
     /// Snowflake of the last message, for ordering DMs by recency.
     #[serde(default)]
     pub last_message_id: Option<String>,
@@ -73,6 +76,13 @@ impl Channel {
                 | CHANNEL_KIND_DM
                 | CHANNEL_KIND_GROUP_DM
         )
+    }
+
+    /// The other user of a 1:1 DM; `None` for group DMs and guild channels.
+    pub fn dm_partner(&self) -> Option<&User> {
+        (self.kind == CHANNEL_KIND_DM)
+            .then(|| self.recipients.first())
+            .flatten()
     }
 
     pub fn display_name(&self) -> String {
@@ -156,6 +166,26 @@ pub struct Embed {
     pub description: Option<String>,
     #[serde(default)]
     pub url: Option<String>,
+    /// `rich`, `image`, `gifv` (Tenor/Giphy), `video`, `link`…
+    #[serde(rename = "type", default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub image: Option<EmbedMedia>,
+    #[serde(default)]
+    pub thumbnail: Option<EmbedMedia>,
+    #[serde(default)]
+    pub video: Option<EmbedMedia>,
+    /// The left bar's color, `0xRRGGBB`.
+    #[serde(default)]
+    pub color: Option<u32>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EmbedMedia {
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub proxy_url: Option<String>,
 }
 
 /// Who is in which voice channel, from VOICE_STATE_UPDATE and the

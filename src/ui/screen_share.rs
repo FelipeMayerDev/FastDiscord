@@ -134,8 +134,11 @@ pub fn paint_watch(app: &mut VesktopApp, ui: &mut egui::Ui) {
         match &mut app.watch_texture {
             Some(texture) => texture.set(image, egui::TextureOptions::LINEAR),
             None => {
-                app.watch_texture =
-                    Some(ui.ctx().load_texture("watch_stream", image, egui::TextureOptions::LINEAR));
+                app.watch_texture = Some(ui.ctx().load_texture(
+                    "watch_stream",
+                    image,
+                    egui::TextureOptions::LINEAR,
+                ));
             }
         }
     }

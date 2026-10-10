@@ -4,6 +4,7 @@
 
 use serde::de::DeserializeOwned;
 
+use crate::backend::soundboard::SoundboardSound;
 use crate::model::{Channel, Guild, Member, Message, User};
 
 pub const REST_BASE: &str = "https://discord.com/api/v10";
@@ -122,10 +123,14 @@ impl Api {
         &self,
         channel_id: &str,
         before: Option<&str>,
+        after: Option<&str>,
     ) -> ApiResult<Vec<Message>> {
         let mut query = vec![("limit", MESSAGES_PER_PAGE.to_string())];
         if let Some(before) = before {
             query.push(("before", before.to_string()));
+        }
+        if let Some(after) = after {
+            query.push(("after", after.to_string()));
         }
         // Discord returns newest first; the rest of the app (timeline,
         // gateway appends, the `before` cursor = first message) expects
@@ -154,6 +159,46 @@ impl Api {
             .http
             .post(format!("{REST_BASE}/channels/{channel_id}/typing"))
             .header(reqwest::header::AUTHORIZATION, &self.token)
+            .send()
+            .await?;
+        Self::check_status(resp).await?;
+        Ok(())
+    }
+
+    /// Discord's built-in sounds plus the guild's own (guild first, as in
+    /// the official picker).
+    pub async fn soundboard_sounds(&self, guild_id: &str) -> ApiResult<Vec<SoundboardSound>> {
+        #[derive(serde::Deserialize)]
+        struct Items {
+            items: Vec<SoundboardSound>,
+        }
+        let mut sounds = self
+            .get_json::<Items>(&format!("/guilds/{guild_id}/soundboard-sounds"), &[])
+            .await?
+            .items;
+        sounds.extend(
+            self.get_json::<Vec<SoundboardSound>>("/soundboard-default-sounds", &[])
+                .await?,
+        );
+        Ok(sounds)
+    }
+
+    /// Plays a sound in the voice channel we're in; Discord answers 204 and
+    /// broadcasts VOICE_CHANNEL_EFFECT_SEND.
+    pub async fn send_soundboard_sound(
+        &self,
+        channel_id: &str,
+        sound_id: &str,
+        source_guild_id: Option<&str>,
+    ) -> ApiResult<()> {
+        let resp = self
+            .http
+            .post(format!("{REST_BASE}/channels/{channel_id}/send-soundboard-sound"))
+            .header(reqwest::header::AUTHORIZATION, &self.token)
+            .json(&serde_json::json!({
+                "sound_id": sound_id,
+                "source_guild_id": source_guild_id,
+            }))
             .send()
             .await?;
         Self::check_status(resp).await?;

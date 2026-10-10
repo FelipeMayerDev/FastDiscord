@@ -2,7 +2,7 @@
 //! native equivalent of Vesktop's Electron `settings.json`.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -37,8 +37,18 @@ pub struct Settings {
     pub input_sensitivity: u8,
     /// RNNoise-style microphone noise suppression.
     pub noise_suppression: bool,
+    /// Opus send bitrate in kbps (Discord's default is 64).
+    pub opus_bitrate_kbps: u16,
+    /// Automatic gain control on the microphone.
+    pub auto_gain: bool,
+    /// Compressor + limiter on the microphone.
+    pub compressor: bool,
+    /// Echo cancellation (the sound server's WebRTC AEC; Linux only).
+    pub echo_cancellation: bool,
     /// Per-user playback volume, as a percentage (100 = normal).
     pub user_volumes: HashMap<String, u8>,
+    /// Users muted locally (only for us), by id.
+    pub muted_users: HashSet<String>,
     /// Screen share through FockyTV (WHIP) instead of Discord's Go Live,
     /// which stays in the code for later (docs/SCREENSHARE.md).
     pub fockytv_share: bool,
@@ -66,7 +76,12 @@ impl Default for Settings {
             output_device: None,
             input_sensitivity: 0,
             noise_suppression: false,
+            opus_bitrate_kbps: 64,
+            auto_gain: false,
+            compressor: false,
+            echo_cancellation: false,
             user_volumes: HashMap::new(),
+            muted_users: HashSet::new(),
             fockytv_share: true,
             fockytv_url: "https://tv.huestavo.com".into(),
             fockytv_nick: None,

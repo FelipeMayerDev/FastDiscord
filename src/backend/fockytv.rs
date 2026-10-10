@@ -75,7 +75,13 @@ pub fn publish(server: &str, key: &str, fps: u32, frames: Shared) -> Publisher {
     }
 }
 
-fn run(server: &str, key: &str, fps: u32, frames: &Shared, stop: &AtomicBool) -> Result<(), String> {
+fn run(
+    server: &str,
+    key: &str,
+    fps: u32,
+    frames: &Shared,
+    stop: &AtomicBool,
+) -> Result<(), String> {
     gst::init().map_err(|err| format!("gstreamer: {err}"))?;
     // rtph264pay's default 1400-byte MTU plus SRTP/UDP/IP overflows a VPN
     // tunnel (~1420): MediaMTX logged constant loss and "invalid FU-A
@@ -160,7 +166,10 @@ fn run(server: &str, key: &str, fps: u32, frames: &Shared, stop: &AtomicBool) ->
             ));
         }
         // Zero-copy: the buffer keeps the shared frame alive.
-        if appsrc.push_buffer(gst::Buffer::from_slice(FrameBytes(frame))).is_err() {
+        if appsrc
+            .push_buffer(gst::Buffer::from_slice(FrameBytes(frame)))
+            .is_err()
+        {
             break Err("o pipeline recusou o quadro".into());
         }
     };
@@ -183,7 +192,10 @@ fn enable_nack(pipeline: &gst::Pipeline) {
         }
     }
     for element in pipeline.iterate_recurse().into_iter().flatten() {
-        if element.factory().is_none_or(|factory| factory.name() != "webrtcbin") {
+        if element
+            .factory()
+            .is_none_or(|factory| factory.name() != "webrtcbin")
+        {
             continue;
         }
         element.connect("on-new-transceiver", false, |args| {
@@ -252,7 +264,10 @@ impl Encoder {
         let kbps = (bps / 1000).max(1);
         match self {
             Self::VaH264Lp | Self::VaH264 => {
-                format!("{} name=venc bitrate={kbps} key-int-max={gop}", self.element())
+                format!(
+                    "{} name=venc bitrate={kbps} key-int-max={gop}",
+                    self.element()
+                )
             }
             Self::NvH264 => format!(
                 "nvh264enc name=venc preset=low-latency-hq tune=ultra-low-latency \
@@ -405,7 +420,9 @@ fn play(
     // whepsrc exposes the video track as an RTP pad: depay, decode, RGBA.
     let weak = pipeline.downgrade();
     source.connect_pad_added(move |_, pad| {
-        let Some(pipeline) = weak.upgrade() else { return };
+        let Some(pipeline) = weak.upgrade() else {
+            return;
+        };
         // Only video is offered, so every pad is the video track. The chain
         // must be static: with decodebin3's dynamic output, the bin's ghost
         // "sink" landed on videoconvert, the link failed ("Noformat") and
@@ -502,7 +519,10 @@ pub async fn live_keys(server: &str) -> Result<Vec<String>, String> {
         .json()
         .await
         .map_err(|err| err.to_string())?;
-    Ok(streams.into_iter().map(|stream| stream.stream_key).collect())
+    Ok(streams
+        .into_iter()
+        .map(|stream| stream.stream_key)
+        .collect())
 }
 
 #[cfg(test)]

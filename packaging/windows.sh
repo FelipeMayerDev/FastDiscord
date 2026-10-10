@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
-# Portable Windows build: fastdiscord.exe with the GStreamer runtime DLLs
-# beside it and the plugins its pipelines use under lib\gstreamer-1.0
-# (main.rs points GStreamer there). Runs in Git Bash on the CI runner, with
-# the official GStreamer MSVC runtime + devel installed.
+# Windows build: fastdiscord.exe with the GStreamer runtime DLLs beside it
+# and the plugins its pipelines use under lib\gstreamer-1.0 (main.rs points
+# GStreamer there), zipped and embedded in a single-file launcher
+# (packaging/launcher) that extracts it on first run. Runs in Git Bash on
+# the CI runner, with the official GStreamer MSVC runtime + devel installed.
 #
-# Usage: packaging/windows.sh  →  dist/FastDiscord-windows-x86_64.zip
+# Usage: packaging/windows.sh  →  dist/FastDiscord-windows-x86_64.exe
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 GST=$(cygpath -u "${GSTREAMER_1_0_ROOT_MSVC_X86_64:?GStreamer MSVC root not set}")
 OUT=dist/FastDiscord
 ZIP=dist/FastDiscord-windows-x86_64.zip
+EXE=dist/FastDiscord-windows-x86_64.exe
 
 # Required elements: Desktop Duplication capture, WHIP publish, WHEP watch,
 # the encoder probe and the webrtcbin internals.
@@ -26,7 +28,7 @@ echo "── release build"
 cargo build --release
 
 echo "── layout"
-rm -rf "$OUT" "$ZIP"
+rm -rf "$OUT" "$ZIP" "$EXE"
 mkdir -p "$OUT/lib/gstreamer-1.0"
 cp target/release/fastdiscord.exe "$OUT/"
 # GStreamer's own libraries (glib, gstreamer, libnice, openssl…): next to
@@ -53,4 +55,13 @@ echo "   $(ls "$OUT/lib/gstreamer-1.0" | wc -l) plugins, $(ls "$OUT"/*.dll | wc 
 
 echo "── zip"
 (cd dist && 7z a -tzip -mx=7 "$(basename "$ZIP")" FastDiscord >/dev/null)
-du -h "$ZIP"
+
+echo "── single exe"
+# Version plus the zip's hash: each build extracts to its own folder.
+VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+FASTDISCORD_BUILD="$VERSION-$(sha256sum "$ZIP" | cut -c1-8)" \
+FASTDISCORD_ZIP=$(cygpath -w "$PWD/$ZIP") \
+    cargo build --release --manifest-path packaging/launcher/Cargo.toml --target-dir target/launcher
+cp target/launcher/release/FastDiscord.exe "$EXE"
+rm "$ZIP"
+du -h "$EXE"

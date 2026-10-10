@@ -13,6 +13,9 @@ use std::time::{Duration, Instant};
 use nnnoiseless::DenoiseState;
 use symphonia_core::io::MediaSource;
 
+mod dynamics;
+mod effects;
+pub use effects::{EFFECTS, Sound, decode, play_sound};
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
@@ -94,7 +97,6 @@ impl Ring {
     }
 }
 
-
 /// Microphone chain state: RNNoise, voice-activity gate, then the ring
 /// songbird reads. The sound server hands us the stream spec directly —
 /// 48 kHz mono f32 — so no downmix or resampling is needed here.
@@ -104,6 +106,8 @@ pub struct Capture {
     frame: Vec<f32>,
     sensitivity: f32,
     open_until: Option<Instant>,
+    /// AGC + compressor/limiter on what leaves the gate.
+    dynamics: dynamics::Dynamics,
     ring: Arc<Ring>,
     /// Called every frame with whether we're speaking (voice.rs dedupes it
     /// into the green indicator).
@@ -115,6 +119,11 @@ pub struct Capture {
 impl Capture {
     pub fn set_sensitivity(&mut self, sensitivity: u8) {
         self.sensitivity = f32::from(sensitivity) / 100.0;
+    }
+
+    pub fn set_dynamics(&mut self, auto_gain: bool, compressor: bool) {
+        self.dynamics.agc = auto_gain;
+        self.dynamics.compressor = compressor;
     }
 
     /// Toggling noise suppression (re)builds the RNNoise state.
@@ -133,6 +142,7 @@ impl Capture {
             frame: Vec::with_capacity(DenoiseState::FRAME_SIZE),
             sensitivity: f32::from(sensitivity) / 100.0,
             open_until: None,
+            dynamics: dynamics::Dynamics::default(),
             ring,
             on_speaking: None,
             last_log: Instant::now(),
@@ -146,8 +156,10 @@ impl Capture {
             if self.frame.len() < DenoiseState::FRAME_SIZE {
                 continue;
             }
-            let mut frame =
-                std::mem::replace(&mut self.frame, Vec::with_capacity(DenoiseState::FRAME_SIZE));
+            let mut frame = std::mem::replace(
+                &mut self.frame,
+                Vec::with_capacity(DenoiseState::FRAME_SIZE),
+            );
             frame.resize(DenoiseState::FRAME_SIZE, 0.0);
 
             // nnnoiseless works on 16-bit-scaled floats and produces
@@ -155,7 +167,11 @@ impl Capture {
             let denoised = self.denoiser.is_some();
             if denoised {
                 let frame_rms = rms(&frame).max(0.001);
-                let limiter = if frame_rms > 0.5 { 0.5 / frame_rms } else { 1.0 };
+                let limiter = if frame_rms > 0.5 {
+                    0.5 / frame_rms
+                } else {
+                    1.0
+                };
                 for sample in &mut frame {
                     *sample = (*sample * limiter).clamp(-0.95, 0.95) * 32768.0;
                 }
@@ -190,14 +206,13 @@ impl Capture {
             }
             let open = self.sensitivity <= 0.0 || speaking;
             if open {
-                let gain = if denoised { 1.0 / 32768.0 } else { 1.0 };
-                if denoised {
-                    let out: Vec<f32> = self.denoised.iter().map(|s| s * gain).collect();
-                    self.ring.push(&out);
+                let mut out = if denoised {
+                    self.denoised.iter().map(|s| s / 32768.0).collect()
                 } else {
-                    let out: Vec<f32> = frame.iter().map(|s| s * gain).collect();
-                    self.ring.push(&out);
-                }
+                    frame
+                };
+                self.dynamics.process(&mut out);
+                self.ring.push(&out);
             } else {
                 self.ring.clear();
             }
@@ -246,6 +261,7 @@ impl Read for MicSource {
         }
         let (block, _) = self.scratch.split_at_mut(have);
         self.ring.pop(block);
+        EFFECTS.add_send(block);
         for (i, sample) in block.iter().enumerate() {
             buf[i * 4..i * 4 + 4].copy_from_slice(&sample.to_le_bytes());
         }

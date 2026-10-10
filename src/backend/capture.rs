@@ -98,10 +98,19 @@ mod tests {
     fn preview_swizzles_and_downscales() {
         // 2x2 BGRx.
         let pixels = vec![1, 2, 3, 0, 4, 5, 6, 0, 7, 8, 9, 0, 10, 11, 12, 0];
-        let frame = Frame { width: 2, height: 2, pixels, bgr: true, seq: 1 };
+        let frame = Frame {
+            width: 2,
+            height: 2,
+            pixels,
+            bgr: true,
+            seq: 1,
+        };
         let (size, rgba) = frame.preview_rgba(640);
         assert_eq!(size, [2, 2]);
-        assert_eq!(rgba, [3, 2, 1, 255, 6, 5, 4, 255, 9, 8, 7, 255, 12, 11, 10, 255]);
+        assert_eq!(
+            rgba,
+            [3, 2, 1, 255, 6, 5, 4, 255, 9, 8, 7, 255, 12, 11, 10, 255]
+        );
         // Downscale keeps every 2nd pixel of every 2nd row.
         assert_eq!(frame.preview_rgba(1), ([1, 1], vec![3, 2, 1, 255]));
     }

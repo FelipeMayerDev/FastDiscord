@@ -3,7 +3,7 @@
 //! the left edge and a red badge for mentions.
 
 use egui::{Align2, CornerRadius, FontId, Image, Sense, TextureHandle, Vec2, pos2};
-use egui::{Color32, Id};
+use egui::Id;
 
 use crate::app::{ChannelRef, VesktopApp};
 use crate::theme;
@@ -27,19 +27,19 @@ pub fn paint(app: &mut VesktopApp, ui: &mut egui::Ui) {
         .map(|(_, count)| *count)
         .sum();
     let home_selected = app.selected_guild.is_none();
-    if rail_button(
+    let home = rail_button(
         ui,
         Id::new("rail_home"),
         home_selected,
         dm_unread > 0,
         0,
-        "V",
-        theme::BLURPLE,
+        "",
         None,
         "Mensagens diretas",
-    )
-    .clicked()
-    {
+    );
+    egui::Image::from_bytes("bytes://fastdiscord-logo.png", crate::ui::login::LOGO_PNG)
+        .paint_at(ui, home.rect.shrink(9.0));
+    if home.clicked() {
         app.select_home();
     }
 
@@ -86,7 +86,6 @@ pub fn paint(app: &mut VesktopApp, ui: &mut egui::Ui) {
                     unread,
                     mention_count,
                     &initial(&guild.name),
-                    theme::INPUT,
                     texture.as_ref(),
                     &guild.name,
                 );
@@ -117,7 +116,6 @@ fn rail_button(
     unread: bool,
     mentions: u64,
     label: &str,
-    circle_color: Color32,
     texture: Option<&TextureHandle>,
     tooltip: &str,
 ) -> egui::Response {
@@ -142,7 +140,7 @@ fn rail_button(
             theme::HOVER
         };
         ui.painter()
-            .rect_filled(rect, radius, mix(theme::RAIL, bg, t));
+            .rect_filled(rect, radius, theme::RAIL.lerp_to_gamma(bg, t));
     }
 
     match texture {
@@ -152,8 +150,10 @@ fn rail_button(
                 .paint_at(ui, rect);
         }
         None => {
+            // Icon-less guilds (and Home) sit on a gray circle that turns
+            // blurple on hover, as in Discord.
             ui.painter()
-                .rect_filled(rect, radius, mix(theme::RAIL, circle_color, t));
+                .rect_filled(rect, radius, theme::CHAT.lerp_to_gamma(theme::BLURPLE, t));
             ui.painter().text(
                 rect.center(),
                 Align2::CENTER_CENTER,
@@ -207,10 +207,4 @@ fn badge_text(mentions: u64) -> String {
     } else {
         mentions.to_string()
     }
-}
-
-/// Channel-wise mix of two colors, for the animated background fade.
-fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
-    let lerp = |x: u8, y: u8| -> u8 { (x as f32 + (y as f32 - x as f32) * t) as u8 };
-    Color32::from_rgb(lerp(a.r(), b.r()), lerp(a.g(), b.g()), lerp(a.b(), b.b()))
 }

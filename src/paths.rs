@@ -1,11 +1,12 @@
-//! Where Vesktop keeps its files on each platform, via the `directories`
+//! Where FastDiscord keeps its files on each platform, via the `directories`
 //! crate (Linux: XDG, macOS: Application Support, Windows: AppData).
 
 use directories::ProjectDirs;
 use std::path::PathBuf;
 
 fn project_dirs() -> ProjectDirs {
-    ProjectDirs::from("app", "FastDiscord", "FastDiscord").expect("no home directory known to the OS")
+    ProjectDirs::from("app", "FastDiscord", "FastDiscord")
+        .expect("no home directory known to the OS")
 }
 
 pub fn settings_file() -> PathBuf {

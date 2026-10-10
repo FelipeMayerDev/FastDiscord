@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
-use super::{Capture, INPUT_CAP, OUTPUT_CAP, PREBUFFER, Ring, VOICE_RATE};
+use super::{Capture, EFFECTS, INPUT_CAP, OUTPUT_CAP, PREBUFFER, Ring, VOICE_RATE};
 
 static INPUT_DEVICES: OnceLock<Vec<(String, String)>> = OnceLock::new();
 static OUTPUT_DEVICES: OnceLock<Vec<(String, String)>> = OnceLock::new();
@@ -18,16 +18,22 @@ static OUTPUT_DEVICES: OnceLock<Vec<(String, String)>> = OnceLock::new();
 /// `(device id, friendly name)` of every device. Cached: the settings
 /// window calls this per frame.
 pub fn list_devices(output: bool) -> Vec<(String, String)> {
-    let cache = if output { &OUTPUT_DEVICES } else { &INPUT_DEVICES };
+    let cache = if output {
+        &OUTPUT_DEVICES
+    } else {
+        &INPUT_DEVICES
+    };
     cache.get_or_init(|| enumerate(output)).clone()
 }
 
 fn enumerate(output: bool) -> Vec<(String, String)> {
     let host = cpal::default_host();
     let devices = if output {
-        host.output_devices().map(|devices| devices.collect::<Vec<_>>())
+        host.output_devices()
+            .map(|devices| devices.collect::<Vec<_>>())
     } else {
-        host.input_devices().map(|devices| devices.collect::<Vec<_>>())
+        host.input_devices()
+            .map(|devices| devices.collect::<Vec<_>>())
     };
     let mut list: Vec<(String, String)> = devices
         .unwrap_or_default()
@@ -68,6 +74,15 @@ impl AudioLinks {
     pub fn set_corked(&self, corked: bool) {
         self.requests.corked.store(corked, Ordering::Relaxed);
     }
+
+    /// ponytail: no echo cancellation on Windows — cpal can't open WASAPI
+    /// streams in the Communications category (where the OS applies its
+    /// AEC); needs raw IAudioClient2 with AudioCategory_Communications.
+    pub fn set_echo_cancel(&self, on: bool) {
+        if on {
+            log::warn!("cancelamento de eco ainda não é suportado no Windows");
+        }
+    }
 }
 
 impl Drop for AudioLinks {
@@ -98,7 +113,10 @@ pub fn start(
         let (stop, requests) = (Arc::clone(&stop), Arc::clone(&requests));
         let (output_ring, devices) = (
             Arc::clone(&output_ring),
-            (output_device.map(str::to_string), input_device.map(str::to_string)),
+            (
+                output_device.map(str::to_string),
+                input_device.map(str::to_string),
+            ),
         );
         std::thread::Builder::new()
             .name("fastdiscord-voice-audio".into())
@@ -124,7 +142,7 @@ fn run(
 ) {
     let host = cpal::default_host();
     let mut streams = open(&host, &devices, output_ring, capture);
-    let mut corked = false;
+    let mut corked = [false; 2];
     while !stop.load(Ordering::Relaxed) {
         std::thread::sleep(Duration::from_millis(100));
         if let Some(wanted) = requests.retarget.lock().unwrap().take()
@@ -135,13 +153,18 @@ fn run(
             streams = open(&host, &devices, output_ring, capture);
             log::info!("áudio retargetado: {devices:?}");
             // Fresh streams play; the check below pauses them if corked.
-            corked = false;
+            corked = [false; 2];
         }
-        let want_corked = requests.corked.load(Ordering::Relaxed);
-        if want_corked != corked {
-            corked = want_corked;
-            for stream in streams.iter().flatten() {
-                let _ = if corked { stream.pause() } else { stream.play() };
+        let want = requests.corked.load(Ordering::Relaxed);
+        // [output, input]: the output stays open while effects play (the
+        // leave tone after a call ends).
+        let want = [want && !EFFECTS.busy(), want];
+        for ((stream, corked), want) in streams.iter().zip(&mut corked).zip(want) {
+            if want != *corked {
+                *corked = want;
+                if let Some(stream) = stream {
+                    let _ = if want { stream.pause() } else { stream.play() };
+                }
             }
         }
     }
@@ -219,6 +242,7 @@ fn open_playback(device: &cpal::Device, ring: Arc<Ring>) -> Result<cpal::Stream,
                 }
                 ring.pop(&mut stereo[..have]);
             }
+            EFFECTS.mix_into(&mut stereo);
             for (frame, lr) in out.chunks_mut(channels).zip(stereo.chunks(2)) {
                 match frame {
                     [mono] => *mono = (lr[0] + lr[1]) / 2.0,

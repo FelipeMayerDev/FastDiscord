@@ -4,9 +4,9 @@
 use egui::{RichText, Sense, Vec2, pos2};
 
 use crate::app::{ConnState, VesktopApp, VoiceConn};
-use crate::model::{CHANNEL_KIND_CATEGORY, Channel, User, VoiceState};
+use crate::model::{CHANNEL_KIND_CATEGORY, Channel, VoiceState};
 use crate::theme;
-use crate::ui::{draw_texture_round, initial_circle};
+use crate::ui::{draw_texture_round, fade, initial_circle};
 use crate::util;
 
 /// Height of the user panel row, pinned so the bottom block never clips.
@@ -126,7 +126,7 @@ fn dm_sidebar_top(app: &mut VesktopApp, ui: &mut egui::Ui) {
         ui.label(
             RichText::new("Mensagens diretas")
                 .small()
-                .strong()
+                .family(theme::bold())
                 .color(theme::MUTED),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -153,15 +153,16 @@ fn guild_sidebar_top(app: &mut VesktopApp, ui: &mut egui::Ui) {
             .unwrap_or_default();
         let (rect, response) =
             ui.allocate_exact_size(Vec2::new(ui.available_width(), 26.0), Sense::click());
-        if response.hovered() {
-            ui.painter()
-                .rect_filled(rect, theme::RADIUS_SM, theme::HOVER);
-        }
+        ui.painter().rect_filled(
+            rect,
+            theme::RADIUS_SM,
+            fade(ui, response.id, response.hovered(), egui::Color32::TRANSPARENT, theme::HOVER),
+        );
         ui.painter().text(
             pos2(rect.left(), rect.center().y),
             egui::Align2::LEFT_CENTER,
             &title,
-            egui::FontId::proportional(15.5),
+            egui::FontId::new(15.5, theme::bold()),
             theme::TEXT,
         );
         draw_chevron(
@@ -171,7 +172,7 @@ fn guild_sidebar_top(app: &mut VesktopApp, ui: &mut egui::Ui) {
                     + ui.painter()
                         .layout_no_wrap(
                             title.clone(),
-                            egui::FontId::proportional(15.5),
+                            egui::FontId::new(15.5, theme::bold()),
                             theme::TEXT,
                         )
                         .size()
@@ -197,10 +198,11 @@ fn sidebar_nav_row(
 ) {
     let width = ui.available_width();
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 34.0), Sense::hover());
-    if response.hovered() {
-        ui.painter()
-            .rect_filled(rect, theme::RADIUS_SM, theme::HOVER);
-    }
+    ui.painter().rect_filled(
+        rect,
+        theme::RADIUS_SM,
+        fade(ui, response.id, response.hovered(), egui::Color32::TRANSPARENT, theme::HOVER),
+    );
     let mut content = ui.new_child(
         egui::UiBuilder::new()
             .max_rect(rect)
@@ -308,7 +310,7 @@ fn user_panel(app: &mut VesktopApp, ui: &mut egui::Ui) {
                     ui.add_space(2.0);
                     ui.add(
                         egui::Label::new(
-                            RichText::new(&name).size(14.0).strong().color(theme::TEXT),
+                            RichText::new(&name).size(14.0).family(theme::bold()).color(theme::TEXT),
                         )
                         .truncate(),
                     );
@@ -327,7 +329,9 @@ fn user_panel(app: &mut VesktopApp, ui: &mut egui::Ui) {
                         egui::FontId::proportional(14.0),
                         color,
                     );
-                }) {
+                })
+                .clicked()
+                {
                     app.settings_open = !app.settings_open;
                 }
                 ui.add_space(4.0);
@@ -335,7 +339,8 @@ fn user_panel(app: &mut VesktopApp, ui: &mut egui::Ui) {
                 // the previous one, so a chevron is added *before* its icon
                 // to render on the icon's right, Discord-style.
                 let deaf = app.voice_deaf;
-                compact_button(ui, "Dispositivos de áudio (em breve)", draw_chevron);
+                let chevron = compact_button(ui, "Dispositivos de áudio", draw_chevron);
+                devices_popup(app, &chevron, true);
                 if compact_button(
                     ui,
                     if deaf {
@@ -344,11 +349,14 @@ fn user_panel(app: &mut VesktopApp, ui: &mut egui::Ui) {
                         "Silenciar áudio (surdo)"
                     },
                     |painter, center, color| draw_headset(painter, center, color, deaf),
-                ) {
+                )
+                .clicked()
+                {
                     app.set_voice_deaf(!deaf);
                 }
                 let muted = app.voice_muted;
-                compact_button(ui, "Dispositivos de voz (em breve)", draw_chevron);
+                let chevron = compact_button(ui, "Dispositivos de voz", draw_chevron);
+                devices_popup(app, &chevron, false);
                 if compact_button_accent(
                     ui,
                     if muted {
@@ -366,6 +374,16 @@ fn user_panel(app: &mut VesktopApp, ui: &mut egui::Ui) {
     );
 }
 
+/// The mic/headset chevron's popup: device, input controls and a link to
+/// the voice settings, as in Discord. Stays open while adjusting a slider.
+fn devices_popup(app: &mut VesktopApp, chevron: &egui::Response, output: bool) {
+    egui::Popup::menu(chevron)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .align(egui::RectAlign::TOP_START)
+        .width(260.0)
+        .show(|ui| crate::ui::settings_window::voice_devices_menu(app, ui, output));
+}
+
 /// Like `compact_button`, with an optional accent fill — the red rounded
 /// box Discord puts behind the mic while it is muted.
 fn compact_button_accent(
@@ -375,11 +393,10 @@ fn compact_button_accent(
     draw: impl FnOnce(&egui::Painter, egui::Pos2, egui::Color32),
 ) -> bool {
     let (rect, response) = ui.allocate_exact_size(Vec2::new(20.0, 26.0), Sense::click());
-    if let Some(fill) = accent {
-        ui.painter().rect_filled(rect, 4.0, fill);
-    } else if response.hovered() {
-        ui.painter().rect_filled(rect, 4.0, theme::HOVER);
-    }
+    let idle = accent.unwrap_or(egui::Color32::TRANSPARENT);
+    let hover = accent.unwrap_or(theme::HOVER);
+    ui.painter()
+        .rect_filled(rect, 4.0, fade(ui, response.id, response.hovered(), idle, hover));
     let color = if accent.is_some() || response.hovered() {
         theme::WHITE
     } else {
@@ -396,18 +413,17 @@ fn compact_button(
     ui: &mut egui::Ui,
     tooltip: &str,
     draw: impl FnOnce(&egui::Painter, egui::Pos2, egui::Color32),
-) -> bool {
+) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::new(20.0, 26.0), Sense::click());
-    if response.hovered() {
-        ui.painter().rect_filled(rect, 4.0, theme::HOVER);
-    }
-    let color = if response.hovered() {
-        theme::WHITE
-    } else {
-        theme::TEXT
-    };
+    let hovered = response.hovered();
+    ui.painter().rect_filled(
+        rect,
+        4.0,
+        fade(ui, response.id, hovered, egui::Color32::TRANSPARENT, theme::HOVER),
+    );
+    let color = fade(ui, response.id.with("glyph"), hovered, theme::TEXT, theme::WHITE);
     draw(ui.painter(), rect.center(), color);
-    response.on_hover_text(tooltip).clicked()
+    response.on_hover_text(tooltip)
 }
 
 /// Microphone: capsule, U-shaped stand and stem; red slash when muted.
@@ -647,8 +663,8 @@ fn voice_panel(app: &mut VesktopApp, ui: &mut egui::Ui) {
         leave = true;
     }
 
-    // Action row: screen share, activities, soundboard (mute lives in the
-    // user panel below, as in Discord).
+    // Action row: screen share, activities, soundboard, DJ (mute lives in
+    // the user panel below, as in Discord).
     if in_voice {
         ui.add_space(2.0);
         let width = ui.available_width();
@@ -658,7 +674,7 @@ fn voice_panel(app: &mut VesktopApp, ui: &mut egui::Ui) {
             |ui| {
                 ui.add_space(8.0);
                 let gap = 6.0;
-                let button_width = (width - 16.0 - 2.0 * gap) / 3.0;
+                let button_width = (width - 16.0 - 3.0 * gap) / 4.0;
                 let action = |ui: &mut egui::Ui, glyph: &str, color, tooltip: &str| {
                     ui.add_sized(
                         [button_width, VOICE_ACTIONS_H],
@@ -672,12 +688,23 @@ fn voice_panel(app: &mut VesktopApp, ui: &mut egui::Ui) {
                     ui,
                     "🖥️",
                     if sharing { theme::GREEN } else { theme::TEXT },
-                    if sharing { "Parar de compartilhar" } else { "Compartilhar tela" },
+                    if sharing {
+                        "Parar de compartilhar"
+                    } else {
+                        "Compartilhar tela"
+                    },
                 ) {
                     app.toggle_screen_share(ui.ctx());
                 }
                 let _ = action(ui, "🎯", theme::TEXT, "Atividades (em breve)");
-                let _ = action(ui, "🎵", theme::TEXT, "Soundboard (em breve)");
+                let extras = &mut app.extras;
+                let color = |open| if open { theme::GREEN } else { theme::TEXT };
+                if action(ui, "🔊", color(extras.soundboard_open), "Soundboard") {
+                    extras.soundboard_open = !extras.soundboard_open;
+                }
+                if action(ui, "🎵", color(extras.music_open), "Música (DJ)") {
+                    extras.music_open = !extras.music_open;
+                }
                 ui.add_space(8.0);
             },
         );
@@ -703,7 +730,8 @@ fn signal_icon(ui: &mut egui::Ui, color: egui::Color32, center: egui::Pos2) {
 }
 
 /// A member under a voice channel: avatar (green ring while speaking),
-/// name, mute/deaf icons and a right-click volume slider.
+/// name, mute/deaf icons and a menu (click or right-click) with their
+/// volume and local mute.
 fn voice_member_row(app: &mut VesktopApp, ui: &mut egui::Ui, guild_id: &str, member: &VoiceState) {
     let fetched = app.voice_member_name(guild_id, &member.user_id);
     let label = if fetched.is_empty() {
@@ -715,18 +743,25 @@ fn voice_member_row(app: &mut VesktopApp, ui: &mut egui::Ui, guild_id: &str, mem
     let width = ui.available_width();
     // A live member is clickable: it opens their stream.
     let live = app.is_live(&member.user_id, member.self_stream);
-    let watchable = live && app.me.as_ref().is_none_or(|me| me.id != member.user_id);
-    let sense = if watchable { Sense::click() } else { Sense::hover() };
+    let is_me = app.me.as_ref().is_some_and(|me| me.id == member.user_id);
+    let watchable = live && !is_me;
+    let sense = if is_me {
+        Sense::hover()
+    } else {
+        Sense::click()
+    };
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 34.0), sense);
-    if watchable && response.hovered() {
-        ui.painter().rect_filled(rect, 4.0, theme::HOVER);
-    }
+    ui.painter().rect_filled(
+        rect,
+        4.0,
+        fade(ui, response.id, !is_me && response.hovered(), egui::Color32::TRANSPARENT, theme::HOVER),
+    );
     let response = if watchable {
-        response.on_hover_text("Assistir à transmissão")
+        response.on_hover_text("Assistir à transmissão (clique direito: volume)")
     } else {
         response
     };
-    if response.clicked() {
+    if watchable && response.clicked() {
         app.watch(&member.user_id);
     }
     let mut content = ui.new_child(
@@ -769,32 +804,56 @@ fn voice_member_row(app: &mut VesktopApp, ui: &mut egui::Ui, guild_id: &str, mem
             .size(13.0)
             .color(theme::MUTED),
     );
+    let locally_muted = app.settings.muted_users.contains(&member.user_id);
+    if locally_muted {
+        content
+            .label(RichText::new(" 🔇").size(13.0).color(theme::RED))
+            .on_hover_text("Silenciado por você");
+    }
     if live {
         content.add_space(6.0);
         content.label(
             RichText::new(" AO VIVO ")
                 .size(9.5)
-                .strong()
+                .family(theme::bold())
                 .color(egui::Color32::WHITE)
                 .background_color(theme::RED),
         );
     }
 
+    if is_me {
+        return;
+    }
     let mut percent = *app
         .settings
         .user_volumes
         .get(&member.user_id)
         .unwrap_or(&100);
-    response.context_menu(|ui| {
-        ui.set_min_width(180.0);
-        ui.label(RichText::new(&label).strong().size(13.0));
-        if ui
-            .add(egui::Slider::new(&mut percent, 0..=200).text("Volume"))
-            .changed()
-        {
-            app.set_user_volume(member.user_id.clone(), percent);
-        }
-    });
+    // Discord-style: right-click anywhere, or left-click when the click
+    // isn't taken by "watch stream".
+    let open = if response.secondary_clicked() || (response.clicked() && !watchable) {
+        Some(egui::SetOpenCommand::Bool(true))
+    } else {
+        None
+    };
+    egui::Popup::context_menu(&response)
+        .open_memory(open)
+        .show(|ui| {
+            ui.set_min_width(200.0);
+            ui.label(RichText::new(&label).strong().size(13.0));
+            ui.separator();
+            ui.label(RichText::new("Volume do usuário").small().color(theme::MUTED));
+            if ui
+                .add(egui::Slider::new(&mut percent, 0..=200).suffix("%"))
+                .changed()
+            {
+                app.set_user_volume(member.user_id.clone(), percent);
+            }
+            let mut muted = locally_muted;
+            if ui.checkbox(&mut muted, "Silenciar").changed() {
+                app.set_user_muted(member.user_id.clone(), muted);
+            }
+        });
 }
 
 fn paint_dm_list(app: &mut VesktopApp, ui: &mut egui::Ui) {
@@ -817,8 +876,7 @@ fn paint_dm_list(app: &mut VesktopApp, ui: &mut egui::Ui) {
         }
         let selected = app.selected_channel.as_deref() == Some(channel.id.as_str());
         let unread = app.unread.get(&channel.id).copied().unwrap_or(0) > 0;
-        let avatar_user = channel.recipients.first();
-        let response = row(app, ui, avatar_user, "", &name, selected, unread, false);
+        let response = row(app, ui, Some(&channel), "", &name, selected, unread, false);
         if response.clicked() {
             clicked = Some(channel.id.clone());
         }
@@ -899,16 +957,20 @@ fn paint_guild_channels(app: &mut VesktopApp, ui: &mut egui::Ui) {
         .collect();
     categories.sort_by_key(|channel| (channel.position, channel.name.clone().unwrap_or_default()));
     for category in categories {
-        ui.add_space(10.0);
+        ui.add_space(16.0);
         ui.horizontal(|ui| {
-            ui.add_space(10.0);
+            ui.spacing_mut().item_spacing = Vec2::ZERO;
+            let (chevron, _) = ui.allocate_exact_size(Vec2::new(14.0, 14.0), Sense::hover());
+            draw_chevron(ui.painter(), chevron.center(), theme::MUTED);
+            ui.add_space(2.0);
             ui.label(
                 RichText::new(category.display_name().to_uppercase())
-                    .small()
-                    .strong()
+                    .size(12.0)
+                    .family(theme::bold())
                     .color(theme::MUTED),
             );
         });
+        ui.add_space(2.0);
         let mut children: Vec<&Channel> = channels
             .iter()
             .filter(|channel| channel.parent_id.as_deref() == Some(category.id.as_str()))
@@ -932,7 +994,7 @@ fn paint_guild_channels(app: &mut VesktopApp, ui: &mut egui::Ui) {
 fn row(
     app: &mut VesktopApp,
     ui: &mut egui::Ui,
-    avatar_user: Option<&User>,
+    dm: Option<&Channel>,
     prefix: &str,
     label: &str,
     selected: bool,
@@ -940,15 +1002,31 @@ fn row(
     dimmed: bool,
 ) -> egui::Response {
     let width = ui.available_width();
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 40.0), Sense::click());
+    // Discord: 42px DM rows, 34px channel rows.
+    let height = if dm.is_some() { 42.0 } else { 34.0 };
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, height), Sense::click());
+    let hovered = response.hovered() && !dimmed;
     let bg = if selected {
         theme::SELECTED
-    } else if response.hovered() && !dimmed {
-        theme::HOVER
     } else {
-        theme::SIDEBAR
+        fade(ui, response.id, hovered, egui::Color32::TRANSPARENT, theme::HOVER)
     };
-    ui.painter().rect_filled(rect, 6.0, bg);
+    ui.painter().rect_filled(rect, theme::RADIUS_SM, bg);
+    // Unread: the white pill on the sidebar's left edge, grown in.
+    let pill = ui
+        .ctx()
+        .animate_bool_with_time(response.id.with("pill"), unread && !selected, 0.12);
+    if pill > 0.0 {
+        let left = ui.clip_rect().left();
+        ui.painter().rect_filled(
+            egui::Rect::from_center_size(
+                pos2(left, rect.center().y),
+                Vec2::new(8.0, 8.0 * pill),
+            ),
+            4.0,
+            theme::WHITE,
+        );
+    }
 
     let mut content = ui.new_child(
         egui::UiBuilder::new()
@@ -958,19 +1036,15 @@ fn row(
             ))
             .layout(egui::Layout::left_to_right(egui::Align::Center)),
     );
-    if let Some(user) = avatar_user {
-        let url = util::user_avatar_url(user);
-        let avatar = match app.images.get(ui.ctx(), &app.handle, &url) {
+    if let Some(dm) = dm {
+        let texture =
+            util::dm_icon_url(dm).and_then(|url| app.images.get(ui.ctx(), &app.handle, &url));
+        let avatar = match texture {
             Some(texture) => draw_texture_round(&mut content, &texture, 26.0),
-            None => initial_circle(
-                &mut content,
-                26.0,
-                user.display_name(),
-                util::name_color(user.display_name()),
-            ),
+            None => initial_circle(&mut content, 26.0, label, util::name_color(label)),
         };
         // Presence dot, Discord-style, on the avatar's bottom-right.
-        if let Some(status) = app.presence.get(&user.id) {
+        if let Some(status) = dm.dm_partner().and_then(|user| app.presence.get(&user.id)) {
             let center = avatar.max - Vec2::splat(4.0);
             let color = match status.as_str() {
                 "online" => theme::GREEN,
@@ -978,19 +1052,27 @@ fn row(
                 "dnd" => theme::RED,
                 _ => theme::MUTED,
             };
-            content.painter().circle_filled(center, 6.0, theme::SIDEBAR);
+            content.painter().circle_filled(center, 6.0, theme::RAIL.blend(bg));
             content.painter().circle_filled(center, 4.5, color);
         }
         content.add_space(8.0);
     }
-    let mut text = RichText::new(format!("{prefix}{label}")).size(14.5);
-    text = if unread {
-        text.strong().color(theme::TEXT)
-    } else if dimmed {
-        text.color(theme::MUTED)
+    // Read channels sit muted and brighten on hover; selected and unread
+    // ones are white, unread in the bold weight.
+    let color = if selected || unread {
+        theme::WHITE
     } else {
-        text.color(theme::TEXT)
+        fade(ui, response.id.with("text"), hovered, theme::MUTED, theme::TEXT)
     };
-    content.label(text);
+    content.spacing_mut().item_spacing = Vec2::ZERO;
+    if !prefix.is_empty() {
+        content.label(RichText::new(prefix).size(16.0).color(theme::MUTED));
+        content.add_space(6.0);
+    }
+    let mut text = RichText::new(label).size(15.0).color(color);
+    if unread {
+        text = text.family(theme::bold());
+    }
+    content.add(egui::Label::new(text).truncate().selectable(false));
     response
 }

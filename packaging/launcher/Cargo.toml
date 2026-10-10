@@ -1,0 +1,18 @@
+[package]
+name = "fastdiscord-launcher"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+description = "Single-file Windows build of FastDiscord: embeds the portable zip and runs it"
+publish = false
+
+[[bin]]
+name = "FastDiscord"
+path = "src/main.rs"
+
+# The exe's icon in Explorer and on the taskbar shortcut.
+[build-dependencies]
+embed-resource = "3"
+
+[profile.release]
+strip = "symbols"

@@ -1,5 +1,5 @@
 //! Startup splash, shown inside the main window while a saved token has no
-//! READY yet: the animated Vesktop logo, "Carregando Vesktop…" and a status
+//! READY yet: the animated FastDiscord logo, "Carregando FastDiscord…" and a status
 //! line that follows the real connection steps. Covers Electron's slow
 //! startup without a separate window (docs/UI.md §1).
 
@@ -19,12 +19,12 @@ pub fn show(app: &mut VesktopApp, root: &mut egui::Ui) {
             ui.centered_and_justified(|ui| {
                 ui.vertical_centered(|ui| {
                     ui.add(
-                        Image::from_bytes("cache://vesktop-splash.webp", SPLASH_WEBP)
+                        Image::from_bytes("cache://fastdiscord-splash.webp", SPLASH_WEBP)
                             .fit_to_exact_size(Vec2::splat(LOGO)),
                     );
                     ui.add_space(18.0);
                     ui.label(
-                        RichText::new("Carregando Vesktop…")
+                        RichText::new("Carregando FastDiscord…")
                             .size(16.0)
                             .strong()
                             .color(theme::TEXT),

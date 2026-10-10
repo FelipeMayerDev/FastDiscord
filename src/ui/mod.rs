@@ -2,13 +2,22 @@
 
 pub mod channel_sidebar;
 pub mod chat;
-pub mod screen_share;
+pub mod image_viewer;
 pub mod login;
+pub mod screen_share;
 pub mod server_rail;
 pub mod settings_window;
 pub mod splash;
+pub mod voice_processing;
+pub mod voice_extras;
 
 use egui::{Align2, Color32, CornerRadius, FontId, Image, Rect, Sense, TextureHandle, Vec2, pos2};
+
+/// Discord's hover fade: `from` → `to` over 100 ms while `on` holds.
+pub fn fade(ui: &egui::Ui, id: egui::Id, on: bool, from: Color32, to: Color32) -> Color32 {
+    let t = ui.ctx().animate_bool_with_time(id.with("fade"), on, 0.1);
+    from.lerp_to_gamma(to, t)
+}
 
 pub fn draw_texture(ui: &mut egui::Ui, texture: &TextureHandle, size: Vec2) {
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());

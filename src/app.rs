@@ -9,7 +9,8 @@ use egui::Context;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 
-use crate::backend::voice::VoiceCommand;
+use crate::backend::audio::{Sound, play_sound};
+use crate::backend::voice::{AudioConfig, VoiceCommand};
 use crate::backend::{self, Command, UiEvent};
 use crate::image_cache::ImageCache;
 use crate::model::{Channel, Guild, Message, User, VoiceState};
@@ -126,6 +127,10 @@ pub struct VesktopApp {
     pub(crate) channel_index: HashMap<String, ChannelRef>,
     pub(crate) messages: HashMap<String, Vec<Message>>,
     pub(crate) has_more: HashMap<String, bool>,
+    /// Cached channels that may have missed messages while the gateway was
+    /// down, with the last message cached before the drop: caught up with
+    /// an `after=` fetch from there when next opened.
+    pub(crate) stale_channels: HashMap<String, String>,
     pub(crate) loading_channels: HashSet<String>,
     pub(crate) loading_guilds: HashSet<String>,
     pub(crate) unread: HashMap<String, u64>,
@@ -173,6 +178,8 @@ pub struct VesktopApp {
     pub(crate) images: ImageCache,
     /// Larger cache for inline image attachments.
     pub(crate) images_large: ImageCache,
+    /// The image opened from the chat in its own window.
+    pub(crate) viewer: Option<ui::image_viewer::ImageViewer>,
 
     pub(crate) compose: String,
     pub(crate) compose_error: Option<String>,
@@ -182,10 +189,14 @@ pub struct VesktopApp {
     /// Set by "Ir para o presente", consumed inside the timeline's scroll.
     pub(crate) jump_to_present: bool,
     pub(crate) settings_open: bool,
+    /// Page the settings window shows (left nav).
+    pub(crate) settings_tab: ui::settings_window::SettingsTab,
     pub(crate) login_token: String,
     /// "Encontre ou comece uma conversa" filter for the DM list.
     pub(crate) dm_search: String,
     pub(crate) applied_theme: Option<Theme>,
+    /// Soundboard picker and DJ (ui/voice_extras.rs).
+    pub(crate) extras: ui::voice_extras::VoiceExtras,
 }
 
 impl VesktopApp {
@@ -217,6 +228,7 @@ impl VesktopApp {
             channel_index: HashMap::new(),
             messages: HashMap::new(),
             has_more: HashMap::new(),
+            stale_channels: HashMap::new(),
             loading_channels: HashSet::new(),
             loading_guilds: HashSet::new(),
             unread: HashMap::new(),
@@ -246,16 +258,19 @@ impl VesktopApp {
             user_cache: HashMap::new(),
             images: ImageCache::new(128),
             images_large: ImageCache::new(800),
+            viewer: None,
             compose: String::new(),
             compose_error: None,
             last_compose: String::new(),
             last_typing_sent: None,
             jump_to_present: false,
             settings_open: false,
+            settings_tab: Default::default(),
             login_token: String::new(),
             dm_search: String::new(),
             // The first update() applies the theme through the live context.
             applied_theme: None,
+            extras: Default::default(),
             settings,
             handle,
             event_tx,
@@ -277,6 +292,7 @@ impl VesktopApp {
 
         // Image loaders for the animated WebP splash.
         egui_extras::install_image_loaders(&_cc.egui_ctx);
+        theme::install_fonts(&_cc.egui_ctx);
 
         if let Some(token) = app.settings.token.clone() {
             app.start_backend(token);
@@ -369,6 +385,7 @@ impl VesktopApp {
         self.channel_index.clear();
         self.messages.clear();
         self.has_more.clear();
+        self.stale_channels.clear();
         self.loading_channels.clear();
         self.loading_guilds.clear();
         self.unread.clear();
@@ -401,6 +418,9 @@ impl VesktopApp {
                 guild_id: guild_id.to_string(),
             });
         }
+        self.send(Command::SubscribeGuild {
+            guild_id: guild_id.to_string(),
+        });
         self.settings.save();
     }
 
@@ -451,14 +471,22 @@ impl VesktopApp {
         }
         self.settings.selected_channel_id = Some(channel_id.clone());
         self.settings.save();
-        if !self.messages.contains_key(&channel_id) && !self.loading_channels.contains(&channel_id)
-        {
-            self.loading_channels.insert(channel_id.clone());
-            self.send(Command::LoadMessages {
-                channel_id,
-                before: None,
-            });
+        if self.loading_channels.contains(&channel_id) {
+            return;
         }
+        // Cached history shows right away; only a channel that may have
+        // missed messages during a reconnect asks for what's newer.
+        let after = match self.stale_channels.remove(&channel_id) {
+            _ if !self.messages.contains_key(&channel_id) => None,
+            Some(last) => Some(last),
+            None => return,
+        };
+        self.loading_channels.insert(channel_id.clone());
+        self.send(Command::LoadMessages {
+            channel_id,
+            before: None,
+            after,
+        });
     }
 
     pub(crate) fn send_current_message(&mut self) {
@@ -495,6 +523,7 @@ impl VesktopApp {
         self.send(Command::LoadMessages {
             channel_id,
             before: Some(oldest),
+            after: None,
         });
     }
 
@@ -618,9 +647,9 @@ impl VesktopApp {
         if self.settings.fockytv_share {
             let nick = self.fockytv_nick();
             let ctx = ctx.clone();
-            let capture = crate::backend::capture::start(self.handle.clone(), move || {
-                ctx.request_repaint()
-            });
+            let capture =
+                crate::backend::capture::start(self.handle.clone(), move || ctx.request_repaint());
+            play_sound(Sound::StreamStart);
             self.fockytv = Some(crate::backend::fockytv::publish(
                 &self.settings.fockytv_url,
                 &nick,
@@ -637,15 +666,20 @@ impl VesktopApp {
             stream_key: stream_key.clone(),
         });
         self.stream = Some(GoLive::new(stream_key));
+        play_sound(Sound::StreamStart);
         let ctx = ctx.clone();
-        self.screen = Some(crate::backend::capture::start(self.handle.clone(), move || {
-            ctx.request_repaint()
-        }));
+        self.screen = Some(crate::backend::capture::start(
+            self.handle.clone(),
+            move || ctx.request_repaint(),
+        ));
     }
 
     /// The one way a share ends (button, picker cancelled, source gone,
     /// left voice, deleted by Discord): capture off, op 19 if still live.
     pub(crate) fn stop_screen_share(&mut self) {
+        if self.screen.is_some() {
+            play_sound(Sound::StreamStop);
+        }
         self.screen = None;
         self.screen_texture = None;
         self.fockytv = None;
@@ -678,9 +712,10 @@ impl VesktopApp {
         if self.me.as_ref().is_some_and(|me| me.id == user_id) {
             return self.fockytv.is_some();
         }
-        self.user_cache
-            .get(user_id)
-            .is_some_and(|user| self.fockytv_live.contains_key(&user.username.to_lowercase()))
+        self.user_cache.get(user_id).is_some_and(|user| {
+            self.fockytv_live
+                .contains_key(&user.username.to_lowercase())
+        })
     }
 
     /// "Assistir": the member's FockyTV live (WHEP) or Discord's Go Live,
@@ -713,7 +748,10 @@ impl VesktopApp {
         if !self.settings.fockytv_share || !matches!(self.voice, VoiceConn::Connected { .. }) {
             return;
         }
-        if self.fockytv_polled.is_some_and(|at| at.elapsed() < Duration::from_secs(5)) {
+        if self
+            .fockytv_polled
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(5))
+        {
             return;
         }
         self.fockytv_polled = Some(Instant::now());
@@ -746,7 +784,11 @@ impl VesktopApp {
             return;
         };
         let stream_key = format!("guild:{guild_id}:{channel_id}:{user_id}");
-        if self.watch.as_ref().is_some_and(|watch| watch.key == stream_key) {
+        if self
+            .watch
+            .as_ref()
+            .is_some_and(|watch| watch.key == stream_key)
+        {
             return;
         }
         self.stop_watching();
@@ -767,7 +809,11 @@ impl VesktopApp {
 
     /// Our stream or the watched one, by key, and whether we're the viewer.
     fn go_live(&mut self, stream_key: &str) -> Option<(&mut GoLive, bool)> {
-        if let Some(stream) = self.stream.as_mut().filter(|stream| stream.key == stream_key) {
+        if let Some(stream) = self
+            .stream
+            .as_mut()
+            .filter(|stream| stream.key == stream_key)
+        {
             return Some((stream, false));
         }
         self.watch
@@ -825,13 +871,31 @@ impl VesktopApp {
         });
     }
 
-    /// Right-click volume on a voice member: persists and feeds the mixer.
+    /// Voice member menu volume: persists and feeds the mixer.
     pub(crate) fn set_user_volume(&mut self, user_id: String, percent: u8) {
         self.settings.user_volumes.insert(user_id.clone(), percent);
         self.settings.save();
+        self.push_user_volume(&user_id);
+    }
+
+    /// Local mute: silences one user for us only, kept across sessions.
+    pub(crate) fn set_user_muted(&mut self, user_id: String, muted: bool) {
+        if muted {
+            self.settings.muted_users.insert(user_id.clone());
+        } else {
+            self.settings.muted_users.remove(&user_id);
+        }
+        self.settings.save();
+        self.push_user_volume(&user_id);
+    }
+
+    /// The mixer's gain for one user: their volume, or zero when muted.
+    fn push_user_volume(&self, user_id: &str) {
+        let percent = self.settings.user_volumes.get(user_id).copied().unwrap_or(100);
+        let muted = self.settings.muted_users.contains(user_id);
         let _ = self.voice_cmd_tx.send(VoiceCommand::SetUserVolume {
-            user_id,
-            volume: f32::from(percent) / 100.0,
+            user_id: user_id.to_string(),
+            volume: if muted { 0.0 } else { f32::from(percent) / 100.0 },
         });
     }
 
@@ -855,17 +919,24 @@ impl VesktopApp {
             self.settings.input_device,
             self.settings.output_device
         );
-        let _ = self.voice_cmd_tx.send(VoiceCommand::ApplyConfig {
+        let _ = self.voice_cmd_tx.send(VoiceCommand::ApplyConfig(AudioConfig {
             input_device: self.settings.input_device.clone(),
             output_device: self.settings.output_device.clone(),
             sensitivity: self.settings.input_sensitivity,
             noise_suppression: self.settings.noise_suppression,
-        });
-        for (user_id, percent) in &self.settings.user_volumes {
-            let _ = self.voice_cmd_tx.send(VoiceCommand::SetUserVolume {
-                user_id: user_id.clone(),
-                volume: f32::from(*percent) / 100.0,
-            });
+            bitrate_kbps: self.settings.opus_bitrate_kbps,
+            auto_gain: self.settings.auto_gain,
+            compressor: self.settings.compressor,
+            echo_cancellation: self.settings.echo_cancellation,
+        }));
+        let users: HashSet<&String> = self
+            .settings
+            .user_volumes
+            .keys()
+            .chain(&self.settings.muted_users)
+            .collect();
+        for user_id in users {
+            self.push_user_volume(user_id);
         }
     }
 
@@ -880,6 +951,11 @@ impl VesktopApp {
             }
             VoiceConn::Failed { .. } | VoiceConn::Disconnected => None,
         };
+        if matches!(self.voice, VoiceConn::Connected { .. }) {
+            play_sound(Sound::Leave);
+        }
+        // ponytail: a desync rejoin passes through here too and ends the DJ.
+        self.extras.music.stop();
         self.stop_screen_share();
         self.stop_watching();
         self.voice = VoiceConn::Disconnected;
@@ -1018,6 +1094,15 @@ impl VesktopApp {
                 self.conn = ConnState::Connected;
             }
             UiEvent::Ready { user } => {
+                // A fresh session after a drop: cached channels may have
+                // missed messages in between.
+                for (channel_id, list) in &self.messages {
+                    if let Some(last) = list.last() {
+                        self.stale_channels
+                            .entry(channel_id.clone())
+                            .or_insert_with(|| last.id.clone());
+                    }
+                }
                 self.user_cache.insert(user.id.clone(), user.clone());
                 self.me = Some(user);
                 self.disconnected_at = None;
@@ -1092,28 +1177,38 @@ impl VesktopApp {
                 channel_id,
                 messages,
                 older,
+                newer,
             } => {
                 self.loading_channels.remove(&channel_id);
-                self.has_more.insert(
-                    channel_id.clone(),
-                    messages.len() as u64 >= backend::api::MESSAGES_PER_PAGE,
-                );
+                let full_page = messages.len() as u64 >= backend::api::MESSAGES_PER_PAGE;
+                if newer && full_page {
+                    // More was missed than one page holds: the cache would
+                    // have a hole, so start over from the latest page.
+                    self.messages.remove(&channel_id);
+                    self.loading_channels.insert(channel_id.clone());
+                    self.send(Command::LoadMessages {
+                        channel_id,
+                        before: None,
+                        after: None,
+                    });
+                    return;
+                }
+                if !newer {
+                    self.has_more.insert(channel_id.clone(), full_page);
+                }
                 let entry = self.messages.entry(channel_id).or_default();
                 if older {
                     let mut merged = messages;
                     merged.extend(entry.drain(..));
                     *entry = merged;
-                } else if entry.is_empty() {
-                    *entry = messages;
                 } else {
-                    // A gateway echo may have raced the REST response; merge
-                    // and dedupe by snowflake id.
-                    let mut merged = messages;
-                    merged.extend(entry.drain(..));
-                    merged.sort_by(|a, b| a.id.cmp(&b.id));
-                    merged.dedup_by(|a, b| a.id == b.id);
-                    *entry = merged;
+                    // Catch-up pages and gateway echoes racing the REST
+                    // response overlap the cache: merge and dedupe.
+                    merge_messages(entry, messages);
                 }
+            }
+            UiEvent::MessagesFailed { channel_id } => {
+                self.loading_channels.remove(&channel_id);
             }
             UiEvent::MessageCreated { message } => {
                 let selected =
@@ -1231,6 +1326,18 @@ impl VesktopApp {
                     self.join_voice(guild_id.clone(), channel_id);
                 }
                 let user_id = state.user_id.clone();
+                if let VoiceConn::Connected { channel_id, .. } = &self.voice
+                    && !is_me
+                    && let Some(sound) = ui::voice_extras::roster_sound(
+                        channel_id,
+                        self.voice_states
+                            .get(&guild_id)
+                            .and_then(|roster| roster.get(&user_id)),
+                        &state,
+                    )
+                {
+                    play_sound(sound);
+                }
                 let state_channel = state.channel_id.clone();
                 self.voice_states
                     .entry(guild_id.clone())
@@ -1248,6 +1355,16 @@ impl VesktopApp {
                     self.push_voice_roster(&channel_id);
                 }
             }
+            UiEvent::SoundboardLoaded { guild_id, sounds } => {
+                self.extras.sounds.insert(guild_id, sounds);
+            }
+            UiEvent::SoundboardError { error } => self.extras.soundboard_error = Some(error),
+            UiEvent::VoiceEffect { sound_id, volume } => {
+                if !self.voice_deaf {
+                    self.handle
+                        .spawn(crate::backend::soundboard::play(sound_id, volume));
+                }
+            }
             UiEvent::UserResolved { user } => {
                 self.voice_users_pending.remove(&user.id);
                 self.user_cache.insert(user.id.clone(), user);
@@ -1256,6 +1373,9 @@ impl VesktopApp {
                 guild_id,
                 channel_id,
             } => {
+                if matches!(self.voice, VoiceConn::Connecting { .. }) {
+                    play_sound(Sound::Join);
+                }
                 self.voice = VoiceConn::Connected {
                     guild_id,
                     channel_id: channel_id.clone(),
@@ -1297,7 +1417,10 @@ impl VesktopApp {
                 }
             }
             UiEvent::FockyLive { keys } => {
-                self.fockytv_live = keys.into_iter().map(|key| (key.to_lowercase(), key)).collect();
+                self.fockytv_live = keys
+                    .into_iter()
+                    .map(|key| (key.to_lowercase(), key))
+                    .collect();
             }
             UiEvent::StreamCreated {
                 stream_key,
@@ -1320,7 +1443,10 @@ impl VesktopApp {
                 let me = self.me.as_ref().and_then(|me| me.id.parse().ok());
                 let handle = self.handle.clone();
                 let events = self.event_tx.clone();
-                let capture = self.screen.as_ref().map(|capture| Arc::clone(&capture.frame));
+                let capture = self
+                    .screen
+                    .as_ref()
+                    .map(|capture| Arc::clone(&capture.frame));
                 let Some((go_live, viewer)) = self.go_live(&stream_key) else {
                     return;
                 };
@@ -1367,16 +1493,28 @@ impl VesktopApp {
                 }
                 log::info!("transmissão {stream_key} encerrada pelo Discord: {reason}");
                 // Already gone server-side: no op 19.
-                if self.stream.as_ref().is_some_and(|stream| stream.key == stream_key) {
+                if self
+                    .stream
+                    .as_ref()
+                    .is_some_and(|stream| stream.key == stream_key)
+                {
                     self.stream = None;
                     self.stop_screen_share();
                 }
-                if self.watch.as_ref().is_some_and(|watch| watch.key == stream_key) {
+                if self
+                    .watch
+                    .as_ref()
+                    .is_some_and(|watch| watch.key == stream_key)
+                {
                     self.watch = None;
                     self.watch_texture = None;
                 }
             }
             UiEvent::VoiceLeft => {
+                if matches!(self.voice, VoiceConn::Connected { .. }) {
+                    play_sound(Sound::Leave);
+                }
+                self.extras.music.stop();
                 self.stop_screen_share();
                 self.stop_watching();
                 self.voice = VoiceConn::Disconnected;
@@ -1444,6 +1582,7 @@ impl eframe::App for VesktopApp {
 
         self.poll_events(ctx);
 
+        ui::login::compact_window(ctx, self.me.is_none());
         if self.me.is_none() {
             if self.settings.token.is_some() {
                 // Saved token but no READY yet: Vesktop's own splash, which
@@ -1497,6 +1636,8 @@ impl eframe::App for VesktopApp {
         if self.settings_open {
             ui::settings_window::show(self, ctx);
         }
+        ui::image_viewer::show(self, ctx);
+        ui::voice_extras::show(self, ctx);
         ui::screen_share::poll(self, ctx);
         self.poll_fockytv();
         if self.settings.fockytv_share && matches!(self.voice, VoiceConn::Connected { .. }) {
@@ -1505,5 +1646,42 @@ impl eframe::App for VesktopApp {
         if matches!(self.conn, ConnState::Connecting) {
             ctx.request_repaint_after(Duration::from_millis(400));
         }
+    }
+}
+
+/// Merges a fetched page into a channel's cached history: chronological by
+/// snowflake (numeric, so a shorter id sorts first) without duplicates,
+/// keeping the fetched copy of a message over the cached one.
+fn merge_messages(cache: &mut Vec<Message>, page: Vec<Message>) {
+    let mut merged = page;
+    merged.append(cache);
+    merged.sort_by(|a, b| (a.id.len(), &a.id).cmp(&(b.id.len(), &b.id)));
+    merged.dedup_by(|a, b| a.id == b.id);
+    *cache = merged;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merge_keeps_order_and_drops_duplicates() {
+        let message = |id: &str| -> Message {
+            serde_json::from_value(serde_json::json!({
+                "id": id,
+                "author": { "id": "1", "username": "fulano" }
+            }))
+            .unwrap()
+        };
+        let mut cache = vec![message("999999999999999999"), message("1000000000000000001")];
+        merge_messages(
+            &mut cache,
+            vec![message("1000000000000000002"), message("1000000000000000001")],
+        );
+        let ids: Vec<&str> = cache.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["999999999999999999", "1000000000000000001", "1000000000000000002"]
+        );
     }
 }

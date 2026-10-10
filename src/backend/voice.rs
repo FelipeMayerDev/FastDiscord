@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use songbird::driver::{DecodeConfig, DecodeMode, MixMode};
+use songbird::driver::{Bitrate, DecodeConfig, DecodeMode, MixMode};
 use songbird::events::{CoreEvent, Event, EventContext, EventHandler};
 use songbird::id::{ChannelId, GuildId, UserId};
 use songbird::input::RawAdapter;
@@ -53,12 +53,7 @@ pub enum VoiceCommand {
         user_id: String,
         volume: f32,
     },
-    ApplyConfig {
-        input_device: Option<String>,
-        output_device: Option<String>,
-        sensitivity: u8,
-        noise_suppression: bool,
-    },
+    ApplyConfig(AudioConfig),
     /// The channel's member ids from the main gateway, for the DAVE MLS
     /// group (user accounts get no op 11 from the voice server).
     SetRoster(Vec<u64>),
@@ -86,6 +81,11 @@ pub struct AudioConfig {
     pub output_device: Option<String>,
     pub sensitivity: u8,
     pub noise_suppression: bool,
+    /// Opus send bitrate, kbps.
+    pub bitrate_kbps: u16,
+    pub auto_gain: bool,
+    pub compressor: bool,
+    pub echo_cancellation: bool,
 }
 
 /// State shared between the driver's event handlers and the task loop.
@@ -248,8 +248,8 @@ impl EventHandler for TickMixer {
                 }
             }
             if let Some(ring) = self.shared.output_ring.lock().unwrap().as_ref() {
-                let energia = (mix.iter().map(|s| s * s).sum::<f32>() / mix.len().max(1) as f32)
-                    .sqrt();
+                let energia =
+                    (mix.iter().map(|s| s * s).sum::<f32>() / mix.len().max(1) as f32).sqrt();
                 ring.push(&mix);
                 let mut last = self.last_log.lock().unwrap();
                 if last.elapsed() >= Duration::from_secs(1) {
@@ -280,10 +280,7 @@ impl EventHandler for TickMixer {
         let decode_failing = tick.speaking.values().any(|data| {
             data.packet.is_some() && data.decoded_voice.as_ref().is_none_or(Vec::is_empty)
         });
-        let unmapped = tick
-            .speaking
-            .keys()
-            .any(|ssrc| !map.contains_key(ssrc));
+        let unmapped = tick.speaking.keys().any(|ssrc| !map.contains_key(ssrc));
         if unmapped || decode_failing {
             let mut suspect = self.unmapped_since.lock().unwrap();
             let (since, reported) = suspect.get_or_insert((Instant::now(), false));
@@ -346,10 +343,7 @@ impl EventHandler for RtpWatch {
         let mut first_seen = self.first_seen.lock().unwrap();
         let since = first_seen.entry(ssrc).or_insert_with(Instant::now);
         if since.elapsed() > Duration::from_secs(5)
-            && !self
-                .shared
-                .desync_reported
-                .swap(true, Ordering::Relaxed)
+            && !self.shared.desync_reported.swap(true, Ordering::Relaxed)
         {
             log::warn!("rtp do ssrc {ssrc} sem mapa há 5s; sessão de voz fora de sincronia");
             self.event_tx.send(UiEvent::VoiceSuspectDesync);
@@ -539,12 +533,14 @@ fn ensure_audio(
     } else if let Some(links) = links {
         links.set_devices(cfg.output_device.clone(), cfg.input_device.clone());
     }
-    shared.capture.lock().unwrap().set_sensitivity(cfg.sensitivity);
-    shared
-        .capture
-        .lock()
-        .unwrap()
-        .set_noise_suppression(cfg.noise_suppression);
+    if let Some(links) = links {
+        links.set_echo_cancel(cfg.echo_cancellation);
+    }
+    driver.set_bitrate(Bitrate::Bits(i32::from(cfg.bitrate_kbps.max(8)) * 1000));
+    let mut capture = shared.capture.lock().unwrap();
+    capture.set_sensitivity(cfg.sensitivity);
+    capture.set_noise_suppression(cfg.noise_suppression);
+    capture.set_dynamics(cfg.auto_gain, cfg.compressor);
 }
 
 /// Between calls: cork both streams (mic off — privacy), stop the mixer
@@ -625,18 +621,7 @@ async fn handle_command(
                 .unwrap()
                 .insert(user_id, volume.clamp(0.0, 2.0));
         }
-        VoiceCommand::ApplyConfig {
-            input_device,
-            output_device,
-            sensitivity,
-            noise_suppression,
-        } => {
-            let new = AudioConfig {
-                input_device,
-                output_device,
-                sensitivity,
-                noise_suppression,
-            };
+        VoiceCommand::ApplyConfig(new) => {
             let live = audio_links.is_some();
             log::info!(
                 "applyconfig: novo={new:?} guardado={:?} live={live}",
@@ -663,13 +648,29 @@ async fn handle_wire(
 ) {
     match &wire {
         Wire::State(state) => {
-            log::info!("voz recebeu State: user={} canal={:?} guild={:?} (conn: {})",
-                state.user_id, state.channel_id, state.guild_id,
-                match conn { Conn::Idle => "idle", Conn::Pending(_) => "pending", Conn::Live { .. } => "live" });
+            log::info!(
+                "voz recebeu State: user={} canal={:?} guild={:?} (conn: {})",
+                state.user_id,
+                state.channel_id,
+                state.guild_id,
+                match conn {
+                    Conn::Idle => "idle",
+                    Conn::Pending(_) => "pending",
+                    Conn::Live { .. } => "live",
+                }
+            );
         }
-        Wire::Server { guild_id, endpoint, .. } => {
-            log::info!("voz recebeu Server: guild={guild_id} endpoint={endpoint} (conn: {})",
-                match conn { Conn::Idle => "idle", Conn::Pending(_) => "pending", Conn::Live { .. } => "live" });
+        Wire::Server {
+            guild_id, endpoint, ..
+        } => {
+            log::info!(
+                "voz recebeu Server: guild={guild_id} endpoint={endpoint} (conn: {})",
+                match conn {
+                    Conn::Idle => "idle",
+                    Conn::Pending(_) => "pending",
+                    Conn::Live { .. } => "live",
+                }
+            );
         }
     }
     match wire {
@@ -782,7 +783,11 @@ async fn try_connect(
             ensure_audio(driver, shared, audio_links, audio_cfg);
             // Our own green indicator comes from the mic's voice-activity
             // gate; VoiceTicks only carry other users.
-            let (tx, me, flags) = (event_tx.clone(), info.user_id.to_string(), Arc::clone(shared));
+            let (tx, me, flags) = (
+                event_tx.clone(),
+                info.user_id.to_string(),
+                Arc::clone(shared),
+            );
             let mut lit = false;
             shared.capture.lock().unwrap().on_speaking = Some(Box::new(move |speaking| {
                 let now = speaking

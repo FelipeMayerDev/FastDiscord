@@ -33,9 +33,11 @@ módulo-a-módulo do port.
 
 ## Instalação
 
-Ainda não há binários publicados — build from source (veja abaixo) ou CI
-artifacts. Um `.desktop` de referência fica em
-[packaging/vesktop.desktop](packaging/vesktop.desktop).
+Baixe na [página de releases](https://github.com/FelipeMayerDev/FastDiscord/releases):
+`FastDiscord-x86_64.AppImage` (Linux) ou `FastDiscord-windows-x86_64.exe`
+(Windows, um único executável que se extrai em
+`%LOCALAPPDATA%\FastDiscord\<versão>` na primeira execução). Um `.desktop` de
+referência fica em [packaging/fastdiscord.desktop](packaging/fastdiscord.desktop).
 
 ## Build from Source
 
@@ -45,14 +47,14 @@ runtime usuais do X11/Wayland. Nenhum header de GTK/WebKit é necessário.
 
 ```sh
 git clone https://github.com/FelipeMayerDev/FastDiscord
-cd Vesktop
+cd FastDiscord
 
 cargo run --release
 # bandeja experimental:
 cargo run --release --features tray
 ```
 
-Dica: `cargo build --release` gera o binário em `target/release/vesktop`;
+Dica: `cargo build --release` gera o binário em `target/release/fastdiscord`;
 a primeira compilação resolve `Cargo.lock` automaticamente.
 
 ## Como obter o token
@@ -60,15 +62,15 @@ a primeira compilação resolve `Cargo.lock` automaticamente.
 1. Abra `discord.com` no navegador e entre na sua conta;
 2. Aperte `Ctrl+Shift+I` para abrir o DevTools;
 3. Na aba **Console**, rode `localStorage.token`;
-4. Copie o valor (entre aspas) e cole na tela de login do Vesktop.
+4. Copie o valor (entre aspas) e cole na tela de login do FastDiscord.
 
-Também é possível passar direto: `vesktop --token SEU_TOKEN`.
+Também é possível passar direto: `fastdiscord --token SEU_TOKEN`.
 
 ## Onde ficam as configurações
 
 `settings.json` no diretório de configuração do usuário
-(Linux: `~/.config/vesktop/`; macOS: `~/Library/Application Support/vesktop/`;
-Windows: `%APPDATA%\vesktop\`). O token hoje vive nesse arquivo — movê-lo para
+(Linux: `~/.config/fastdiscord/`; macOS: `~/Library/Application Support/app.FastDiscord.FastDiscord/`;
+Windows: `%APPDATA%\FastDiscord\FastDiscord\config\`). O token hoje vive nesse arquivo — movê-lo para
 o keyring do sistema é item do roadmap.
 
 ## Roadmap
