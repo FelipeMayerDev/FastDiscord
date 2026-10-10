@@ -34,12 +34,28 @@ impl EventTx {
 pub enum Command {
     LoadGuilds,
     LoadDmChannels,
+    LoadRelationships,
+    RequestFriend {
+        username: String,
+    },
+    AcceptFriend {
+        user_id: String,
+    },
+    RemoveRelationship {
+        user_id: String,
+    },
+    OpenDm {
+        user_id: String,
+    },
     LoadGuildChannels {
         guild_id: String,
     },
+    /// A page of history: the latest (no cursor), older than `before`, or
+    /// newer than `after` (catching a cached channel up after a reconnect).
     LoadMessages {
         channel_id: String,
         before: Option<String>,
+        after: Option<String>,
     },
     SendMessage {
         channel_id: String,
@@ -75,6 +91,20 @@ pub enum Command {
     StopStream {
         stream_key: String,
     },
+    /// op 37: subscribe to the open guild's typing/activity/thread events,
+    /// like the official client does when a guild is opened.
+    SubscribeGuild {
+        guild_id: String,
+    },
+    /// The soundboard picker opened in a guild.
+    LoadSoundboard {
+        guild_id: String,
+    },
+    SendSoundboard {
+        channel_id: String,
+        sound_id: String,
+        source_guild_id: Option<String>,
+    },
     /// Fetch a guild member (name/avatar) for a voice state that only
     /// carries a user id, as in READY.
     LoadVoiceUser {
@@ -98,6 +128,16 @@ pub enum UiEvent {
     GuildsLoaded {
         guilds: Vec<Guild>,
     },
+    RelationshipsLoaded {
+        relationships: Vec<crate::model::Relationship>,
+    },
+    RelationshipsChanged,
+    RelationshipError {
+        error: String,
+    },
+    DmOpened {
+        channel: Channel,
+    },
     DmChannelsLoaded {
         channels: Vec<Channel>,
     },
@@ -109,6 +149,20 @@ pub enum UiEvent {
         channel_id: String,
         messages: Vec<Message>,
         older: bool,
+        newer: bool,
+    },
+    /// A message fetch failed; frees the channel to be fetched again.
+    MessagesFailed {
+        channel_id: String,
+    },
+    AttachmentPickerClosed {
+        channel_id: String,
+        path: Option<std::path::PathBuf>,
+        error: Option<String>,
+    },
+    AttachmentSent {
+        message: Message,
+        content: String,
     },
     MessageCreated {
         message: Message,
@@ -134,7 +188,8 @@ pub enum UiEvent {
         user_id: String,
         status: String,
     },
-    /// Voice states seeded from READY, one event per guild.
+    /// A guild's full voice roster, from READY or GUILD_CREATE (empty on
+    /// GUILD_DELETE), replacing whatever the UI had.
     GuildVoiceStates {
         guild_id: String,
         states: Vec<VoiceState>,
@@ -142,6 +197,19 @@ pub enum UiEvent {
     /// Any user's voice state changed (who is in which channel).
     VoiceStateUpdate {
         state: VoiceState,
+    },
+    SoundboardLoaded {
+        guild_id: String,
+        sounds: Vec<crate::backend::soundboard::SoundboardSound>,
+    },
+    SoundboardError {
+        guild_id: Option<String>,
+        error: String,
+    },
+    /// Someone (us included) played a soundboard sound in our channel.
+    VoiceEffect {
+        sound_id: String,
+        volume: f32,
     },
     /// A member lookup resolved to a user, for the voice roster.
     UserResolved {

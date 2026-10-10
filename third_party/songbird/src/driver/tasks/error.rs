@@ -27,6 +27,7 @@ pub enum Error {
     IllegalVoicePacket,
     InterconnectFailure(Recipient),
     Io(IoError),
+    Opus(OpusError),
     Other,
 }
 
@@ -73,8 +74,8 @@ impl From<IoError> for Error {
 }
 
 impl From<OpusError> for Error {
-    fn from(_: OpusError) -> Error {
-        Error::Other
+    fn from(error: OpusError) -> Error {
+        Error::Opus(error)
     }
 }
 

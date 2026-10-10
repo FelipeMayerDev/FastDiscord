@@ -41,7 +41,11 @@ pub(super) fn start(
     Box::new(move || stop.store(true, Ordering::Relaxed))
 }
 
-fn run(slot: &Shared, stop: &AtomicBool, on_frame: impl Fn() + Send + 'static) -> Result<(), String> {
+fn run(
+    slot: &Shared,
+    stop: &AtomicBool,
+    on_frame: impl Fn() + Send + 'static,
+) -> Result<(), String> {
     gst::init().map_err(|err| format!("gstreamer: {err}"))?;
     let pipeline = gst::parse::launch(
         "d3d11screencapturesrc show-cursor=true ! d3d11download ! videoconvert \

@@ -1,6 +1,6 @@
 [package]
 name = "fastdiscord"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.98"
 license = "GPL-3.0-or-later"
@@ -59,7 +59,7 @@ image = { version = "0.25", default-features = false, features = [
     "ico",
 ] }
 # Discord REST API.
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
 # Discord Gateway (WebSocket) and the background runtime.
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
@@ -95,8 +95,9 @@ symphonia-core = "0.5"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "tracing-log"] }
 # PCM decode for the microphone feed: songbird's own symphonia ships with no
 # codecs enabled, so its registry can't parse RawAdapter streams without this
-# feature being unified in ("no compatible track found").
-symphonia = { version = "0.5", default-features = false, features = ["pcm"] }
+# feature being unified in ("no compatible track found"). MP3/Ogg Vorbis
+# decode the soundboard sounds (MP3 or Ogg on Discord's CDN).
+symphonia = { version = "0.5", default-features = false, features = ["pcm", "mp3", "ogg", "vorbis"] }
 
 # Go Live (docs/SCREENSHARE.md): the stream connection's own DAVE session
 # (the same crate songbird uses) and its transport encryption
@@ -117,10 +118,11 @@ openh264 = "0.9"
 libpulse-binding = "2"
 # Screen capture: the ScreenCast portal picks the source and hands over a
 # PipeWire node; pipewire streams its frames.
-ashpd = { version = "0.13", default-features = false, features = ["tokio", "screencast"] }
+ashpd = { version = "0.13", default-features = false, features = ["tokio", "screencast", "file_chooser"] }
 pipewire = "0.10"
 
 [target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = ["Win32_Media_Audio", "Win32_Media_KernelStreaming", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_System_Threading", "Win32_Security"] }
 # Voice audio I/O through WASAPI (src/backend/audio/windows.rs).
 cpal = "0.18"
 # No system libopus on Windows: build it from source for songbird's opus2

@@ -1,10 +1,10 @@
-//! Vesktop — a native Discord client built with Rust and egui.
+//! FastDiscord — a native Discord client built with Rust and egui.
 
 use clap::Parser;
 
 /// A native Discord client built with Rust and egui.
 #[derive(Parser, Debug)]
-#[command(name = "vesktop", version, about)]
+#[command(name = "fastdiscord", version, about)]
 struct Args {
     /// Discord account token, overriding the one saved in the settings file.
     #[arg(long, value_name = "TOKEN")]
@@ -50,7 +50,9 @@ fn main() -> anyhow::Result<()> {
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1280.0, 800.0])
         .with_min_inner_size([940.0, 600.0])
-        .with_title("FastDiscord");
+        .with_title("FastDiscord")
+        // Matches packaging/fastdiscord.desktop, so Wayland docks find the icon.
+        .with_app_id("fastdiscord");
     if let Some(icon) = fastdiscord::window::load_icon() {
         viewport = viewport.with_icon(icon);
     }

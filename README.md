@@ -15,27 +15,33 @@ e o Discord é falado nativamente — REST + Gateway sobre tokio.
 
 ## Recursos
 
-- **Nativo de verdade**: nada de Electron/Chromium — binário Rust com eframe/glow.
-- Login da conta por **token** (a tela de login do Discord é uma página web com
-  captcha; sem browser engine, o vínculo da conta é feito pelo token — igual a
-  todo cliente nativo de terceiros).
-- Lista de **servidores**, canais por categoria, **mensagens diretas**, chat com
-  envio/recebimento ao vivo via **Gateway** (heartbeat, reconexão com backoff).
-- Renderização de mensagens com **negrito, itálico, código, menções, canais,
-  emojis custom e links** (subconjunto — ver roadmap).
-- Avatares e ícones de servidor carregados em background.
-- **Configurações persistentes** (tema claro/escuro, zoom, última conversa).
-- Bandeja do sistema experimental: `cargo build --features tray`.
+- Cliente nativo em Rust + egui, com login por QR ou token.
+- Servidores, canais, DMs, amigos e solicitações de amizade.
+- Mensagens ao vivo, cache com atualização paginada após reconexão, busca no
+  histórico carregado, links clicáveis, convites, emojis, GIFs e anexos.
+- Avatares com presença e visualizador de imagens com zoom e salvamento.
+- Voz com seleção de dispositivos, volumes de entrada/saída e por usuário,
+  mute local, supressão de ruído, ganho automático, compressor e limitador.
+- Cancelamento de eco pelo servidor de som no Linux e por WASAPI no Windows
+  quando o sistema e o dispositivo oferecem AEC; a interface informa quando
+  o Windows precisa usar captura sem cancelamento.
+- Soundboard e DJ com fila, pausa e cancelamento; o DJ requer `yt-dlp` e `ffmpeg`.
+- Compartilhamento de tela pelo FockyTV, sons do Discord, notificações de DMs e
+  menções, configurações em abas e animações de hover, seleção e clique.
+- Configurações persistentes e bandeja experimental (`--features tray`).
 
-O que **ainda não** foi portado (voz/screenshare, Vencord, arRPC, RESUME,
-keyring, etc.) está mapeado em [docs/PORT.md](docs/PORT.md), junto do mapa
-módulo-a-módulo do port.
+As notificações no Linux usam `notify-send`, `paplay` e o tema de sons
+freedesktop. O upload básico de anexos aceita arquivos de até 10 MB. A busca
+no chat consulta apenas mensagens já carregadas. Recursos ainda previstos,
+como threads e plugins, estão em [docs/PORT.md](docs/PORT.md).
 
 ## Instalação
 
-Ainda não há binários publicados — build from source (veja abaixo) ou CI
-artifacts. Um `.desktop` de referência fica em
-[packaging/vesktop.desktop](packaging/vesktop.desktop).
+Baixe na [página de releases](https://github.com/FelipeMayerDev/FastDiscord/releases):
+`FastDiscord-x86_64.AppImage` (Linux) ou `FastDiscord-windows-x86_64.exe`
+(Windows, um único executável que se extrai em
+`%LOCALAPPDATA%\FastDiscord\<versão>` na primeira execução). Um `.desktop` de
+referência fica em [packaging/fastdiscord.desktop](packaging/fastdiscord.desktop).
 
 ## Build from Source
 
@@ -45,14 +51,14 @@ runtime usuais do X11/Wayland. Nenhum header de GTK/WebKit é necessário.
 
 ```sh
 git clone https://github.com/FelipeMayerDev/FastDiscord
-cd Vesktop
+cd FastDiscord
 
 cargo run --release
 # bandeja experimental:
 cargo run --release --features tray
 ```
 
-Dica: `cargo build --release` gera o binário em `target/release/vesktop`;
+Dica: `cargo build --release` gera o binário em `target/release/fastdiscord`;
 a primeira compilação resolve `Cargo.lock` automaticamente.
 
 ## Como obter o token
@@ -60,15 +66,15 @@ a primeira compilação resolve `Cargo.lock` automaticamente.
 1. Abra `discord.com` no navegador e entre na sua conta;
 2. Aperte `Ctrl+Shift+I` para abrir o DevTools;
 3. Na aba **Console**, rode `localStorage.token`;
-4. Copie o valor (entre aspas) e cole na tela de login do Vesktop.
+4. Copie o valor (entre aspas) e cole na tela de login do FastDiscord.
 
-Também é possível passar direto: `vesktop --token SEU_TOKEN`.
+Também é possível passar direto: `fastdiscord --token SEU_TOKEN`.
 
 ## Onde ficam as configurações
 
 `settings.json` no diretório de configuração do usuário
-(Linux: `~/.config/vesktop/`; macOS: `~/Library/Application Support/vesktop/`;
-Windows: `%APPDATA%\vesktop\`). O token hoje vive nesse arquivo — movê-lo para
+(Linux: `~/.config/fastdiscord/`; macOS: `~/Library/Application Support/app.FastDiscord.FastDiscord/`;
+Windows: `%APPDATA%\FastDiscord\FastDiscord\config\`). O token hoje vive nesse arquivo — movê-lo para
 o keyring do sistema é item do roadmap.
 
 ## Roadmap

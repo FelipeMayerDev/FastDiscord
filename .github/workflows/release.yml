@@ -1,4 +1,4 @@
-# Release builds: Linux AppImage and portable Windows zip. A `v*` tag
+# Release builds: Linux AppImage and single-file Windows exe. A `v*` tag
 # publishes them on the tag's release; "Run workflow" (or a push touching
 # the packaging) builds the same artifacts without publishing.
 name: release
@@ -66,8 +66,8 @@ jobs:
         run: packaging/windows.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: FastDiscord-windows-x86_64.zip
-          path: dist/FastDiscord-windows-x86_64.zip
+          name: FastDiscord-windows-x86_64.exe
+          path: dist/FastDiscord-windows-x86_64.exe
           if-no-files-found: error
 
   publish:

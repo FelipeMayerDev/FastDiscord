@@ -8,9 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use openh264::OpenH264API;
-use openh264::encoder::{
-    BitRate, Encoder, EncoderConfig, FrameRate, IntraFramePeriod, UsageType,
-};
+use openh264::encoder::{BitRate, Encoder, EncoderConfig, FrameRate, IntraFramePeriod, UsageType};
 use openh264::formats::{BgraSliceU8, RgbaSliceU8, YUVBuffer};
 
 use crate::backend::capture::{Frame, Shared};
@@ -138,8 +136,16 @@ mod tests {
     #[test]
     fn fit_downscales_to_even_size_and_never_upscales() {
         // 4x2 frame, pixel value = x + 10*y.
-        let pixels = (0..2u8).flat_map(|y| (0..4u8).flat_map(move |x| [x + 10 * y; 4])).collect();
-        let frame = Frame { width: 4, height: 2, pixels, bgr: true, seq: 1 };
+        let pixels = (0..2u8)
+            .flat_map(|y| (0..4u8).flat_map(move |x| [x + 10 * y; 4]))
+            .collect();
+        let frame = Frame {
+            width: 4,
+            height: 2,
+            pixels,
+            bgr: true,
+            seq: 1,
+        };
         let (w, h, out) = fit(&frame, 2, 2);
         assert_eq!((w, h), (2, 2));
         let firsts: Vec<u8> = out.chunks(4).map(|px| px[0]).collect();

@@ -1,11 +1,11 @@
 [Desktop Entry]
 Type=Application
-Name=Vesktop
+Name=FastDiscord
 GenericName=Discord Client
 Comment=Cliente Discord nativo em Rust e egui
-Exec=vesktop
-Icon=vesktop
+Exec=fastdiscord
+Icon=fastdiscord
 Categories=Network;InstantMessaging;
-Keywords=discord;chat;vesktop;
+Keywords=discord;chat;fastdiscord;
 Terminal=false
-StartupWMClass=vesktop
+StartupWMClass=fastdiscord

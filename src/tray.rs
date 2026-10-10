@@ -12,10 +12,10 @@ pub fn install(quit_tx: Sender<TrayCommand>) -> Result<()> {
     use tray_icon::menu::{Menu, MenuEvent, MenuItem};
 
     let menu = Menu::new();
-    let quit = MenuItem::new("Sair do Vesktop", true, None);
+    let quit = MenuItem::new("Sair do FastDiscord", true, None);
     menu.append_items(&[&quit])?;
 
-    let mut builder = TrayIconBuilder::with_id("vesktop-tray")
+    let mut builder = TrayIconBuilder::with_id("fastdiscord-tray")
         .with_tooltip("FastDiscord")
         .with_menu(Box::new(menu));
     if let Some(icon) = crate::window::load_tray_icon() {

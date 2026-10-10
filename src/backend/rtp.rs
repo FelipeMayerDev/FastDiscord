@@ -105,7 +105,10 @@ impl Cipher {
         let mut full_nonce = Nonce::default();
         full_nonce[..NONCE_LEN].copy_from_slice(&counter.to_be_bytes());
         let (aad, body) = packet.split_at_mut(clear);
-        let tag = self.0.encrypt_in_place_detached(&full_nonce, aad, body).ok()?;
+        let tag = self
+            .0
+            .encrypt_in_place_detached(&full_nonce, aad, body)
+            .ok()?;
         packet.extend_from_slice(&tag);
         packet.extend_from_slice(&counter.to_be_bytes());
         Some(())
@@ -198,7 +201,11 @@ pub fn split_annex_b(stream: &[u8]) -> Vec<&[u8]> {
         .map(|(n, &start)| {
             let end = starts.get(n + 1).map_or(stream.len(), |&next| {
                 // A 4-byte start code's leading zero belongs to it.
-                if next >= 4 && stream[next - 4] == 0 { next - 4 } else { next - 3 }
+                if next >= 4 && stream[next - 4] == 0 {
+                    next - 4
+                } else {
+                    next - 3
+                }
             });
             &stream[start..end.max(start)]
         })
@@ -394,19 +401,39 @@ mod tests {
         let cipher = Cipher::new(&[9u8; 32]).unwrap();
         // V=2, X=1; marker + PT 105; seq 1; ts 2; ssrc 3; preamble BEDE,
         // 1 word of extension; then that word and the payload (encrypted).
-        let mut bytes = vec![0x90, 0x80 | 105, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0xBE, 0xDE, 0, 1];
+        let mut bytes = vec![
+            0x90,
+            0x80 | 105,
+            0,
+            1,
+            0,
+            0,
+            0,
+            2,
+            0,
+            0,
+            0,
+            3,
+            0xBE,
+            0xDE,
+            0,
+            1,
+        ];
         bytes.extend_from_slice(&[0x50, 1, 0, 0]);
         bytes.extend_from_slice(b"frame");
         cipher.seal(&mut bytes, 16, 42).unwrap();
         let rtp = cipher.open_rtp(&bytes).unwrap();
-        assert_eq!(rtp, Rtp {
-            payload_type: 105,
-            marker: true,
-            sequence: 1,
-            timestamp: 2,
-            ssrc: 3,
-            payload: b"frame".to_vec(),
-        });
+        assert_eq!(
+            rtp,
+            Rtp {
+                payload_type: 105,
+                marker: true,
+                sequence: 1,
+                timestamp: 2,
+                ssrc: 3,
+                payload: b"frame".to_vec(),
+            }
+        );
         // Tampering with the clear header breaks authentication.
         bytes[3] = 9;
         assert!(cipher.open_rtp(&bytes).is_none());
@@ -432,7 +459,9 @@ mod tests {
         let mut depacketizer = H264Depacketizer::default();
         let mut out = None;
         for (counter, mut packet) in packets.into_iter().enumerate() {
-            cipher.seal(&mut packet, VIDEO_CLEAR, counter as u32).unwrap();
+            cipher
+                .seal(&mut packet, VIDEO_CLEAR, counter as u32)
+                .unwrap();
             let rtp = cipher.open_rtp(&packet).unwrap();
             assert_eq!((rtp.ssrc, rtp.timestamp), (91, 9000));
             out = depacketizer.push(&rtp).unwrap();
@@ -445,9 +474,23 @@ mod tests {
 
         let pli = cipher.open_rtcp(&pli(&cipher, 1, 91, 7).unwrap()).unwrap();
         assert!(wants_keyframe(&pli));
-        assert!(!wants_keyframe(&cipher.open_rtcp(&receiver_report(&cipher, 1, 8).unwrap()).unwrap()));
-        let sr = cipher.open_rtcp(&sender_report(&cipher, 91, 9000, 4, 3000, 9).unwrap()).unwrap();
-        assert_eq!((sr.len(), sr[1], &sr[4..8], &sr[16..20]), (28, 200, &91u32.to_be_bytes()[..], &9000u32.to_be_bytes()[..]));
+        assert!(!wants_keyframe(
+            &cipher
+                .open_rtcp(&receiver_report(&cipher, 1, 8).unwrap())
+                .unwrap()
+        ));
+        let sr = cipher
+            .open_rtcp(&sender_report(&cipher, 91, 9000, 4, 3000, 9).unwrap())
+            .unwrap();
+        assert_eq!(
+            (sr.len(), sr[1], &sr[4..8], &sr[16..20]),
+            (
+                28,
+                200,
+                &91u32.to_be_bytes()[..],
+                &9000u32.to_be_bytes()[..]
+            )
+        );
     }
 
     #[test]
@@ -457,18 +500,33 @@ mod tests {
         let stap = [24, 0, 2, 0x67, 1, 0, 1, 0x68];
         assert_eq!(depacketizer.push(&packet(false, 10, 90, &stap)), Ok(None));
         // IDR (type 5, NRI 3) split into FU-A start + end.
-        assert_eq!(depacketizer.push(&packet(false, 11, 90, &[0x7C, 0x85, 0xAA])), Ok(None));
-        let frame = depacketizer.push(&packet(true, 12, 90, &[0x7C, 0x45, 0xBB])).unwrap();
+        assert_eq!(
+            depacketizer.push(&packet(false, 11, 90, &[0x7C, 0x85, 0xAA])),
+            Ok(None)
+        );
+        let frame = depacketizer
+            .push(&packet(true, 12, 90, &[0x7C, 0x45, 0xBB]))
+            .unwrap();
         assert_eq!(
             frame.unwrap(),
-            [0, 0, 0, 1, 0x67, 1, 0, 0, 0, 1, 0x68, 0, 0, 0, 1, 0x65, 0xAA, 0xBB]
+            [
+                0, 0, 0, 1, 0x67, 1, 0, 0, 0, 1, 0x68, 0, 0, 0, 1, 0x65, 0xAA, 0xBB
+            ]
         );
         // Single NAL frame; then a gap drops the next frame.
-        let single = depacketizer.push(&packet(true, 13, 180, &[0x41, 7])).unwrap();
+        let single = depacketizer
+            .push(&packet(true, 13, 180, &[0x41, 7]))
+            .unwrap();
         assert_eq!(single.unwrap(), [0, 0, 0, 1, 0x41, 7]);
-        assert_eq!(depacketizer.push(&packet(true, 15, 270, &[0x41, 8])), Err(()));
         assert_eq!(
-            depacketizer.push(&packet(true, 16, 360, &[0x41, 9])).unwrap().unwrap(),
+            depacketizer.push(&packet(true, 15, 270, &[0x41, 8])),
+            Err(())
+        );
+        assert_eq!(
+            depacketizer
+                .push(&packet(true, 16, 360, &[0x41, 9]))
+                .unwrap()
+                .unwrap(),
             [0, 0, 0, 1, 0x41, 9]
         );
     }

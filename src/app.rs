@@ -9,10 +9,11 @@ use egui::Context;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 
-use crate::backend::voice::VoiceCommand;
+use crate::backend::audio::{Sound, play_sound};
+use crate::backend::voice::{AudioConfig, VoiceCommand};
 use crate::backend::{self, Command, UiEvent};
 use crate::image_cache::ImageCache;
-use crate::model::{Channel, Guild, Message, User, VoiceState};
+use crate::model::{Channel, Guild, Message, Relationship, User, VoiceState};
 use crate::settings::{Settings, Theme};
 use crate::theme;
 use crate::ui;
@@ -126,6 +127,10 @@ pub struct VesktopApp {
     pub(crate) channel_index: HashMap<String, ChannelRef>,
     pub(crate) messages: HashMap<String, Vec<Message>>,
     pub(crate) has_more: HashMap<String, bool>,
+    /// Cached channels that may have missed messages while the gateway was
+    /// down, with the last message cached before the drop: caught up with
+    /// an `after=` fetch from there when next opened.
+    pub(crate) stale_channels: HashMap<String, String>,
     pub(crate) loading_channels: HashSet<String>,
     pub(crate) loading_guilds: HashSet<String>,
     pub(crate) unread: HashMap<String, u64>,
@@ -144,6 +149,7 @@ pub struct VesktopApp {
     pub(crate) voice_states: HashMap<String, HashMap<String, VoiceState>>,
     /// The user's own voice connection, for the sidebar panel.
     pub(crate) voice: VoiceConn,
+    pub(crate) voice_connected_at: Option<Instant>,
     /// Rejoin timestamps from DAVE desync self-heals (songbird #310):
     /// bounded so a broken session can't loop forever.
     desync_rejoins: Vec<std::time::Instant>,
@@ -173,6 +179,8 @@ pub struct VesktopApp {
     pub(crate) images: ImageCache,
     /// Larger cache for inline image attachments.
     pub(crate) images_large: ImageCache,
+    /// The image opened from the chat in its own window.
+    pub(crate) viewer: Option<ui::image_viewer::ImageViewer>,
 
     pub(crate) compose: String,
     pub(crate) compose_error: Option<String>,
@@ -182,10 +190,21 @@ pub struct VesktopApp {
     /// Set by "Ir para o presente", consumed inside the timeline's scroll.
     pub(crate) jump_to_present: bool,
     pub(crate) settings_open: bool,
+    /// Page the settings window shows (left nav).
+    pub(crate) settings_tab: ui::settings_window::SettingsTab,
     pub(crate) login_token: String,
     /// "Encontre ou comece uma conversa" filter for the DM list.
     pub(crate) dm_search: String,
+    pub(crate) home_page: ui::friends::HomePage,
+    pub(crate) relationships: Vec<Relationship>,
+    pub(crate) relationships_loading: bool,
+    pub(crate) friend_input: String,
+    pub(crate) friend_error: Option<String>,
+    pub(crate) attachment_sending: bool,
+    pub(crate) file_picker_open: bool,
     pub(crate) applied_theme: Option<Theme>,
+    /// Soundboard picker and DJ (ui/voice_extras.rs).
+    pub(crate) extras: ui::voice_extras::VoiceExtras,
 }
 
 impl VesktopApp {
@@ -217,6 +236,7 @@ impl VesktopApp {
             channel_index: HashMap::new(),
             messages: HashMap::new(),
             has_more: HashMap::new(),
+            stale_channels: HashMap::new(),
             loading_channels: HashSet::new(),
             loading_guilds: HashSet::new(),
             unread: HashMap::new(),
@@ -227,6 +247,7 @@ impl VesktopApp {
             presence: HashMap::new(),
             voice_states: HashMap::new(),
             voice: VoiceConn::Disconnected,
+            voice_connected_at: None,
             desync_rejoins: Vec::new(),
             voice_users_pending: HashSet::new(),
             speaking: HashSet::new(),
@@ -246,16 +267,26 @@ impl VesktopApp {
             user_cache: HashMap::new(),
             images: ImageCache::new(128),
             images_large: ImageCache::new(800),
+            viewer: None,
             compose: String::new(),
             compose_error: None,
             last_compose: String::new(),
             last_typing_sent: None,
             jump_to_present: false,
             settings_open: false,
+            settings_tab: Default::default(),
             login_token: String::new(),
             dm_search: String::new(),
+            home_page: ui::friends::HomePage::DirectMessages,
+            relationships: Vec::new(),
+            relationships_loading: false,
+            friend_input: String::new(),
+            friend_error: None,
+            attachment_sending: false,
+            file_picker_open: false,
             // The first update() applies the theme through the live context.
             applied_theme: None,
+            extras: Default::default(),
             settings,
             handle,
             event_tx,
@@ -277,6 +308,7 @@ impl VesktopApp {
 
         // Image loaders for the animated WebP splash.
         egui_extras::install_image_loaders(&_cc.egui_ctx);
+        theme::install_fonts(&_cc.egui_ctx);
 
         if let Some(token) = app.settings.token.clone() {
             app.start_backend(token);
@@ -286,6 +318,87 @@ impl VesktopApp {
 
     pub(crate) fn send(&self, command: Command) {
         let _ = self.cmd_tx.send(command);
+    }
+
+    pub(crate) fn refresh_relationships(&mut self) {
+        if !self.relationships_loading {
+            self.relationships_loading = true;
+            self.friend_error = None;
+            self.send(Command::LoadRelationships);
+        }
+    }
+
+    pub(crate) fn request_friend(&mut self, username: String) {
+        self.friend_error = None;
+        self.send(Command::RequestFriend { username });
+    }
+
+    pub(crate) fn accept_friend(&mut self, user_id: String) {
+        self.friend_error = None;
+        self.send(Command::AcceptFriend { user_id });
+    }
+
+    pub(crate) fn remove_friend(&mut self, user_id: String) {
+        self.friend_error = None;
+        self.send(Command::RemoveRelationship { user_id });
+    }
+
+    pub(crate) fn open_dm(&mut self, user_id: String) {
+        if user_id.parse::<u64>().is_err() || user_id == "0" {
+            self.friend_error = Some("ID de usuário inválido".into());
+            return;
+        }
+        self.friend_error = None;
+        self.send(Command::OpenDm { user_id });
+    }
+
+    pub(crate) fn choose_attachment(&mut self) {
+        if self.file_picker_open {
+            return;
+        }
+        let Some(channel_id) = self.selected_channel.clone() else {
+            return;
+        };
+        self.file_picker_open = true;
+        let events = self.event_tx.clone();
+        self.handle.spawn(async move {
+            let (path, error) = match backend::file_picker::pick_file().await {
+                Ok(path) => (path, None),
+                Err(error) => (None, Some(error)),
+            };
+            events.send(UiEvent::AttachmentPickerClosed {
+                channel_id,
+                path,
+                error,
+            });
+        });
+    }
+
+    pub(crate) fn send_attachment(&mut self, path: std::path::PathBuf) {
+        if self.attachment_sending {
+            return;
+        }
+        let (Some(channel_id), Some(token)) =
+            (self.selected_channel.clone(), self.settings.token.clone())
+        else {
+            return;
+        };
+        self.attachment_sending = true;
+        self.compose_error = None;
+        let content = self.compose.clone();
+        let events = self.event_tx.clone();
+        self.handle.spawn(async move {
+            match backend::api::Api::new(token)
+                .send_attachment(&channel_id, &content, &path)
+                .await
+            {
+                Ok(message) => events.send(UiEvent::AttachmentSent { message, content }),
+                Err(error) => events.send(UiEvent::SendFailed {
+                    channel_id,
+                    error: error.to_string(),
+                }),
+            }
+        });
     }
 
     pub(crate) fn start_backend(&mut self, token: String) {
@@ -369,6 +482,7 @@ impl VesktopApp {
         self.channel_index.clear();
         self.messages.clear();
         self.has_more.clear();
+        self.stale_channels.clear();
         self.loading_channels.clear();
         self.loading_guilds.clear();
         self.unread.clear();
@@ -380,6 +494,13 @@ impl VesktopApp {
         self.selected_guild = None;
         self.selected_channel = None;
         self.user_cache.clear();
+        self.relationships.clear();
+        self.relationships_loading = false;
+        self.friend_input.clear();
+        self.friend_error = None;
+        self.attachment_sending = false;
+        self.file_picker_open = false;
+        self.home_page = ui::friends::HomePage::DirectMessages;
         self.compose.clear();
         self.compose_error = None;
         self.settings_open = false;
@@ -401,6 +522,9 @@ impl VesktopApp {
                 guild_id: guild_id.to_string(),
             });
         }
+        self.send(Command::SubscribeGuild {
+            guild_id: guild_id.to_string(),
+        });
         self.settings.save();
     }
 
@@ -438,6 +562,7 @@ impl VesktopApp {
     }
 
     pub(crate) fn select_channel(&mut self, channel_id: String) {
+        self.home_page = ui::friends::HomePage::DirectMessages;
         self.selected_channel = Some(channel_id.clone());
         self.unread.remove(&channel_id);
         self.mentions.remove(&channel_id);
@@ -451,14 +576,26 @@ impl VesktopApp {
         }
         self.settings.selected_channel_id = Some(channel_id.clone());
         self.settings.save();
-        if !self.messages.contains_key(&channel_id) && !self.loading_channels.contains(&channel_id)
-        {
-            self.loading_channels.insert(channel_id.clone());
-            self.send(Command::LoadMessages {
-                channel_id,
-                before: None,
-            });
+        self.fetch_channel_if_needed(channel_id);
+    }
+
+    fn fetch_channel_if_needed(&mut self, channel_id: String) {
+        if self.loading_channels.contains(&channel_id) {
+            return;
         }
+        // Cached history shows right away; only a channel that may have
+        // missed messages during a reconnect asks for what's newer.
+        let after = match self.stale_channels.get(&channel_id).cloned() {
+            _ if !self.messages.contains_key(&channel_id) => None,
+            Some(last) => Some(last),
+            None => return,
+        };
+        self.loading_channels.insert(channel_id.clone());
+        self.send(Command::LoadMessages {
+            channel_id,
+            before: None,
+            after,
+        });
     }
 
     pub(crate) fn send_current_message(&mut self) {
@@ -495,6 +632,7 @@ impl VesktopApp {
         self.send(Command::LoadMessages {
             channel_id,
             before: Some(oldest),
+            after: None,
         });
     }
 
@@ -580,6 +718,7 @@ impl VesktopApp {
             return;
         };
         let user_id = me.id.clone();
+        self.voice_connected_at = None;
         self.voice = VoiceConn::Connecting {
             guild_id: guild_id.clone(),
             channel_id: channel_id.clone(),
@@ -618,9 +757,9 @@ impl VesktopApp {
         if self.settings.fockytv_share {
             let nick = self.fockytv_nick();
             let ctx = ctx.clone();
-            let capture = crate::backend::capture::start(self.handle.clone(), move || {
-                ctx.request_repaint()
-            });
+            let capture =
+                crate::backend::capture::start(self.handle.clone(), move || ctx.request_repaint());
+            play_sound(Sound::StreamStart);
             self.fockytv = Some(crate::backend::fockytv::publish(
                 &self.settings.fockytv_url,
                 &nick,
@@ -637,15 +776,20 @@ impl VesktopApp {
             stream_key: stream_key.clone(),
         });
         self.stream = Some(GoLive::new(stream_key));
+        play_sound(Sound::StreamStart);
         let ctx = ctx.clone();
-        self.screen = Some(crate::backend::capture::start(self.handle.clone(), move || {
-            ctx.request_repaint()
-        }));
+        self.screen = Some(crate::backend::capture::start(
+            self.handle.clone(),
+            move || ctx.request_repaint(),
+        ));
     }
 
     /// The one way a share ends (button, picker cancelled, source gone,
     /// left voice, deleted by Discord): capture off, op 19 if still live.
     pub(crate) fn stop_screen_share(&mut self) {
+        if self.screen.is_some() {
+            play_sound(Sound::StreamStop);
+        }
         self.screen = None;
         self.screen_texture = None;
         self.fockytv = None;
@@ -678,9 +822,10 @@ impl VesktopApp {
         if self.me.as_ref().is_some_and(|me| me.id == user_id) {
             return self.fockytv.is_some();
         }
-        self.user_cache
-            .get(user_id)
-            .is_some_and(|user| self.fockytv_live.contains_key(&user.username.to_lowercase()))
+        self.user_cache.get(user_id).is_some_and(|user| {
+            self.fockytv_live
+                .contains_key(&user.username.to_lowercase())
+        })
     }
 
     /// "Assistir": the member's FockyTV live (WHEP) or Discord's Go Live,
@@ -713,7 +858,10 @@ impl VesktopApp {
         if !self.settings.fockytv_share || !matches!(self.voice, VoiceConn::Connected { .. }) {
             return;
         }
-        if self.fockytv_polled.is_some_and(|at| at.elapsed() < Duration::from_secs(5)) {
+        if self
+            .fockytv_polled
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(5))
+        {
             return;
         }
         self.fockytv_polled = Some(Instant::now());
@@ -746,7 +894,11 @@ impl VesktopApp {
             return;
         };
         let stream_key = format!("guild:{guild_id}:{channel_id}:{user_id}");
-        if self.watch.as_ref().is_some_and(|watch| watch.key == stream_key) {
+        if self
+            .watch
+            .as_ref()
+            .is_some_and(|watch| watch.key == stream_key)
+        {
             return;
         }
         self.stop_watching();
@@ -767,7 +919,11 @@ impl VesktopApp {
 
     /// Our stream or the watched one, by key, and whether we're the viewer.
     fn go_live(&mut self, stream_key: &str) -> Option<(&mut GoLive, bool)> {
-        if let Some(stream) = self.stream.as_mut().filter(|stream| stream.key == stream_key) {
+        if let Some(stream) = self
+            .stream
+            .as_mut()
+            .filter(|stream| stream.key == stream_key)
+        {
             return Some((stream, false));
         }
         self.watch
@@ -825,13 +981,40 @@ impl VesktopApp {
         });
     }
 
-    /// Right-click volume on a voice member: persists and feeds the mixer.
+    /// Voice member menu volume: persists and feeds the mixer.
     pub(crate) fn set_user_volume(&mut self, user_id: String, percent: u8) {
         self.settings.user_volumes.insert(user_id.clone(), percent);
         self.settings.save();
+        self.push_user_volume(&user_id);
+    }
+
+    /// Local mute: silences one user for us only, kept across sessions.
+    pub(crate) fn set_user_muted(&mut self, user_id: String, muted: bool) {
+        if muted {
+            self.settings.muted_users.insert(user_id.clone());
+        } else {
+            self.settings.muted_users.remove(&user_id);
+        }
+        self.settings.save();
+        self.push_user_volume(&user_id);
+    }
+
+    /// The mixer's gain for one user: their volume, or zero when muted.
+    fn push_user_volume(&self, user_id: &str) {
+        let percent = self
+            .settings
+            .user_volumes
+            .get(user_id)
+            .copied()
+            .unwrap_or(100);
+        let muted = self.settings.muted_users.contains(user_id);
         let _ = self.voice_cmd_tx.send(VoiceCommand::SetUserVolume {
-            user_id,
-            volume: f32::from(percent) / 100.0,
+            user_id: user_id.to_string(),
+            volume: if muted {
+                0.0
+            } else {
+                f32::from(percent) / 100.0
+            },
         });
     }
 
@@ -855,17 +1038,28 @@ impl VesktopApp {
             self.settings.input_device,
             self.settings.output_device
         );
-        let _ = self.voice_cmd_tx.send(VoiceCommand::ApplyConfig {
-            input_device: self.settings.input_device.clone(),
-            output_device: self.settings.output_device.clone(),
-            sensitivity: self.settings.input_sensitivity,
-            noise_suppression: self.settings.noise_suppression,
-        });
-        for (user_id, percent) in &self.settings.user_volumes {
-            let _ = self.voice_cmd_tx.send(VoiceCommand::SetUserVolume {
-                user_id: user_id.clone(),
-                volume: f32::from(*percent) / 100.0,
-            });
+        let _ = self
+            .voice_cmd_tx
+            .send(VoiceCommand::ApplyConfig(AudioConfig {
+                input_device: self.settings.input_device.clone(),
+                output_device: self.settings.output_device.clone(),
+                input_volume: self.settings.input_volume,
+                output_volume: self.settings.output_volume,
+                sensitivity: self.settings.input_sensitivity,
+                noise_suppression: self.settings.noise_suppression,
+                bitrate_kbps: self.settings.opus_bitrate_kbps,
+                auto_gain: self.settings.auto_gain,
+                compressor: self.settings.compressor,
+                echo_cancellation: self.settings.echo_cancellation,
+            }));
+        let users: HashSet<&String> = self
+            .settings
+            .user_volumes
+            .keys()
+            .chain(&self.settings.muted_users)
+            .collect();
+        for user_id in users {
+            self.push_user_volume(user_id);
         }
     }
 
@@ -880,9 +1074,15 @@ impl VesktopApp {
             }
             VoiceConn::Failed { .. } | VoiceConn::Disconnected => None,
         };
+        if matches!(self.voice, VoiceConn::Connected { .. }) {
+            play_sound(Sound::Disconnect);
+        }
+        // ponytail: a desync rejoin passes through here too and ends the DJ.
+        self.extras.music.stop();
         self.stop_screen_share();
         self.stop_watching();
         self.voice = VoiceConn::Disconnected;
+        self.voice_connected_at = None;
         if let Some(guild_id) = guild_id {
             self.send(Command::LeaveVoice { guild_id });
         }
@@ -1006,24 +1206,45 @@ impl VesktopApp {
 
     fn poll_events(&mut self, ctx: &Context) {
         while let Ok(event) = self.event_rx.try_recv() {
-            self.handle_event(event);
+            if let UiEvent::AttachmentPickerClosed {
+                channel_id,
+                path: Some(path),
+                ..
+            } = &event
+            {
+                ui::chat::attachment_selected(ctx, channel_id, path);
+            }
+            self.handle_event(event, ctx.input(|input| input.focused));
             ctx.request_repaint();
         }
     }
 
-    fn handle_event(&mut self, event: UiEvent) {
+    fn handle_event(&mut self, event: UiEvent, focused: bool) {
         match event {
             UiEvent::Connected => {
                 self.disconnected_at = None;
                 self.conn = ConnState::Connected;
             }
             UiEvent::Ready { user } => {
+                // A fresh session after a drop: cached channels may have
+                // missed messages in between.
+                for (channel_id, list) in &self.messages {
+                    if let Some(last) = list.last() {
+                        self.stale_channels
+                            .entry(channel_id.clone())
+                            .or_insert_with(|| last.id.clone());
+                    }
+                }
                 self.user_cache.insert(user.id.clone(), user.clone());
                 self.me = Some(user);
                 self.disconnected_at = None;
                 self.conn = ConnState::Connected;
                 self.send(Command::LoadGuilds);
                 self.send(Command::LoadDmChannels);
+                self.refresh_relationships();
+                if let Some(channel_id) = self.selected_channel.clone() {
+                    self.fetch_channel_if_needed(channel_id);
+                }
             }
             UiEvent::Disconnected { reason, retry_in } => {
                 self.disconnected_at = Some(std::time::Instant::now());
@@ -1045,6 +1266,53 @@ impl VesktopApp {
                 if let Some(id) = restored {
                     self.select_guild(&id);
                 }
+            }
+            UiEvent::RelationshipsLoaded { relationships } => {
+                for relation in &relationships {
+                    self.user_cache
+                        .insert(relation.user.id.clone(), relation.user.clone());
+                }
+                self.relationships = relationships;
+                self.relationships_loading = false;
+            }
+            UiEvent::RelationshipsChanged => {
+                self.relationships_loading = false;
+                self.refresh_relationships();
+            }
+            UiEvent::RelationshipError { error } => {
+                self.relationships_loading = false;
+                self.friend_error = Some(error);
+            }
+            UiEvent::DmOpened { channel } => {
+                self.channel_index
+                    .insert(channel.id.clone(), ChannelRef::Dm);
+                let id = channel.id.clone();
+                if let Some(existing) = self.dm_channels.iter_mut().find(|dm| dm.id == id) {
+                    *existing = channel;
+                } else {
+                    self.dm_channels.insert(0, channel);
+                }
+                self.selected_guild = None;
+                self.select_channel(id);
+            }
+            UiEvent::AttachmentPickerClosed {
+                channel_id, error, ..
+            } => {
+                self.file_picker_open = false;
+                if self.selected_channel.as_deref() == Some(channel_id.as_str()) {
+                    if let Some(error) = error {
+                        self.compose_error = Some(error);
+                    }
+                }
+            }
+            UiEvent::AttachmentSent { message, content } => {
+                self.attachment_sending = false;
+                if self.selected_channel.as_deref() == Some(message.channel_id.as_str())
+                    && self.compose == content
+                {
+                    self.compose.clear();
+                }
+                self.handle_event(UiEvent::MessageCreated { message }, focused);
             }
             UiEvent::DmChannelsLoaded { channels } => {
                 for channel in &channels {
@@ -1069,7 +1337,10 @@ impl VesktopApp {
                     )
                 });
                 self.dm_channels = channels;
-                if self.selected_guild.is_none() && self.selected_channel.is_none() {
+                if self.selected_guild.is_none()
+                    && self.selected_channel.is_none()
+                    && self.home_page == ui::friends::HomePage::DirectMessages
+                {
                     if let Some(id) = restored {
                         self.select_channel(id);
                     }
@@ -1092,32 +1363,75 @@ impl VesktopApp {
                 channel_id,
                 messages,
                 older,
+                newer,
             } => {
                 self.loading_channels.remove(&channel_id);
-                self.has_more.insert(
-                    channel_id.clone(),
-                    messages.len() as u64 >= backend::api::MESSAGES_PER_PAGE,
-                );
-                let entry = self.messages.entry(channel_id).or_default();
+                let full_page = messages.len() as u64 >= backend::api::MESSAGES_PER_PAGE;
+                let next_after = if newer && full_page {
+                    messages.last().map(|m| m.id.clone()).filter(|id| {
+                        self.stale_channels
+                            .get(&channel_id)
+                            .is_none_or(|cursor| snowflake_cmp(id, cursor).is_gt())
+                    })
+                } else {
+                    None
+                };
+                if !newer {
+                    self.has_more.insert(channel_id.clone(), full_page);
+                }
+                let entry = self.messages.entry(channel_id.clone()).or_default();
                 if older {
                     let mut merged = messages;
                     merged.extend(entry.drain(..));
                     *entry = merged;
-                } else if entry.is_empty() {
-                    *entry = messages;
                 } else {
-                    // A gateway echo may have raced the REST response; merge
-                    // and dedupe by snowflake id.
-                    let mut merged = messages;
-                    merged.extend(entry.drain(..));
-                    merged.sort_by(|a, b| a.id.cmp(&b.id));
-                    merged.dedup_by(|a, b| a.id == b.id);
-                    *entry = merged;
+                    // Catch-up pages and gateway echoes racing the REST
+                    // response overlap the cache: merge and dedupe.
+                    merge_messages(entry, messages);
                 }
+                if let Some(after) = next_after {
+                    self.stale_channels
+                        .insert(channel_id.clone(), after.clone());
+                    self.loading_channels.insert(channel_id.clone());
+                    self.send(Command::LoadMessages {
+                        channel_id,
+                        before: None,
+                        after: Some(after),
+                    });
+                } else if newer && !full_page {
+                    self.stale_channels.remove(&channel_id);
+                }
+            }
+            UiEvent::MessagesFailed { channel_id } => {
+                self.loading_channels.remove(&channel_id);
             }
             UiEvent::MessageCreated { message } => {
                 let selected =
                     self.selected_channel.as_deref() == Some(message.channel_id.as_str());
+                let duplicate = self
+                    .messages
+                    .get(&message.channel_id)
+                    .is_some_and(|list| list.iter().any(|m| m.id == message.id));
+                let own = self
+                    .me
+                    .as_ref()
+                    .is_some_and(|me| me.id == message.author.id);
+                let dm = self.dm_channels.iter().any(|c| c.id == message.channel_id);
+                let dnd = self
+                    .me
+                    .as_ref()
+                    .and_then(|me| self.presence.get(&me.id))
+                    .is_some_and(|status| status == "dnd");
+                if should_notify_message(
+                    selected,
+                    focused,
+                    duplicate,
+                    own,
+                    dnd,
+                    dm || self.is_mention(&message),
+                ) {
+                    crate::notifications::notify(message.author.display_name(), &message.content);
+                }
                 self.user_cache
                     .insert(message.author.id.clone(), message.author.clone());
                 if let Some(list) = self.messages.get_mut(&message.channel_id) {
@@ -1191,6 +1505,7 @@ impl VesktopApp {
                 self.presence.insert(user_id, status);
             }
             UiEvent::SendFailed { channel_id, error } => {
+                self.attachment_sending = false;
                 if self.selected_channel.as_deref() == Some(channel_id.as_str()) {
                     self.compose_error = Some(error);
                 } else {
@@ -1216,7 +1531,19 @@ impl VesktopApp {
                 {
                     self.join_voice(guild_id.clone(), channel_id);
                 }
-                self.voice_states.insert(guild_id, roster);
+                self.voice_states.insert(guild_id.clone(), roster);
+                if let VoiceConn::Connecting {
+                    guild_id: active_guild,
+                    channel_id,
+                }
+                | VoiceConn::Connected {
+                    guild_id: active_guild,
+                    channel_id,
+                } = &self.voice
+                    && *active_guild == guild_id
+                {
+                    self.push_voice_roster(&channel_id.clone());
+                }
             }
             UiEvent::VoiceStateUpdate { state } => {
                 let Some(guild_id) = state.guild_id.clone() else {
@@ -1231,21 +1558,53 @@ impl VesktopApp {
                     self.join_voice(guild_id.clone(), channel_id);
                 }
                 let user_id = state.user_id.clone();
-                let state_channel = state.channel_id.clone();
+                if let VoiceConn::Connected { channel_id, .. } = &self.voice
+                    && !is_me
+                    && let Some(sound) = ui::voice_extras::roster_sound(
+                        channel_id,
+                        self.voice_states
+                            .get(&guild_id)
+                            .and_then(|roster| roster.get(&user_id)),
+                        &state,
+                    )
+                {
+                    play_sound(sound);
+                }
                 self.voice_states
                     .entry(guild_id.clone())
                     .or_default()
-                    .insert(user_id.clone(), state);
-                // Any roster change can mean a new DAVE member: re-seed the
-                // MLS group (the voice server never tells user accounts).
-                let channel_id = state_channel.or_else(|| {
-                    self.voice_states
-                        .get(&guild_id)
-                        .and_then(|roster| roster.get(&user_id))
-                        .and_then(|state| state.channel_id.clone())
-                });
-                if let Some(channel_id) = channel_id {
-                    self.push_voice_roster(&channel_id);
+                    .insert(user_id, state);
+                // Always seed the active call, including departures and moves to another room.
+                if let VoiceConn::Connecting {
+                    guild_id: active_guild,
+                    channel_id,
+                }
+                | VoiceConn::Connected {
+                    guild_id: active_guild,
+                    channel_id,
+                } = &self.voice
+                    && *active_guild == guild_id
+                {
+                    self.push_voice_roster(&channel_id.clone());
+                }
+            }
+            UiEvent::SoundboardLoaded { guild_id, sounds } => {
+                self.extras.soundboard_loading.remove(&guild_id);
+                self.extras.soundboard_errors.remove(&guild_id);
+                self.extras.sounds.insert(guild_id, sounds);
+            }
+            UiEvent::SoundboardError { guild_id, error } => {
+                if let Some(guild_id) = guild_id {
+                    self.extras.soundboard_loading.remove(&guild_id);
+                    self.extras.soundboard_errors.insert(guild_id, error);
+                } else {
+                    self.extras.soundboard_error = Some(error);
+                }
+            }
+            UiEvent::VoiceEffect { sound_id, volume } => {
+                if !self.voice_deaf {
+                    self.handle
+                        .spawn(crate::backend::soundboard::play(sound_id, volume));
                 }
             }
             UiEvent::UserResolved { user } => {
@@ -1256,6 +1615,10 @@ impl VesktopApp {
                 guild_id,
                 channel_id,
             } => {
+                if matches!(self.voice, VoiceConn::Connecting { .. }) {
+                    play_sound(Sound::Join);
+                }
+                self.voice_connected_at.get_or_insert_with(Instant::now);
                 self.voice = VoiceConn::Connected {
                     guild_id,
                     channel_id: channel_id.clone(),
@@ -1266,6 +1629,7 @@ impl VesktopApp {
             UiEvent::VoiceFailed { error } => {
                 log::warn!("voz falhou: {error}");
                 self.voice = VoiceConn::Failed { error };
+                self.voice_connected_at = None;
             }
             UiEvent::VoiceSpeaking { user_id, speaking } => {
                 if speaking {
@@ -1297,7 +1661,10 @@ impl VesktopApp {
                 }
             }
             UiEvent::FockyLive { keys } => {
-                self.fockytv_live = keys.into_iter().map(|key| (key.to_lowercase(), key)).collect();
+                self.fockytv_live = keys
+                    .into_iter()
+                    .map(|key| (key.to_lowercase(), key))
+                    .collect();
             }
             UiEvent::StreamCreated {
                 stream_key,
@@ -1320,7 +1687,10 @@ impl VesktopApp {
                 let me = self.me.as_ref().and_then(|me| me.id.parse().ok());
                 let handle = self.handle.clone();
                 let events = self.event_tx.clone();
-                let capture = self.screen.as_ref().map(|capture| Arc::clone(&capture.frame));
+                let capture = self
+                    .screen
+                    .as_ref()
+                    .map(|capture| Arc::clone(&capture.frame));
                 let Some((go_live, viewer)) = self.go_live(&stream_key) else {
                     return;
                 };
@@ -1367,19 +1737,32 @@ impl VesktopApp {
                 }
                 log::info!("transmissão {stream_key} encerrada pelo Discord: {reason}");
                 // Already gone server-side: no op 19.
-                if self.stream.as_ref().is_some_and(|stream| stream.key == stream_key) {
+                if self
+                    .stream
+                    .as_ref()
+                    .is_some_and(|stream| stream.key == stream_key)
+                {
                     self.stream = None;
                     self.stop_screen_share();
                 }
-                if self.watch.as_ref().is_some_and(|watch| watch.key == stream_key) {
+                if self
+                    .watch
+                    .as_ref()
+                    .is_some_and(|watch| watch.key == stream_key)
+                {
                     self.watch = None;
                     self.watch_texture = None;
                 }
             }
             UiEvent::VoiceLeft => {
+                if matches!(self.voice, VoiceConn::Connected { .. }) {
+                    play_sound(Sound::Disconnect);
+                }
+                self.extras.music.stop();
                 self.stop_screen_share();
                 self.stop_watching();
                 self.voice = VoiceConn::Disconnected;
+                self.voice_connected_at = None;
                 self.speaking.clear();
             }
             UiEvent::QrReady { url } => self.qr = QrState::Code(url),
@@ -1444,6 +1827,7 @@ impl eframe::App for VesktopApp {
 
         self.poll_events(ctx);
 
+        ui::login::compact_window(ctx, self.me.is_none());
         if self.me.is_none() {
             if self.settings.token.is_some() {
                 // Saved token but no READY yet: Vesktop's own splash, which
@@ -1487,7 +1871,11 @@ impl eframe::App for VesktopApp {
             });
 
         egui::CentralPanel::default().show(root, |ui| {
-            if self.watch.is_some() {
+            if self.selected_guild.is_none()
+                && self.home_page != ui::friends::HomePage::DirectMessages
+            {
+                ui::friends::paint(self, ui);
+            } else if self.watch.is_some() {
                 ui::screen_share::paint_watch(self, ui);
             } else {
                 ui::chat::paint(self, ui);
@@ -1497,6 +1885,8 @@ impl eframe::App for VesktopApp {
         if self.settings_open {
             ui::settings_window::show(self, ctx);
         }
+        ui::image_viewer::show(self, ctx);
+        ui::voice_extras::show(self, ctx);
         ui::screen_share::poll(self, ctx);
         self.poll_fockytv();
         if self.settings.fockytv_share && matches!(self.voice, VoiceConn::Connected { .. }) {
@@ -1505,5 +1895,223 @@ impl eframe::App for VesktopApp {
         if matches!(self.conn, ConnState::Connecting) {
             ctx.request_repaint_after(Duration::from_millis(400));
         }
+    }
+}
+
+fn should_notify_message(
+    selected: bool,
+    focused: bool,
+    duplicate: bool,
+    own: bool,
+    dnd: bool,
+    relevant: bool,
+) -> bool {
+    relevant && !duplicate && !own && !dnd && (!selected || !focused)
+}
+
+/// Merges a fetched page into a channel's cached history: chronological by
+/// snowflake (numeric, so a shorter id sorts first) without duplicates,
+/// keeping the fetched copy of a message over the cached one.
+fn snowflake_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    (a.len(), a).cmp(&(b.len(), b))
+}
+
+fn merge_messages(cache: &mut Vec<Message>, page: Vec<Message>) {
+    let mut merged = page;
+    merged.append(cache);
+    merged.sort_by(|a, b| snowflake_cmp(&a.id, &b.id));
+    merged.dedup_by(|a, b| a.id == b.id);
+    *cache = merged;
+}
+
+#[cfg(test)]
+mod tests {
+    fn test_app() -> (
+        tokio::runtime::Runtime,
+        VesktopApp,
+        UnboundedReceiver<Command>,
+        UnboundedReceiver<VoiceCommand>,
+    ) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let cc = eframe::CreationContext::_new_kittest(Context::default());
+        let (events, rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = VesktopApp::new(&cc, Settings::default(), rt.handle().clone(), events, rx);
+        let (tx, commands) = tokio::sync::mpsc::unbounded_channel();
+        let (voice_tx, voice_commands) = tokio::sync::mpsc::unbounded_channel();
+        app.cmd_tx = tx;
+        app.voice_cmd_tx = voice_tx;
+        (rt, app, commands, voice_commands)
+    }
+
+    fn sample_message(id: u64) -> Message {
+        serde_json::from_value(serde_json::json!({ "id": id.to_string(), "channel_id": "channel", "author": { "id": "9", "username": "member" } })).unwrap()
+    }
+
+    #[test]
+    fn catchup_preserves_history_paginates_and_retries_after_failure() {
+        let (_rt, mut app, mut commands, _) = test_app();
+        app.messages
+            .insert("channel".into(), (1..=5).map(sample_message).collect());
+        app.stale_channels.insert("channel".into(), "5".into());
+        app.fetch_channel_if_needed("channel".into());
+        assert!(
+            matches!(commands.try_recv().unwrap(), Command::LoadMessages { after: Some(id), .. } if id == "5")
+        );
+        app.handle_event(
+            UiEvent::MessagesFailed {
+                channel_id: "channel".into(),
+            },
+            true,
+        );
+        app.fetch_channel_if_needed("channel".into());
+        assert!(
+            matches!(commands.try_recv().unwrap(), Command::LoadMessages { after: Some(id), .. } if id == "5")
+        );
+        for (first, last) in [(6, 55), (56, 105)] {
+            app.handle_event(
+                UiEvent::MessagesLoaded {
+                    channel_id: "channel".into(),
+                    messages: (first..=last).map(sample_message).collect(),
+                    older: false,
+                    newer: true,
+                },
+                true,
+            );
+            assert!(
+                matches!(commands.try_recv().unwrap(), Command::LoadMessages { after: Some(id), .. } if id == last.to_string())
+            );
+        }
+        app.handle_event(
+            UiEvent::MessagesLoaded {
+                channel_id: "channel".into(),
+                messages: vec![sample_message(106)],
+                older: false,
+                newer: true,
+            },
+            true,
+        );
+        let history = &app.messages["channel"];
+        assert_eq!(history.len(), 106);
+        assert_eq!(history.first().unwrap().id, "1");
+        assert_eq!(history.last().unwrap().id, "106");
+        assert!(!app.stale_channels.contains_key("channel"));
+        app.fetch_channel_if_needed("channel".into());
+        assert!(commands.try_recv().is_err());
+    }
+
+    #[test]
+    fn voice_changes_keep_roster_on_active_call_including_departures() {
+        let (_rt, mut app, _, mut voice_commands) = test_app();
+        app.voice = VoiceConn::Connected {
+            guild_id: "guild".into(),
+            channel_id: "current".into(),
+        };
+        let voice = |id: &str, channel: Option<&str>| {
+            serde_json::from_value::<VoiceState>(serde_json::json!({ "user_id": id, "guild_id": "guild", "channel_id": channel, "session_id": "session" })).unwrap()
+        };
+        for state in [
+            voice("10", Some("current")),
+            voice("20", Some("current")),
+            voice("30", Some("other")),
+            voice("20", None),
+            voice("10", Some("other")),
+        ] {
+            app.handle_event(UiEvent::VoiceStateUpdate { state }, true);
+            let VoiceCommand::SetRoster(mut actual) = voice_commands.try_recv().unwrap() else {
+                panic!("expected roster");
+            };
+            actual.sort();
+            let mut expected: Vec<_> = app.voice_states["guild"]
+                .values()
+                .filter(|state| state.channel_id.as_deref() == Some("current"))
+                .map(|state| state.user_id.parse::<u64>().unwrap())
+                .collect();
+            expected.sort();
+            assert_eq!(actual, expected);
+        }
+        assert!(
+            app.voice_states["guild"]
+                .values()
+                .all(|state| state.channel_id.as_deref() != Some("current"))
+        );
+    }
+
+    #[test]
+    fn dm_load_does_not_replace_friends_page() {
+        let (_rt, mut app, mut commands, _) = test_app();
+        app.home_page = ui::friends::HomePage::Friends;
+        app.settings.selected_channel_id = Some("channel".into());
+        let channel =
+            serde_json::from_value(serde_json::json!({ "id": "channel", "type": 1 })).unwrap();
+        app.handle_event(
+            UiEvent::DmChannelsLoaded {
+                channels: vec![channel],
+            },
+            true,
+        );
+        assert!(app.home_page == ui::friends::HomePage::Friends);
+        assert!(app.selected_channel.is_none());
+        assert!(commands.try_recv().is_err());
+    }
+
+    #[test]
+    fn message_alerts_respect_focus_duplicates_and_dnd() {
+        assert!(should_notify_message(
+            false, true, false, false, false, true
+        ));
+        assert!(should_notify_message(
+            true, false, false, false, false, true
+        ));
+        assert!(!should_notify_message(
+            true, true, false, false, false, true
+        ));
+        assert!(!should_notify_message(
+            false, false, true, false, false, true
+        ));
+        assert!(!should_notify_message(
+            false, false, false, true, false, true
+        ));
+        assert!(!should_notify_message(
+            false, false, false, false, true, true
+        ));
+        assert!(!should_notify_message(
+            false, false, false, false, false, false
+        ));
+    }
+
+    use super::*;
+
+    #[test]
+    fn merge_keeps_order_and_drops_duplicates() {
+        let message = |id: &str| -> Message {
+            serde_json::from_value(serde_json::json!({
+                "id": id,
+                "author": { "id": "1", "username": "fulano" }
+            }))
+            .unwrap()
+        };
+        let mut cache = vec![
+            message("999999999999999999"),
+            message("1000000000000000001"),
+        ];
+        merge_messages(
+            &mut cache,
+            vec![
+                message("1000000000000000002"),
+                message("1000000000000000001"),
+            ],
+        );
+        let ids: Vec<&str> = cache.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "999999999999999999",
+                "1000000000000000001",
+                "1000000000000000002"
+            ]
+        );
     }
 }

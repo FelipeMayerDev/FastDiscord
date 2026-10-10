@@ -1,5 +1,5 @@
 //! Window icon (and, behind the `tray` feature, the tray icon) decoded from
-//! the assets carried over from the upstream Electron app.
+//! the FastDiscord logo in assets/ (icon.svg is the source).
 
 use egui::IconData;
 

@@ -2,7 +2,7 @@
 //! native equivalent of Vesktop's Electron `settings.json`.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -33,12 +33,25 @@ pub struct Settings {
     /// Voice: chosen sound-server device names (`None` = system default).
     pub input_device: Option<String>,
     pub output_device: Option<String>,
+    /// Input/output gain in percent (100 = unchanged).
+    pub input_volume: u8,
+    pub output_volume: u8,
     /// Voice-activity threshold, 0 (sempre aberto) to 100.
     pub input_sensitivity: u8,
     /// RNNoise-style microphone noise suppression.
     pub noise_suppression: bool,
+    /// Opus send bitrate in kbps (Discord's default is 64).
+    pub opus_bitrate_kbps: u16,
+    /// Automatic gain control on the microphone.
+    pub auto_gain: bool,
+    /// Compressor + limiter on the microphone.
+    pub compressor: bool,
+    /// Echo cancellation (WebRTC on Linux, native communications AEC on Windows).
+    pub echo_cancellation: bool,
     /// Per-user playback volume, as a percentage (100 = normal).
     pub user_volumes: HashMap<String, u8>,
+    /// Users muted locally (only for us), by id.
+    pub muted_users: HashSet<String>,
     /// Screen share through FockyTV (WHIP) instead of Discord's Go Live,
     /// which stays in the code for later (docs/SCREENSHARE.md).
     pub fockytv_share: bool,
@@ -64,9 +77,16 @@ impl Default for Settings {
             check_for_updates: true,
             input_device: None,
             output_device: None,
+            input_volume: 100,
+            output_volume: 100,
             input_sensitivity: 0,
             noise_suppression: false,
+            opus_bitrate_kbps: 64,
+            auto_gain: false,
+            compressor: false,
+            echo_cancellation: false,
             user_volumes: HashMap::new(),
+            muted_users: HashSet::new(),
             fockytv_share: true,
             fockytv_url: "https://tv.huestavo.com".into(),
             fockytv_nick: None,
@@ -115,6 +135,8 @@ mod tests {
         let mut settings = Settings::default();
         settings.theme = Theme::Light;
         settings.zoom = 1.25;
+        settings.input_volume = 75;
+        settings.output_volume = 150;
         settings.token = Some("abc".to_string());
         settings
             .last_channel_by_guild
@@ -124,6 +146,8 @@ mod tests {
         let back: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(back.theme, Theme::Light);
         assert_eq!(back.zoom, 1.25);
+        assert_eq!(back.input_volume, 75);
+        assert_eq!(back.output_volume, 150);
         assert_eq!(back.token.as_deref(), Some("abc"));
         assert_eq!(
             back.last_channel_by_guild.get("g").map(String::as_str),
@@ -137,5 +161,7 @@ mod tests {
         assert_eq!(back.theme, Theme::Dark);
         assert!((back.zoom - 1.0).abs() < f32::EPSILON);
         assert_eq!(back.token, None);
+        assert_eq!(back.input_volume, 100);
+        assert_eq!(back.output_volume, 100);
     }
 }

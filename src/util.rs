@@ -1,6 +1,6 @@
 //! Small pure helpers: snowflake math, timestamps, CDN URLs, name colors.
 
-use crate::model::{Guild, User};
+use crate::model::{Channel, Embed, Guild, User};
 use chrono::{DateTime, Datelike, Local};
 use egui::Color32;
 
@@ -108,6 +108,63 @@ pub fn user_avatar_url(user: &User) -> String {
                 .unwrap_or(0)
         ),
     }
+}
+
+/// The animated (`a_…` hash) avatar as a GIF, for hover playback.
+pub fn animated_avatar_url(user: &User) -> Option<String> {
+    let hash = user.avatar.as_deref().filter(|hash| hash.starts_with("a_"))?;
+    Some(format!(
+        "https://cdn.discordapp.com/avatars/{}/{}.gif?size=64",
+        user.id, hash
+    ))
+}
+
+/// The picture an embed shows inline. Tenor and Giphy `gifv` embeds are
+/// mp4 videos; their GIF rendition lives next to the video, so swap the
+/// URL (thumbnail when the pattern doesn't match).
+pub fn embed_picture_url(embed: &Embed) -> Option<String> {
+    let media_url = |media: &Option<crate::model::EmbedMedia>| {
+        let media = media.as_ref()?;
+        media.proxy_url.clone().or_else(|| media.url.clone())
+    };
+    if embed.kind.as_deref() == Some("gifv") {
+        let video = embed.video.as_ref().and_then(|video| video.url.as_deref());
+        if let Some(gif) = video.and_then(gif_rendition) {
+            return Some(gif);
+        }
+        return media_url(&embed.thumbnail);
+    }
+    media_url(&embed.image).or_else(|| {
+        (embed.kind.as_deref() == Some("image"))
+            .then(|| media_url(&embed.thumbnail))
+            .flatten()
+    })
+}
+
+/// `media.tenor.com/{id}AAAPo/{slug}.mp4` → `…{id}AAAAC/{slug}.gif` and
+/// `…giphy.com/…/giphy.mp4` → `…/giphy.gif`.
+fn gif_rendition(video: &str) -> Option<String> {
+    let video = video.split('?').next()?;
+    let base = video.strip_suffix(".mp4")?;
+    if video.contains("media.tenor.com/") {
+        let (dir, slug) = base.rsplit_once('/')?;
+        let id = dir.strip_suffix("AAAPo")?;
+        return Some(format!("{id}AAAAC/{slug}.gif"));
+    }
+    video.contains("giphy.com/").then(|| format!("{base}.gif"))
+}
+
+/// A DM's avatar: the partner's on a 1:1 DM, the group icon on a group DM
+/// (`None` without one, so the caller draws the default letter circle).
+pub fn dm_icon_url(channel: &Channel) -> Option<String> {
+    if let Some(partner) = channel.dm_partner() {
+        return Some(user_avatar_url(partner));
+    }
+    let hash = channel.icon.as_deref()?;
+    Some(format!(
+        "https://cdn.discordapp.com/channel-icons/{}/{}.png?size=64",
+        channel.id, hash
+    ))
 }
 
 pub fn guild_icon_url(guild: &Guild) -> Option<String> {
