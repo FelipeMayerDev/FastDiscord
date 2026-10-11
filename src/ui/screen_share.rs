@@ -2,6 +2,8 @@
 //! "AO VIVO" preview above the "Voz conectada" block, and a watched live
 //! (FockyTV or Go Live) in place of the chat.
 
+use std::time::Duration;
+
 use egui::{Rect, Vec2, pos2};
 
 use crate::app::VesktopApp;
@@ -99,9 +101,9 @@ pub fn paint(app: &VesktopApp, ui: &mut egui::Ui) {
     );
 }
 
-/// A watched stream in place of the chat: the video, letterboxed, with a
-/// bar to leave it.
-pub fn paint_watch(app: &mut VesktopApp, ui: &mut egui::Ui) {
+/// Once per frame: closes an ended FockyTV live and uploads the watched
+/// stream's newest frame, docked or floating.
+pub fn poll_watch(app: &mut VesktopApp, ctx: &egui::Context) {
     let Some(watch) = &app.watch else {
         return;
     };
@@ -115,41 +117,30 @@ pub fn paint_watch(app: &mut VesktopApp, ui: &mut egui::Ui) {
         app.stop_watching();
         return;
     }
-    let title = match watch.key.strip_prefix("fockytv:") {
-        Some(key) => format!("Assistindo {key} no FockyTV"),
-        None => "Assistindo à transmissão".to_string(),
+    let Some(frame) = watch.frames.lock().unwrap().take() else {
+        return;
     };
-    let frame = watch.frames.lock().unwrap().take();
-    if let Some(frame) = frame {
-        // Decoded frames are already RGBA; only captures need swizzling.
-        let image = if frame.bgr {
-            let (size, rgba) = frame.preview_rgba(frame.width);
-            egui::ColorImage::from_rgba_unmultiplied(size, &rgba)
-        } else {
-            egui::ColorImage::from_rgba_unmultiplied(
-                [frame.width as usize, frame.height as usize],
-                &frame.pixels,
-            )
-        };
-        match &mut app.watch_texture {
-            Some(texture) => texture.set(image, egui::TextureOptions::LINEAR),
-            None => {
-                app.watch_texture = Some(ui.ctx().load_texture(
-                    "watch_stream",
-                    image,
-                    egui::TextureOptions::LINEAR,
-                ));
-            }
+    // Decoded frames are already RGBA; only captures need swizzling.
+    let image = if frame.bgr {
+        let (size, rgba) = frame.preview_rgba(frame.width);
+        egui::ColorImage::from_rgba_unmultiplied(size, &rgba)
+    } else {
+        egui::ColorImage::from_rgba_unmultiplied(
+            [frame.width as usize, frame.height as usize],
+            &frame.pixels,
+        )
+    };
+    match &mut app.watch_texture {
+        Some(texture) => texture.set(image, egui::TextureOptions::LINEAR),
+        None => {
+            app.watch_texture =
+                Some(ctx.load_texture("watch_stream", image, egui::TextureOptions::LINEAR));
         }
     }
-    let mut leave = false;
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(title).strong().color(theme::TEXT));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            leave = ui.button("Parar de assistir").clicked();
-        });
-    });
-    let area = ui.available_rect_before_wrap();
+}
+
+/// The video letterboxed into `area`, or a placeholder until it arrives.
+fn paint_video(app: &VesktopApp, ui: &mut egui::Ui, area: Rect) {
     ui.painter().rect_filled(area, 6.0, egui::Color32::BLACK);
     match &app.watch_texture {
         Some(texture) => {
@@ -159,16 +150,76 @@ pub fn paint_watch(app: &mut VesktopApp, ui: &mut egui::Ui) {
                 .paint_at(ui, Rect::from_center_size(area.center(), size * scale));
         }
         None => {
+            // Discord cuts Go Live video for Brazil (ANPD, Aug 2026) after
+            // a few seconds; FockyTV isn't affected.
+            let blocked = app.watch.as_ref().is_some_and(|watch| {
+                watch.fockytv.is_none() && watch.started.elapsed() > Duration::from_secs(10)
+            });
+            let text = if blocked {
+                "Sem vídeo: o Discord suspendeu o Go Live no Brasil.\nUse o FockyTV para assistir."
+            } else {
+                ui.ctx().request_repaint_after(Duration::from_secs(1));
+                "Conectando à transmissão…"
+            };
             ui.painter().text(
                 area.center(),
                 egui::Align2::CENTER_CENTER,
-                "Conectando à transmissão…",
+                text,
                 egui::FontId::proportional(14.0),
                 theme::MUTED,
             );
         }
     }
+}
+
+/// A watched stream in place of the chat (its voice channel's view): the
+/// video, letterboxed, with a bar to leave it.
+pub fn paint_watch(app: &mut VesktopApp, ui: &mut egui::Ui) {
+    let Some(watch) = &app.watch else {
+        return;
+    };
+    let title = match watch.key.strip_prefix("fockytv:") {
+        Some(key) => format!("Assistindo {key} no FockyTV"),
+        None => "Assistindo à transmissão".to_string(),
+    };
+    let mut leave = false;
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(title).strong().color(theme::TEXT));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            leave = ui.button("Parar de assistir").clicked();
+        });
+    });
+    let area = ui.available_rect_before_wrap();
+    paint_video(app, ui, area);
     if leave {
         app.stop_watching();
+    }
+}
+
+/// Floating size of a live watched from another view.
+const FLOATING: Vec2 = Vec2::new(320.0, 180.0);
+
+/// The watched stream in a corner while another chat is open; a click
+/// returns to its voice channel, where it docks again.
+pub fn paint_floating(app: &mut VesktopApp, ctx: &egui::Context) {
+    let response = egui::Area::new(egui::Id::new("watch_floating"))
+        .anchor(egui::Align2::RIGHT_BOTTOM, Vec2::splat(-16.0))
+        .order(egui::Order::Foreground)
+        .show(ctx, |ui| {
+            let (area, response) = ui.allocate_exact_size(FLOATING, egui::Sense::click());
+            paint_video(app, ui, area);
+            if response.hovered() {
+                ui.painter().rect_stroke(
+                    area,
+                    6.0,
+                    egui::Stroke::new(2.0, theme::TEXT),
+                    egui::StrokeKind::Inside,
+                );
+            }
+            response.on_hover_text("Voltar para a transmissão")
+        })
+        .inner;
+    if response.clicked() {
+        app.dock_watch();
     }
 }

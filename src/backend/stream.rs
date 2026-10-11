@@ -407,9 +407,15 @@ async fn connect(info: &StreamInfo, role: &Role) -> Result<(), String> {
                     continue;
                 };
                 *stats.payload_types.entry(rtp.payload_type).or_default() += 1;
-                // ponytail: any H264 packet is the streamer's (one sender per
-                // stream); op 12's ssrc map would matter with simulcast.
-                if rtp.payload_type != H264_PT {
+                // The streamer's own payload type reaches us unrewritten
+                // (103 or 105 for H264, by client), so op 12's ssrcs tell
+                // video apart; RTX has its own ssrc.
+                let video = if video_ssrcs.is_empty() {
+                    rtp.payload_type == H264_PT
+                } else {
+                    video_ssrcs.contains(&rtp.ssrc)
+                };
+                if !video {
                     continue;
                 }
                 let frame = depacketizer.push(&rtp);

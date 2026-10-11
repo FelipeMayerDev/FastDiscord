@@ -171,28 +171,9 @@ client, following
   reports confirm reception with no loss.
 - **Viewer side**: op 12 `{video_ssrc: 0, streams: []}`, op 15 naming the
   streamer's ssrcs, RTP open → depacketize → `davey.decrypt` → openh264 on
-  its own thread. Never exercised: no video has reached it.
-
-### Open problem: the SFU doesn't forward
-
-The viewer only ever receives RTCP. Tried, without effect on forwarding:
-
-1. discord-native-voice's full one-byte extension set (toffset,
-   abs-send-time, orientation, transport-cc, playout-delay, content-type,
-   video-timing, stream type "screen", rid "100"). This *did* change the
-   streamer side: the SFU started sending transport-cc feedback.
-2. op 15 naming each ssrc (`{"<ssrc>": 100, "any": 100}`), as
-   discord-native-voice's `request_video` does.
-3. RTCP Sender Reports once a second (Discord-video-stream sends them).
-
-Next leads:
-
-- Bisect against the official client: a FastDiscord stream watched on the
-  phone (is our sending accepted?), and an official stream watched in
-  FastDiscord (does our viewer work?).
-- Share the DAVE identity keypair with the voice connection (songbird
-  passes `key_pair: None`, so each connection makes its own; clients may
-  treat the stream as unverified).
+  its own thread. Video is told apart by op 12's ssrcs, not payload
+  type: the SFU forwards the streamer's own numbering (H264 came as 105
+  from one client, 103 from another; AV1 as 101).
 
 ### Risks
 

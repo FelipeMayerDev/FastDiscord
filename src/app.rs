@@ -81,6 +81,9 @@ pub(crate) struct GoLive {
     pub(crate) frames: Arc<Mutex<Option<crate::backend::capture::Frame>>>,
     /// Set when the stream is a FockyTV live watched over WHEP instead.
     pub(crate) fockytv: Option<crate::backend::fockytv::Viewer>,
+    /// When watching began: a Go Live that never shows video gets a
+    /// notice (blocked in Brazil).
+    pub(crate) started: Instant,
 }
 
 impl GoLive {
@@ -91,6 +94,7 @@ impl GoLive {
             task: None,
             frames: Arc::default(),
             fockytv: None,
+            started: Instant::now(),
         }
     }
 }
@@ -710,7 +714,7 @@ impl VesktopApp {
                 guild_id: g,
                 channel_id: c,
             } if *g == guild_id && *c == channel_id => {
-                return;
+                return self.dock_watch();
             }
             _ => {}
         }
@@ -861,6 +865,7 @@ impl VesktopApp {
             self.event_tx.clone(),
         ));
         self.watch = Some(watch);
+        self.dock_watch();
     }
 
     /// While in a call, refreshes who's live on FockyTV every 5 s.
@@ -916,15 +921,63 @@ impl VesktopApp {
             stream_key: stream_key.clone(),
         });
         self.watch = Some(GoLive::new(stream_key));
+        self.dock_watch();
     }
 
     pub(crate) fn stop_watching(&mut self) {
-        self.watch_texture = None;
-        if let Some(watch) = self.watch.take().filter(|watch| watch.fockytv.is_none()) {
+        if let Some(watch) = self.close_watch().filter(|watch| watch.fockytv.is_none()) {
             self.send(Command::StopStream {
                 stream_key: watch.key.clone(),
             });
         }
+    }
+
+    /// Drops the watched live; if it was docked, the guild's last text
+    /// channel takes its place.
+    fn close_watch(&mut self) -> Option<GoLive> {
+        let docked = self.watch_docked();
+        self.watch_texture = None;
+        let watch = self.watch.take();
+        if docked && let Some(guild_id) = self.selected_guild.clone() {
+            self.restore_channel_for_guild(&guild_id);
+        }
+        watch
+    }
+
+    /// The voice channel a watched live belongs to: selected, it shows the
+    /// live in place of the chat; from anywhere else the live floats.
+    fn watch_channel(&self) -> Option<(&String, &String)> {
+        match &self.voice {
+            VoiceConn::Connected {
+                guild_id,
+                channel_id,
+            } => Some((guild_id, channel_id)),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn watch_docked(&self) -> bool {
+        self.watch.is_some()
+            && self
+                .watch_channel()
+                .is_none_or(|(_, channel)| self.selected_channel.as_ref() == Some(channel))
+    }
+
+    /// Opens the watched live's voice channel, docking the live. Not saved
+    /// as the guild's last channel: that stays a text one.
+    pub(crate) fn dock_watch(&mut self) {
+        if self.watch.is_none() {
+            return;
+        }
+        let Some((guild_id, channel_id)) = self
+            .watch_channel()
+            .map(|(guild, channel)| (guild.clone(), channel.clone()))
+        else {
+            return;
+        };
+        self.home_page = ui::friends::HomePage::DirectMessages;
+        self.selected_guild = Some(guild_id);
+        self.selected_channel = Some(channel_id);
     }
 
     /// Our stream or the watched one, by key, and whether we're the viewer.
@@ -1760,8 +1813,7 @@ impl VesktopApp {
                     .as_ref()
                     .is_some_and(|watch| watch.key == stream_key)
                 {
-                    self.watch = None;
-                    self.watch_texture = None;
+                    self.close_watch();
                 }
             }
             UiEvent::VoiceLeft => {
@@ -1884,12 +1936,12 @@ impl eframe::App for VesktopApp {
             });
 
         egui::CentralPanel::default().show(root, |ui| {
-            if self.selected_guild.is_none()
+            if self.watch_docked() {
+                ui::screen_share::paint_watch(self, ui);
+            } else if self.selected_guild.is_none()
                 && self.home_page != ui::friends::HomePage::DirectMessages
             {
                 ui::friends::paint(self, ui);
-            } else if self.watch.is_some() {
-                ui::screen_share::paint_watch(self, ui);
             } else {
                 ui::chat::paint(self, ui);
             }
@@ -1901,6 +1953,10 @@ impl eframe::App for VesktopApp {
         ui::image_viewer::show(self, ctx);
         ui::voice_extras::show(self, ctx);
         ui::screen_share::poll(self, ctx);
+        ui::screen_share::poll_watch(self, ctx);
+        if self.watch.is_some() && !self.watch_docked() {
+            ui::screen_share::paint_floating(self, ctx);
+        }
         self.poll_fockytv();
         if self.settings.fockytv_share && matches!(self.voice, VoiceConn::Connected { .. }) {
             ctx.request_repaint_after(Duration::from_secs(5));
