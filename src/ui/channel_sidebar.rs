@@ -686,7 +686,7 @@ fn voice_panel(app: &mut VesktopApp, ui: &mut egui::Ui) {
                 ui.add_space(8.0);
                 let gap = 6.0;
                 ui.spacing_mut().item_spacing.x = gap;
-                let button_width = (width - 16.0 - 2.0 * gap) / 3.0;
+                let button_width = (width - 16.0 - 3.0 * gap) / 4.0;
                 let action = |ui: &mut egui::Ui, icon, selected, tooltip: &str| {
                     crate::ui::icons::button(
                         ui,
@@ -708,7 +708,20 @@ fn voice_panel(app: &mut VesktopApp, ui: &mut egui::Ui) {
                         "Compartilhar tela"
                     },
                 ) {
-                    app.toggle_screen_share(ui.ctx());
+                    app.toggle_screen_share();
+                }
+                let camera = app.camera.is_some();
+                if action(
+                    ui,
+                    crate::ui::icons::Icon::Camera,
+                    camera,
+                    if camera {
+                        "Desligar câmera"
+                    } else {
+                        "Ligar câmera"
+                    },
+                ) {
+                    app.toggle_camera(ui.ctx());
                 }
                 let extras = &mut app.extras;
                 if action(
@@ -765,8 +778,10 @@ fn voice_member_row(app: &mut VesktopApp, ui: &mut egui::Ui, guild_id: &str, mem
     let width = ui.available_width();
     // A live member is clickable: it opens their stream.
     let live = app.is_live(&member.user_id, member.self_stream);
+    // Their webcam on FockyTV: a click opens it when there's no live.
+    let camera = app.has_camera(&member.user_id);
     let is_me = app.me.as_ref().is_some_and(|me| me.id == member.user_id);
-    let watchable = live && !is_me;
+    let watchable = (live || camera) && !is_me;
     let sense = if is_me {
         Sense::hover()
     } else {
@@ -784,13 +799,19 @@ fn voice_member_row(app: &mut VesktopApp, ui: &mut egui::Ui, guild_id: &str, mem
             theme::HOVER,
         ),
     );
-    let response = if watchable {
+    let response = if watchable && live {
         response.on_hover_text("Assistir à transmissão (clique direito: volume)")
+    } else if watchable {
+        response.on_hover_text("Ver câmera (clique direito: volume)")
     } else {
         response
     };
     if watchable && response.clicked() {
-        app.watch(&member.user_id);
+        if live {
+            app.watch(&member.user_id);
+        } else {
+            app.watch_camera(&member.user_id);
+        }
     }
     let mut content = ui.new_child(
         egui::UiBuilder::new()
@@ -854,6 +875,16 @@ fn voice_member_row(app: &mut VesktopApp, ui: &mut egui::Ui, guild_id: &str, mem
                 .background_color(theme::RED),
         );
     }
+    if camera {
+        content.add_space(4.0);
+        content.label(
+            RichText::new(" CÂMERA ")
+                .size(9.5)
+                .family(theme::bold())
+                .color(egui::Color32::WHITE)
+                .background_color(theme::BLURPLE),
+        );
+    }
 
     if is_me {
         return;
@@ -875,6 +906,11 @@ fn voice_member_row(app: &mut VesktopApp, ui: &mut egui::Ui, guild_id: &str, mem
         .show(|ui| {
             ui.set_min_width(200.0);
             ui.label(RichText::new(&label).strong().size(13.0));
+            // A click opens the live; the camera next to it is here.
+            if live && camera && ui.button("Ver câmera").clicked() {
+                app.watch_camera(&member.user_id);
+                ui.close();
+            }
             ui.separator();
             ui.label(
                 RichText::new("Volume do usuário")

@@ -17,12 +17,15 @@ EXE=dist/FastDiscord-windows-x86_64.exe
 # Required elements: Desktop Duplication capture, WHIP publish, WHEP watch,
 # the encoder probe and the webrtcbin internals.
 ELEMENTS=(d3d11screencapturesrc d3d11download appsrc appsink queue videorate capsfilter
-          videoconvert videotestsrc fakesink h264parse rtph264pay rtph264depay
+          videoconvert videoscale videotestsrc fakesink h264parse rtph264pay rtph264depay
           openh264enc openh264dec whipsink whepsrc webrtcbin nicesrc nicesink
           dtlssrtpenc dtlssrtpdec srtpenc srtpdec rtpbin rtpsession rtpjitterbuffer
           rtprtxsend rtprtxreceive rtpstorage)
 # Probed at runtime; absent ones just shorten the encoder/decoder ladders.
 OPTIONAL=(nvh264enc mfh264enc x264enc d3d11h264dec)
+# Webcam (docs/SCREENSHARE.md, "Câmera"): Media Foundation or KS source,
+# MJPEG decode.
+OPTIONAL+=(mfvideosrc ksvideosrc decodebin jpegparse jpegdec)
 
 echo "── release build"
 cargo build --release

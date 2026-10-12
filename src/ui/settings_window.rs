@@ -302,6 +302,10 @@ fn voice_settings(app: &mut VesktopApp, ui: &mut egui::Ui) {
         ui.label("Entrada:");
         changed |= device_combo(app, ui, false);
     });
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Câmera:");
+        camera_combo(app, ui);
+    });
     changed |= volume_control(app, ui, true);
     changed |= volume_control(app, ui, false);
     changed |= input_controls(app, ui);
@@ -462,6 +466,33 @@ fn input_controls(app: &mut VesktopApp, ui: &mut egui::Ui) -> bool {
         )
         .changed();
     changed
+}
+
+/// Webcam picker (`None` = the first camera); applies the next time the
+/// camera is turned on.
+fn camera_combo(app: &mut VesktopApp, ui: &mut egui::Ui) {
+    let devices = crate::backend::camera::devices();
+    let current = app
+        .settings
+        .camera_device
+        .clone()
+        .filter(|name| devices.contains(name))
+        .or_else(|| devices.first().cloned());
+    egui::ComboBox::from_id_salt("camera_device")
+        .selected_text(current.clone().unwrap_or_else(|| "Nenhuma câmera".into()))
+        .show_ui(ui, |ui| {
+            for name in &devices {
+                if ui
+                    .selectable_label(current.as_ref() == Some(name), name)
+                    .clicked()
+                {
+                    app.settings.camera_device = Some(name.clone());
+                    app.settings.save();
+                }
+            }
+        })
+        .response
+        .on_hover_text("Vale a partir da próxima vez que ligar a câmera");
 }
 
 fn apply_voice_change(app: &mut VesktopApp) {

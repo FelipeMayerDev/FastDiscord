@@ -2,9 +2,15 @@
 //! latest-frame slot that the preview, the Go Live encoder and the WHIP
 //! feeder read at their own pace. The capture itself is per platform:
 //! `linux.rs` (ScreenCast portal + PipeWire), `windows.rs` (GStreamer's
-//! Desktop Duplication source).
+//! Desktop Duplication / Windows Graphics Capture source). The webcam
+//! (`backend::camera`) fills the same kind of slot through `start_gst`.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+
+use gstreamer as gst;
+use gstreamer::prelude::*;
+use gstreamer_app as gst_app;
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -36,7 +42,7 @@ impl Frame {
         let mut out = Vec::with_capacity(out_w * out_h * 4);
         for y in (0..height).step_by(step) {
             let row = &self.pixels[y * width * 4..(y + 1) * width * 4];
-            for px in row.chunks_exact(4).step_by(step) {
+            for px in row.as_chunks::<4>().0.iter().step_by(step) {
                 if self.bgr {
                     out.extend_from_slice(&[px[2], px[1], px[0], 255]);
                 } else {
@@ -72,22 +78,166 @@ impl Drop for Capture {
     }
 }
 
-/// Picks a source (Linux: the portal dialog; Windows: the primary monitor)
-/// and starts streaming. `on_frame` runs on the capture thread after each
-/// new frame (the UI passes a repaint request). `runtime` must outlive
-/// every capture: on Linux ashpd caches its D-Bus connection in a static,
-/// bound to the runtime that first opened it — a per-capture runtime left
-/// every later picker hanging forever.
-pub fn start(runtime: tokio::runtime::Handle, on_frame: impl Fn() + Send + 'static) -> Capture {
-    let frame = Arc::new(Mutex::new(None));
+/// A screen or window from `sources()`, chosen in the app's picker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Source {
+    /// An `HMONITOR`.
+    Monitor(u64),
+    /// An `HWND`, captured through Windows Graphics Capture.
+    Window(u64),
+}
+
+/// Screens and windows for the picker, primary screen first. Only Windows
+/// lists them: on Linux (Wayland) apps can't see other windows, and the
+/// ScreenCast portal's own dialog is the picker.
+pub fn sources() -> Vec<(Source, String)> {
+    #[cfg(windows)]
+    return platform::sources();
+    #[cfg(not(windows))]
+    Vec::new()
+}
+
+/// A small still of `source` for the picker (Windows only).
+pub fn thumbnail(source: Source) -> Option<Frame> {
+    #[cfg(windows)]
+    return platform::thumbnail(source);
+    #[cfg(not(windows))]
+    {
+        let _ = source;
+        None
+    }
+}
+
+/// Starts streaming `source`: Linux ignores it and opens the portal dialog;
+/// Windows without one takes the primary monitor. `on_frame` runs on the
+/// capture thread after each new frame (the UI passes a repaint request).
+/// `runtime` must outlive every capture: on Linux ashpd caches its D-Bus
+/// connection in a static, bound to the runtime that first opened it — a
+/// per-capture runtime left every later picker hanging forever.
+pub fn start(
+    runtime: tokio::runtime::Handle,
+    source: Option<Source>,
+    on_frame: impl Fn() + Send + 'static,
+) -> Capture {
+    #[cfg(windows)]
+    {
+        let _ = runtime;
+        start_gst(move || platform::pipeline(source), on_frame)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = source;
+        let frame = Arc::new(Mutex::new(None));
+        let ended = Arc::new(Mutex::new(None));
+        let stop = platform::start(runtime, Arc::clone(&frame), Arc::clone(&ended), on_frame);
+        Capture {
+            frame,
+            preview_seq: 0,
+            ended,
+            stop: Some(stop),
+        }
+    }
+}
+
+/// Runs the pipeline `build` makes on its own thread, feeding its BGRx
+/// `appsink name=frames` into a new slot (the Windows screen, the webcam).
+pub(crate) fn start_gst(
+    build: impl FnOnce() -> Result<gst::Pipeline, String> + Send + 'static,
+    on_frame: impl Fn() + Send + 'static,
+) -> Capture {
+    let frame: Shared = Arc::default();
     let ended = Arc::new(Mutex::new(None));
-    let stop = platform::start(runtime, Arc::clone(&frame), Arc::clone(&ended), on_frame);
+    let stop = Arc::new(AtomicBool::new(false));
+    let (slot, thread_ended, thread_stop) =
+        (Arc::clone(&frame), Arc::clone(&ended), Arc::clone(&stop));
+    let spawned = std::thread::Builder::new()
+        .name("fastdiscord-capture".into())
+        .spawn(move || {
+            let result = gst::init()
+                .map_err(|err| format!("gstreamer: {err}"))
+                .and_then(|()| build())
+                .and_then(|pipeline| run_gst(&pipeline, &slot, &thread_stop, on_frame));
+            let reason = match result {
+                Ok(()) => "captura encerrada".to_string(),
+                Err(err) => {
+                    log::warn!("captura: {err}");
+                    err
+                }
+            };
+            *thread_ended.lock().unwrap() = Some(reason);
+        });
+    if let Err(err) = spawned {
+        *ended.lock().unwrap() = Some(format!("thread de captura: {err}"));
+    }
     Capture {
         frame,
         preview_seq: 0,
         ended,
-        stop: Some(stop),
+        stop: Some(Box::new(move || stop.store(true, Ordering::Relaxed))),
     }
+}
+
+fn run_gst(
+    pipeline: &gst::Pipeline,
+    slot: &Shared,
+    stop: &AtomicBool,
+    on_frame: impl Fn() + Send + 'static,
+) -> Result<(), String> {
+    let sink = pipeline
+        .by_name("frames")
+        .and_then(|sink| sink.dynamic_cast::<gst_app::AppSink>().ok())
+        .ok_or("appsink não encontrado")?;
+    let slot = Arc::clone(slot);
+    let mut seq = 0;
+    sink.set_callbacks(
+        gst_app::AppSinkCallbacks::builder()
+            .new_sample(move |sink| {
+                let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
+                seq += 1;
+                if let Some(frame) = sample_frame(&sample, seq) {
+                    *slot.lock().unwrap() = Some(Arc::new(frame));
+                    on_frame();
+                }
+                Ok(gst::FlowSuccess::Ok)
+            })
+            .build(),
+    );
+    pipeline
+        .set_state(gst::State::Playing)
+        .map_err(|err| format!("play: {err}"))?;
+    let bus = pipeline.bus().ok_or("pipeline sem bus")?;
+    let result = loop {
+        if stop.load(Ordering::Relaxed) {
+            break Ok(());
+        }
+        let message = bus.timed_pop_filtered(
+            gst::ClockTime::from_mseconds(100),
+            &[gst::MessageType::Error, gst::MessageType::Eos],
+        );
+        if let Some(message) = message {
+            break Err(match message.view() {
+                gst::MessageView::Error(err) => format!("{} ({:?})", err.error(), err.debug()),
+                _ => "a captura terminou".to_string(),
+            });
+        }
+    };
+    let _ = pipeline.set_state(gst::State::Null);
+    result
+}
+
+/// A BGRx appsink sample as a frame. BGRx rows are 4-byte aligned already:
+/// no stride padding.
+pub(crate) fn sample_frame(sample: &gst::Sample, seq: u64) -> Option<Frame> {
+    let s = sample.caps()?.structure(0)?;
+    let (width, height) = (s.get::<i32>("width").ok()?, s.get::<i32>("height").ok()?);
+    let map = sample.buffer()?.map_readable().ok()?;
+    Some(Frame {
+        width: width as u32,
+        height: height as u32,
+        pixels: map.as_slice().to_vec(),
+        bgr: true,
+        seq,
+    })
 }
 
 #[cfg(test)]
