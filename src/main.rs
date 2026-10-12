@@ -9,6 +9,12 @@ struct Args {
     /// Discord account token, overriding the one saved in the settings file.
     #[arg(long, value_name = "TOKEN")]
     token: Option<String>,
+    /// Start with experimental Discord Go Live instead of FockyTV.
+    #[arg(long)]
+    go_live: bool,
+    /// Linux: launch through an isolated WireGuard tunnel using this .conf.
+    #[arg(long, value_name = "FILE", conflicts_with = "token")]
+    wireguard: Option<std::path::PathBuf>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -35,10 +41,79 @@ fn main() -> anyhow::Result<()> {
         .init();
     let args = Args::parse();
 
+    if let Some(profile) = args.wireguard {
+        #[cfg(target_os = "linux")]
+        {
+            let profile = profile.canonicalize()?;
+            for tool in ["ip", "wg", "wg-quick", "runuser", "pkexec"] {
+                let found = std::process::Command::new("/bin/bash")
+                    .args(["-c", "command -v \"$1\" >/dev/null", "fastdiscord", tool])
+                    .status()?;
+                anyhow::ensure!(
+                    found.success(),
+                    "dependência ausente: {tool}; instale wireguard-tools, iproute2 e polkit"
+                );
+            }
+            let checked = std::process::Command::new("/bin/bash")
+                .args([
+                    "-c",
+                    include_str!("../packaging/golive-bypass.sh"),
+                    "fastdiscord-bypass",
+                    "--check",
+                ])
+                .arg(&profile)
+                .status()?;
+            anyhow::ensure!(checked.success(), "perfil WireGuard inválido");
+            let user = std::process::Command::new("id").arg("-un").output()?;
+            anyhow::ensure!(
+                user.status.success(),
+                "não foi possível identificar o usuário"
+            );
+            let user = String::from_utf8(user.stdout)?;
+            let mut command = std::process::Command::new("pkexec");
+            command
+                .args([
+                    "/bin/bash",
+                    "-c",
+                    include_str!("../packaging/golive-bypass.sh"),
+                    "fastdiscord-bypass",
+                ])
+                .arg(profile)
+                .arg(std::env::current_exe()?)
+                .arg(user.trim());
+            for name in [
+                "DISPLAY",
+                "WAYLAND_DISPLAY",
+                "XDG_RUNTIME_DIR",
+                "DBUS_SESSION_BUS_ADDRESS",
+                "XAUTHORITY",
+            ] {
+                if let Some(value) = std::env::var_os(name) {
+                    command.arg(format!("{name}={}", value.to_string_lossy()));
+                }
+            }
+            let status = command.status()?;
+            anyhow::ensure!(
+                status.success(),
+                "bypass não iniciado ou encerrado com erro: {status}"
+            );
+            return Ok(());
+        }
+        #[cfg(not(target_os = "linux"))]
+        anyhow::bail!(
+            "--wireguard está disponível apenas no Linux: {}",
+            profile.display()
+        );
+    }
+
     let mut settings = fastdiscord::settings::Settings::load().unwrap_or_default();
     if let Some(token) = args.token {
         settings.token = Some(token);
         settings.save();
+    }
+    if args.go_live {
+        settings.fockytv_share = false;
+        log::info!("Go Live experimental selecionado");
     }
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -95,4 +170,33 @@ fn main() -> anyhow::Result<()> {
     // Background tasks die with the runtime once the UI loop returns.
     drop(runtime);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bypass_args_keep_token_out_of_the_privileged_launcher() {
+        assert!(
+            Args::try_parse_from([
+                "fastdiscord",
+                "--wireguard",
+                "vpn.conf",
+                "--token",
+                "secret"
+            ])
+            .is_err()
+        );
+        let args = Args::try_parse_from(["fastdiscord", "--wireguard", "vpn.conf"]).unwrap();
+        assert_eq!(
+            args.wireguard.unwrap(),
+            std::path::PathBuf::from("vpn.conf")
+        );
+        assert!(
+            Args::try_parse_from(["fastdiscord", "--go-live"])
+                .unwrap()
+                .go_live
+        );
+    }
 }

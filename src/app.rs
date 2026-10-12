@@ -252,6 +252,8 @@ pub struct VesktopApp {
     pub(crate) settings_open: bool,
     /// Page the settings window shows (left nav).
     pub(crate) settings_tab: ui::settings_window::SettingsTab,
+    #[cfg(target_os = "linux")]
+    pub(crate) bypass: ui::settings_window::Bypass,
     pub(crate) login_token: String,
     /// "Encontre ou comece uma conversa" filter for the DM list.
     pub(crate) dm_search: String,
@@ -354,6 +356,8 @@ impl VesktopApp {
             members: Default::default(),
             settings_open: false,
             settings_tab: Default::default(),
+            #[cfg(target_os = "linux")]
+            bypass: Default::default(),
             login_token: String::new(),
             dm_search: String::new(),
             home_page: ui::friends::HomePage::DirectMessages,

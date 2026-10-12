@@ -480,8 +480,81 @@ fn apply_voice_change(app: &mut VesktopApp) {
     app.push_voice_audio_config();
 }
 
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+pub(crate) struct Bypass {
+    path: String,
+    child: Option<std::process::Child>,
+    error: Option<String>,
+}
+
+#[cfg(target_os = "linux")]
+fn bypass_settings(app: &mut VesktopApp, ui: &mut egui::Ui) {
+    ui.label("Bypass Go Live (experimental)");
+    if std::env::var_os("FASTDISCORD_WIREGUARD").is_some() {
+        ui.label(
+            "Esta sessão foi iniciada pelo túnel WireGuard. Use Sair na bandeja para encerrar.",
+        );
+        return;
+    }
+    ui.label("Perfil WireGuard com servidor fora do Brasil. Requer wireguard-tools e autenticação administrativa.");
+    let bypass = &mut app.bypass;
+    if let Some(child) = &mut bypass.child {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                bypass.child = None;
+                if !status.success() {
+                    bypass.error = Some("Não foi possível iniciar o bypass. Confira o perfil, as dependências e a autorização administrativa; detalhes no log do aplicativo.".into());
+                }
+            }
+            Ok(None) => {
+                ui.label("Sessão de teste aberta ou aguardando autorização. Feche esta sessão original após abrir a nova janela.");
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_secs(1));
+            }
+            Err(error) => {
+                bypass.error = Some(error.to_string());
+                bypass.child = None;
+            }
+        }
+    }
+    ui.horizontal(|ui| {
+        ui.label("Perfil .conf:");
+        ui.text_edit_singleline(&mut bypass.path);
+    });
+    if ui
+        .add_enabled(
+            bypass.child.is_none() && !bypass.path.trim().is_empty(),
+            egui::Button::new("Abrir sessão com bypass"),
+        )
+        .clicked()
+    {
+        let result = std::env::current_exe().and_then(|exe| {
+            std::process::Command::new(exe)
+                .arg("--wireguard")
+                .arg(bypass.path.trim())
+                .spawn()
+        });
+        match result {
+            Ok(child) => {
+                bypass.child = Some(child);
+                bypass.error = None;
+            }
+            Err(error) => bypass.error = Some(error.to_string()),
+        }
+    }
+    if let Some(error) = &bypass.error {
+        ui.colored_label(theme::RED, error);
+    }
+}
+
 /// FockyTV as the share backend; off falls back to Discord's Go Live.
 fn screen_share_settings(app: &mut VesktopApp, ui: &mut egui::Ui) {
+    #[cfg(target_os = "linux")]
+    {
+        bypass_settings(app, ui);
+        ui.separator();
+    }
     let mut changed = ui
         .checkbox(
             &mut app.settings.fockytv_share,
