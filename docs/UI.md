@@ -46,6 +46,10 @@ não deve haver um espaço reservado para uma quarta ação.
   cartão de perfil.
 - Separadores de datas, agrupamento de mensagens, respostas, indicador de
   novas mensagens, digitação, caixa multilinha e links clicáveis.
+- Status próprio (Online, Ausente, Não perturbe, Invisível) e status
+  personalizado, pelo avatar no painel do usuário ou pela bandeja.
+- Mute/surdo na lista da sala de voz com os ícones do Discord: vermelhos
+  quando o próprio membro ativa, em selo vermelho quando é o servidor.
 - Avatares e status, convites com cartão, GIFs e visualizador de imagens.
 - Amigos e solicitações, busca no histórico em cache, arquivos, emoji básico
   e envio de GIF por URL.

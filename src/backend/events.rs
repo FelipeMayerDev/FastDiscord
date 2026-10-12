@@ -65,6 +65,13 @@ pub enum Command {
     SendTyping {
         channel_id: String,
     },
+    /// op 3 with our status and custom status; `save` also stores them in
+    /// the account settings so the other clients follow.
+    SetPresence {
+        status: String,
+        custom_status: crate::settings::CustomStatus,
+        save: bool,
+    },
     /// Join a guild voice channel: op 4 over the live socket. Re-sent with
     /// the same channel and new flags for mute/deafen toggles.
     JoinVoice {

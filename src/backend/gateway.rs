@@ -14,6 +14,7 @@ use tokio_tungstenite::{
 };
 
 use crate::model::{Message, User, VoiceState};
+use crate::settings::CustomStatus;
 
 use super::api::{Api, ApiError};
 use super::events::{Command, EventTx, UiEvent};
@@ -510,6 +511,27 @@ fn identify_payload(token: &str) -> String {
     .to_string()
 }
 
+/// op 3 PRESENCE_UPDATE; a custom status is the type 4 activity, with
+/// the text in `state` as the official client sends it.
+fn presence_payload(status: &str, custom: &CustomStatus) -> String {
+    let activities = if custom.is_empty() {
+        vec![]
+    } else {
+        let emoji = custom.emoji.trim();
+        vec![json!({
+            "type": 4,
+            "name": "Custom Status",
+            "state": custom.text.trim(),
+            "emoji": (!emoji.is_empty()).then(|| json!({ "name": emoji })),
+        })]
+    };
+    json!({
+        "op": 3,
+        "d": { "status": status, "since": 0, "activities": activities, "afk": false }
+    })
+    .to_string()
+}
+
 async fn handle_command(api: &Api, command: Command, event_tx: &EventTx, write: &mut WsSink) {
     match command {
         Command::LoadGuilds => match api.guilds().await {
@@ -600,6 +622,19 @@ async fn handle_command(api: &Api, command: Command, event_tx: &EventTx, write: 
         Command::SendTyping { channel_id } => {
             if let Err(err) = api.send_typing(&channel_id).await {
                 log::warn!("falha ao avisar digitação: {err}");
+            }
+        }
+        Command::SetPresence {
+            status,
+            custom_status,
+            save,
+        } => {
+            let payload = presence_payload(&status, &custom_status);
+            if let Err(err) = write.send(WsMessage::text(payload)).await {
+                log::warn!("falha ao atualizar o status: {err}");
+            }
+            if save && let Err(err) = api.save_status(&status, &custom_status).await {
+                log::warn!("falha ao salvar o status na conta: {err}");
             }
         }
         Command::JoinVoice {
@@ -733,6 +768,25 @@ async fn report(api: &Api, err: ApiError, event_tx: &EventTx, context: &str) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn presence_payload_carries_custom_status_as_activity() {
+        let custom = CustomStatus {
+            text: " no ar ".into(),
+            emoji: "🎧".into(),
+        };
+        let value: Value = serde_json::from_str(&presence_payload("dnd", &custom)).unwrap();
+        assert_eq!(value["op"], 3);
+        assert_eq!(value["d"]["status"], "dnd");
+        let activity = &value["d"]["activities"][0];
+        assert_eq!(activity["type"], 4);
+        assert_eq!(activity["state"], "no ar");
+        assert_eq!(activity["emoji"]["name"], "🎧");
+
+        let plain: Value =
+            serde_json::from_str(&presence_payload("idle", &CustomStatus::default())).unwrap();
+        assert_eq!(plain["d"]["activities"], json!([]));
+    }
+
     #[test]
     fn subscriptions_request_current_and_future_member_presences() {
         let ids: Vec<String> = (0..101).map(|id| id.to_string()).collect();

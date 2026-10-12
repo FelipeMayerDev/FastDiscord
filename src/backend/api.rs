@@ -228,6 +228,34 @@ impl Api {
         Ok(Self::check_status(resp).await?.json::<Message>().await?)
     }
 
+    /// Stores status and custom status in the account settings, which the
+    /// other clients apply on their next update or login. The legacy JSON
+    /// route still maps onto the protobuf settings server-side.
+    pub async fn save_status(
+        &self,
+        status: &str,
+        custom: &crate::settings::CustomStatus,
+    ) -> ApiResult<()> {
+        let emoji = custom.emoji.trim();
+        let custom_status = (!custom.is_empty()).then(|| {
+            serde_json::json!({
+                "text": custom.text.trim(),
+                "emoji_name": (!emoji.is_empty()).then_some(emoji),
+                "emoji_id": null,
+                "expires_at": null,
+            })
+        });
+        let resp = self
+            .http
+            .patch(format!("{REST_BASE}/users/@me/settings"))
+            .header(reqwest::header::AUTHORIZATION, &self.token)
+            .json(&serde_json::json!({ "status": status, "custom_status": custom_status }))
+            .send()
+            .await?;
+        Self::check_status(resp).await?;
+        Ok(())
+    }
+
     /// Fire-and-forget typing indicator; Discord replies with an empty 204.
     pub async fn send_typing(&self, channel_id: &str) -> ApiResult<()> {
         let resp = self

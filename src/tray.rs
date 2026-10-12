@@ -76,6 +76,24 @@ impl ksni::Tray for LinuxTray {
                 ..Default::default()
             }
             .into(),
+            ksni::menu::SubMenu {
+                label: "Status".into(),
+                submenu: crate::settings::STATUSES
+                    .iter()
+                    .map(|&(status, label)| {
+                        ksni::menu::StandardItem {
+                            label: label.into(),
+                            activate: Box::new(move |this: &mut Self| {
+                                send(&this.tx, &this.ctx, TrayCommand::Status(status))
+                            }),
+                            ..Default::default()
+                        }
+                        .into()
+                    })
+                    .collect(),
+                ..Default::default()
+            }
+            .into(),
             ksni::MenuItem::Separator,
             ksni::menu::StandardItem {
                 label: "Sair do FastDiscord".into(),
@@ -122,13 +140,24 @@ pub fn install(
     ctx: egui::Context,
     _: &tokio::runtime::Handle,
 ) -> anyhow::Result<Tray> {
-    use tray_icon::menu::{Menu, MenuEvent, MenuItem};
+    use tray_icon::menu::{Menu, MenuEvent, MenuItem, Submenu};
     use tray_icon::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
     let menu = Menu::new();
     // Stable IDs keep the registered callbacks valid after toggling the tray.
     let show = MenuItem::with_id("fastdiscord-show", "Abrir FastDiscord", true, None);
     let quit = MenuItem::with_id("fastdiscord-quit", "Sair do FastDiscord", true, None);
-    menu.append_items(&[&show, &quit])?;
+    let statuses: Vec<MenuItem> = crate::settings::STATUSES
+        .iter()
+        .map(|(status, label)| {
+            MenuItem::with_id(format!("fastdiscord-status-{status}"), label, true, None)
+        })
+        .collect();
+    let status_items: Vec<&dyn tray_icon::menu::IsMenuItem> = statuses
+        .iter()
+        .map(|item| item as &dyn tray_icon::menu::IsMenuItem)
+        .collect();
+    let status = Submenu::with_items("Status", true, &status_items)?;
+    menu.append_items(&[&show, &status, &quit])?;
     let icon = TrayIconBuilder::new()
         .with_id("fastdiscord-tray")
         .with_tooltip("FastDiscord")
@@ -148,6 +177,11 @@ pub fn install(
             send(&menu_tx, &menu_ctx, TrayCommand::Show);
         } else if event.id == quit_id {
             send(&menu_tx, &menu_ctx, TrayCommand::Quit);
+        } else if let Some(&(status, _)) = crate::settings::STATUSES
+            .iter()
+            .find(|(status, _)| event.id.0 == format!("fastdiscord-status-{status}"))
+        {
+            send(&menu_tx, &menu_ctx, TrayCommand::Status(status));
         }
     }));
     let tray_id = icon.id().clone();
