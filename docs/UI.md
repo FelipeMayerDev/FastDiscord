@@ -55,8 +55,12 @@ não deve haver um espaço reservado para uma quarta ação.
   grupos por cargo exibido separadamente e online/offline, vinda da lista
   preguiçosa do gateway (op 37); nas DMs, os participantes. Clicar numa
   resposta rola até a mensagem original e a destaca.
-- Amigos e solicitações, busca no histórico em cache, arquivos, emoji básico
-  e envio de GIF por URL.
+- Amigos e solicitações, busca no histórico em cache e arquivos.
+- Seletores de emoji (Unicode e personalizados dos servidores), de GIF
+  (endpoints de GIF do Discord, Tenor) e soundboard como popovers ancorados
+  no botão, no padrão `egui::Popup`; fecham com clique fora ou Escape. O
+  seletor de emoji só lista emojis Unicode de um glifo, que a fonte desenha.
+- Quem toca um som do soundboard fica com o anel verde enquanto o som toca.
 - Tópicos: os seguidos aparecem sob o canal pai; botão **Tópicos** no
   cabeçalho (ativos e arquivados públicos), "Criar tópico" no menu de
   contexto da mensagem, resumo "N mensagens" e fóruns listando postagens.

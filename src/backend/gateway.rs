@@ -13,7 +13,7 @@ use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message as WsMessage,
 };
 
-use crate::model::{Channel, Message, ThreadList, User, VoiceState};
+use crate::model::{Channel, GuildEmoji, Message, ThreadList, User, VoiceState};
 use crate::settings::CustomStatus;
 
 use super::api::{Api, ApiError};
@@ -205,6 +205,16 @@ async fn session(
 }
 
 // Supplemental guild presences are nested arrays; normal presences are flat.
+/// A guild's custom emojis, skipping entries that don't parse.
+fn guild_emojis(value: &Value) -> Vec<GuildEmoji> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|emoji| serde::Deserialize::deserialize(emoji).ok())
+        .collect()
+}
+
 fn seed_presences(value: &Value, event_tx: &EventTx) {
     if let Some(entries) = value.as_array() {
         for entry in entries {
@@ -258,6 +268,10 @@ fn dispatch(value: Value, event_tx: &EventTx, voice_tx: &UnboundedSender<Wire>, 
                         states,
                     });
                     sync_guild_threads(guild, id, event_tx);
+                    event_tx.send(UiEvent::GuildEmojis {
+                        guild_id: id.to_string(),
+                        emojis: guild_emojis(&guild["emojis"]),
+                    });
                 }
             }
         }
@@ -283,6 +297,10 @@ fn dispatch(value: Value, event_tx: &EventTx, voice_tx: &UnboundedSender<Wire>, 
                 states,
             });
             sync_guild_threads(&data, id, event_tx);
+            event_tx.send(UiEvent::GuildEmojis {
+                guild_id: id.to_string(),
+                emojis: guild_emojis(&data["emojis"]),
+            });
         }
         // Threads (docs: Gateway Events → Threads). Active ones arrive with
         // the guild and in THREAD_LIST_SYNC; archived ones only over REST.
@@ -345,6 +363,14 @@ fn dispatch(value: Value, event_tx: &EventTx, voice_tx: &UnboundedSender<Wire>, 
                 added: ids(data.get("added_members"), "/user_id"),
                 removed: ids(data.get("removed_member_ids"), ""),
             });
+        }
+        "GUILD_EMOJIS_UPDATE" => {
+            if let Some(id) = data.get("guild_id").and_then(Value::as_str) {
+                event_tx.send(UiEvent::GuildEmojis {
+                    guild_id: id.to_string(),
+                    emojis: guild_emojis(&data["emojis"]),
+                });
+            }
         }
         "RELATIONSHIP_ADD" | "RELATIONSHIP_UPDATE" | "RELATIONSHIP_REMOVE" => {
             event_tx.send(UiEvent::RelationshipsChanged);
@@ -480,6 +506,11 @@ fn dispatch(value: Value, event_tx: &EventTx, voice_tx: &UnboundedSender<Wire>, 
         "VOICE_CHANNEL_EFFECT_SEND" => {
             if let Some(sound_id) = data.get("sound_id").filter(|id| !id.is_null()) {
                 event_tx.send(UiEvent::VoiceEffect {
+                    user_id: data
+                        .get("user_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
                     sound_id: sound_id
                         .as_str()
                         .map_or_else(|| sound_id.to_string(), str::to_string),
@@ -899,6 +930,10 @@ async fn handle_command(api: &Api, command: Command, event_tx: &EventTx, write: 
                 message_id,
                 messages,
             });
+        }
+        Command::SearchGifs { query } => {
+            let result = api.gifs(&query).await.map_err(|err| err.to_string());
+            event_tx.send(UiEvent::GifsLoaded { query, result });
         }
         Command::LoadSoundboard { guild_id } => match api.soundboard_sounds(&guild_id).await {
             Ok(sounds) => event_tx.send(UiEvent::SoundboardLoaded { guild_id, sounds }),

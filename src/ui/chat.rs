@@ -13,7 +13,7 @@ use egui::{
 
 use crate::app::{ChannelRef, VesktopApp};
 use crate::markup::{self, Style};
-use crate::model::{Message, User};
+use crate::model::{GuildEmoji, Message, User};
 use crate::theme;
 use crate::ui::channel_sidebar::draw_search_icon;
 use crate::ui::image_viewer::ImageViewer;
@@ -36,9 +36,14 @@ const JUMP_HIGHLIGHT_SECS: f32 = 2.0;
 struct ChatTools {
     search_open: bool,
     search: String,
-    emoji_open: bool,
-    gif_open: bool,
-    gif_url: String,
+    emoji_query: String,
+    /// Emoji picker tab: a Unicode group, `None` for the servers' emojis.
+    emoji_tab: Option<emojis::Group>,
+    gif_query: String,
+    /// The query last sent to the GIF endpoints, and when the field last
+    /// changed (typing is debounced).
+    gif_requested: Option<String>,
+    gif_edited: f64,
     attachment_open: bool,
     attachment_path: String,
 }
@@ -314,9 +319,10 @@ pub fn paint(app: &mut VesktopApp, ui: &mut egui::Ui) {
                                         smile_rect.center() - Vec2::new(0.0, motion),
                                         theme::TEXT,
                                     );
-                                    if smile.on_hover_text("Inserir emoji").clicked() {
-                                        tools.emoji_open = true;
-                                    }
+                                    let smile = smile.on_hover_text("Inserir emoji");
+                                    picker_popup(&smile, "emoji_picker").show(|ui| {
+                                        emoji_picker(app, ui, &mut tools, smile.clicked());
+                                    });
                                     let (gif_rect, gif) = ui
                                         .allocate_exact_size(Vec2::new(30.0, 24.0), Sense::click());
                                     ui.painter().rect_filled(
@@ -331,9 +337,10 @@ pub fn paint(app: &mut VesktopApp, ui: &mut egui::Ui) {
                                         egui::FontId::proportional(12.0),
                                         theme::TEXT,
                                     );
-                                    if gif.on_hover_text("Enviar GIF por link").clicked() {
-                                        tools.gif_open = true;
-                                    }
+                                    let gif = gif.on_hover_text("Enviar GIF");
+                                    picker_popup(&gif, "gif_picker").show(|ui| {
+                                        gif_picker(app, ui, &mut tools, &channel_id, gif.clicked());
+                                    });
                                 },
                             );
                         });
@@ -352,46 +359,6 @@ pub fn paint(app: &mut VesktopApp, ui: &mut egui::Ui) {
         });
 
     let ctx = ui.ctx().clone();
-    egui::Window::new("Emoji")
-        .collapsible(false)
-        .resizable(false)
-        .open(&mut tools.emoji_open)
-        .show(&ctx, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                for emoji in [
-                    "😀", "😂", "❤️", "👍", "🎉", "🔥", "😢", "👀", "✅", "🙏", "🚀", "💀",
-                ] {
-                    if ui.button(emoji).clicked() {
-                        app.compose.push_str(emoji);
-                    }
-                }
-            });
-        });
-    let mut send_gif = false;
-    egui::Window::new("Enviar GIF")
-        .collapsible(false)
-        .open(&mut tools.gif_open)
-        .show(&ctx, |ui| {
-            ui.label("Cole um link de GIF, Tenor ou Giphy.");
-            ui.text_edit_singleline(&mut tools.gif_url);
-            if ui
-                .add_enabled(
-                    tools.gif_url.trim().starts_with("https://"),
-                    egui::Button::new("Enviar"),
-                )
-                .clicked()
-            {
-                send_gif = true;
-            }
-        });
-    if send_gif {
-        app.send(crate::backend::events::Command::SendMessage {
-            channel_id: channel_id.clone(),
-            content: tools.gif_url.trim().to_string(),
-        });
-        tools.gif_url.clear();
-        tools.gif_open = false;
-    }
     let mut upload = false;
     egui::Window::new("Enviar arquivo")
         .collapsible(false)
@@ -1426,6 +1393,371 @@ fn content_job(
     job
 }
 
+/// The compose box pickers' popover: above its button, toggled by it,
+/// closed by a click outside or Escape. Fixed ids, since the compose
+/// box's auto ids shift when the typing line shows up.
+fn picker_popup<'a>(button: &egui::Response, id: &str) -> egui::Popup<'a> {
+    egui::Popup::from_toggle_button_response(button)
+        .id(egui::Id::new(id))
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .align(egui::RectAlign::TOP_END)
+        .gap(8.0)
+}
+
+/// GIF picker: Discord's GIF endpoints (trending while the field is empty)
+/// in a masonry grid; a click sends the GIF's link, as the official
+/// client does.
+fn gif_picker(
+    app: &mut VesktopApp,
+    ui: &mut egui::Ui,
+    tools: &mut ChatTools,
+    channel_id: &str,
+    just_opened: bool,
+) {
+    ui.set_width(400.0);
+    let search = ui.add(
+        TextEdit::singleline(&mut tools.gif_query)
+            .hint_text("Pesquisar no Tenor")
+            .desired_width(f32::INFINITY),
+    );
+    if just_opened {
+        search.request_focus();
+    }
+    let now = ui.input(|input| input.time);
+    if search.changed() {
+        tools.gif_edited = now;
+    }
+    // Search once typing pauses.
+    let query = tools.gif_query.trim().to_string();
+    if tools.gif_requested.as_ref() != Some(&query) {
+        let wait = 0.35 - (now - tools.gif_edited);
+        if wait <= 0.0 {
+            app.send(crate::backend::events::Command::SearchGifs {
+                query: query.clone(),
+            });
+            tools.gif_requested = Some(query);
+        } else {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs_f64(wait));
+        }
+    }
+    ui.add_space(8.0);
+    // The latest results stay up while a newer search is in flight.
+    let gifs = match &app.gifs {
+        None => {
+            ui.label(RichText::new("Carregando GIFs…").color(theme::MUTED));
+            return;
+        }
+        Some((_, Err(error))) => {
+            ui.label(
+                RichText::new(format!("Não consegui carregar os GIFs: {error}"))
+                    .small()
+                    .color(theme::RED),
+            );
+            if ui.button("Tentar de novo").clicked() {
+                app.gifs = None;
+                tools.gif_requested = None;
+            }
+            return;
+        }
+        Some((_, Ok(gifs))) if gifs.is_empty() => {
+            ui.label(RichText::new("Nenhum GIF encontrado.").color(theme::MUTED));
+            return;
+        }
+        Some((_, Ok(gifs))) => gifs,
+    };
+    let mut send = None;
+    ScrollArea::vertical()
+        .max_height(360.0)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            let width = ui.available_width();
+            let (rects, height) = masonry(gifs.iter().map(|gif| (gif.width, gif.height)), width);
+            let (area, _) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
+            for (index, (gif, rect)) in gifs.iter().zip(rects).enumerate() {
+                let rect = rect.translate(area.min.to_vec2());
+                // Only what's on screen gets fetched.
+                if !ui.is_rect_visible(rect) {
+                    continue;
+                }
+                let response = ui.interact(rect, ui.id().with(("gif", index)), Sense::click());
+                // ponytail: the image cache never evicts, so every search
+                // keeps its thumbnails; add eviction if memory shows it.
+                match app.images.get(ui.ctx(), &app.handle, &gif.src) {
+                    Some(texture) => Image::from_texture(&texture)
+                        .corner_radius(4)
+                        .paint_at(ui, rect),
+                    None => {
+                        ui.painter().rect_filled(rect, 4.0, theme::INPUT);
+                    }
+                }
+                if response.hovered() {
+                    ui.painter().rect_stroke(
+                        rect,
+                        4.0,
+                        egui::Stroke::new(2.0, theme::BLURPLE),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+                if response.clicked() {
+                    send = Some(gif.url.clone());
+                }
+            }
+        });
+    if let Some(url) = send {
+        app.send(crate::backend::events::Command::SendMessage {
+            channel_id: channel_id.to_string(),
+            content: url,
+        });
+        ui.close();
+    }
+}
+
+/// Three fixed-width columns, each GIF under the shortest one, like the
+/// official picker. Returns the rects (from the grid's top-left) and the
+/// grid height.
+fn masonry(sizes: impl Iterator<Item = (f32, f32)>, width: f32) -> (Vec<egui::Rect>, f32) {
+    const COLUMNS: usize = 3;
+    const GAP: f32 = 6.0;
+    let column = (width - GAP * (COLUMNS - 1) as f32) / COLUMNS as f32;
+    let mut heights = [0.0f32; COLUMNS];
+    let rects = sizes
+        .map(|(w, h)| {
+            let height = if w > 0.0 && h > 0.0 {
+                (column * h / w).clamp(column / 2.0, column * 2.0)
+            } else {
+                column
+            };
+            let (index, top) = heights
+                .iter()
+                .copied()
+                .enumerate()
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .unwrap_or_default();
+            heights[index] = top + height + GAP;
+            egui::Rect::from_min_size(
+                pos2(index as f32 * (column + GAP), top),
+                Vec2::new(column, height),
+            )
+        })
+        .collect();
+    let tallest = heights.into_iter().fold(0.0, f32::max);
+    (rects, (tallest - GAP).max(0.0))
+}
+
+/// Emoji picker tabs: the servers' custom emojis, then the Unicode groups.
+const EMOJI_TABS: [(Option<emojis::Group>, &str, &str); 10] = [
+    (None, "⭐", "Emojis dos servidores"),
+    (
+        Some(emojis::Group::SmileysAndEmotion),
+        "😀",
+        "Carinhas e emoções",
+    ),
+    (Some(emojis::Group::PeopleAndBody), "👋", "Pessoas e corpo"),
+    (
+        Some(emojis::Group::AnimalsAndNature),
+        "🐶",
+        "Animais e natureza",
+    ),
+    (Some(emojis::Group::FoodAndDrink), "🍔", "Comidas e bebidas"),
+    (
+        Some(emojis::Group::TravelAndPlaces),
+        "🚗",
+        "Viagens e lugares",
+    ),
+    (Some(emojis::Group::Activities), "⚽", "Atividades"),
+    (Some(emojis::Group::Objects), "💡", "Objetos"),
+    (Some(emojis::Group::Symbols), "❤", "Símbolos"),
+    (Some(emojis::Group::Flags), "🏁", "Bandeiras"),
+];
+
+#[derive(Clone, Copy)]
+enum PickerEmoji<'a> {
+    Unicode(&'static emojis::Emoji),
+    Custom(&'a GuildEmoji),
+}
+
+impl PickerEmoji<'_> {
+    /// What goes into the compose box: the bare glyph for Unicode (egui
+    /// draws VS16 as a box; Discord treats it as optional).
+    fn markup(self) -> String {
+        match self {
+            Self::Unicode(emoji) => {
+                emoji_glyph(emoji.as_str()).map_or_else(|| emoji.as_str().to_string(), String::from)
+            }
+            Self::Custom(emoji) => format!(
+                "<{}:{}:{}>",
+                if emoji.animated { "a" } else { "" },
+                emoji.name,
+                emoji.id
+            ),
+        }
+    }
+
+    fn name(self) -> String {
+        match self {
+            Self::Unicode(emoji) => format!(":{}:", emoji.shortcode().unwrap_or(emoji.name())),
+            Self::Custom(emoji) => format!(":{}:", emoji.name),
+        }
+    }
+}
+
+/// The emojis the picker lists: for a query, matches across everything
+/// (custom names, Unicode names and shortcodes), custom first; otherwise
+/// the tab's. `drawable` keeps out the Unicode ones the fonts can't show.
+fn picker_emojis<'a>(
+    query: &str,
+    tab: Option<emojis::Group>,
+    custom: &[&'a GuildEmoji],
+    mut drawable: impl FnMut(&str) -> bool,
+) -> Vec<PickerEmoji<'a>> {
+    let query = query.trim().trim_matches(':').to_lowercase();
+    if query.is_empty() {
+        return match tab {
+            None => custom
+                .iter()
+                .map(|emoji| PickerEmoji::Custom(emoji))
+                .collect(),
+            Some(group) => group
+                .emojis()
+                .filter(|emoji| drawable(emoji.as_str()))
+                .map(PickerEmoji::Unicode)
+                .collect(),
+        };
+    }
+    let custom = custom
+        .iter()
+        .filter(|emoji| emoji.name.to_lowercase().contains(&query))
+        .map(|emoji| PickerEmoji::Custom(emoji));
+    let unicode = emojis::iter()
+        .filter(|emoji| {
+            emoji.name().contains(&query) || emoji.shortcodes().any(|code| code.contains(&query))
+        })
+        .filter(|emoji| drawable(emoji.as_str()))
+        .map(PickerEmoji::Unicode);
+    custom.chain(unicode).collect()
+}
+
+/// The single glyph egui draws for a Unicode emoji (VS16 dropped). ZWJ
+/// sequences, keycaps, skin tones and flags have several, which egui
+/// can't combine, so the picker leaves them out.
+fn emoji_glyph(emoji: &str) -> Option<char> {
+    let mut chars = emoji.chars().filter(|c| *c != '\u{fe0f}');
+    match (chars.next(), chars.next()) {
+        (Some(c), None) => Some(c),
+        _ => None,
+    }
+}
+
+/// Emoji picker: search, category tabs, Unicode emojis and the servers'
+/// custom ones (the current server first). A click inserts it into the
+/// compose box; Shift+click keeps the picker open, as in Discord.
+fn emoji_picker(app: &mut VesktopApp, ui: &mut egui::Ui, tools: &mut ChatTools, just_opened: bool) {
+    const CELL: f32 = 36.0;
+    const COLUMNS: usize = 9;
+    ui.set_width(CELL * COLUMNS as f32);
+    let search = ui.add(
+        TextEdit::singleline(&mut tools.emoji_query)
+            .hint_text("Encontre o emoji perfeito")
+            .desired_width(f32::INFINITY),
+    );
+    if just_opened {
+        search.request_focus();
+    }
+    let mut guild_ids: Vec<&str> = app.guilds.iter().map(|guild| guild.id.as_str()).collect();
+    guild_ids.sort_by_key(|id| Some(*id) != app.selected_guild.as_deref());
+    let custom: Vec<&GuildEmoji> = guild_ids
+        .iter()
+        .filter_map(|id| app.guild_emojis.get(*id))
+        .flatten()
+        .filter(|emoji| emoji.available != Some(false))
+        .collect();
+    let tab = match tools.emoji_tab {
+        None if custom.is_empty() => Some(emojis::Group::SmileysAndEmotion),
+        tab => tab,
+    };
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        for (group, icon, label) in EMOJI_TABS {
+            if group.is_none() && custom.is_empty() {
+                continue;
+            }
+            let selected = tools.emoji_query.trim().is_empty() && group == tab;
+            if ui
+                .selectable_label(selected, RichText::new(icon).size(18.0))
+                .on_hover_text(label)
+                .clicked()
+            {
+                tools.emoji_tab = group;
+                tools.emoji_query.clear();
+            }
+        }
+    });
+    ui.add_space(4.0);
+    let font = FontId::proportional(24.0);
+    // The family's character map: `has_glyph` reports false for everything
+    // in the face that also holds the replacement glyph (Noto Emoji here).
+    let list = ui.ctx().fonts_mut(|fonts| {
+        let mut family = fonts.fonts.font(&font.family);
+        let drawable = family.characters();
+        picker_emojis(&tools.emoji_query, tab, &custom, |emoji| {
+            emoji_glyph(emoji).is_some_and(|glyph| drawable.contains_key(&glyph))
+        })
+    });
+    if list.is_empty() {
+        ui.label(RichText::new("Nenhum emoji encontrado.").color(theme::MUTED));
+        return;
+    }
+    let mut picked = None;
+    ScrollArea::vertical()
+        .max_height(300.0)
+        .auto_shrink([false, true])
+        .show_rows(ui, CELL, list.len().div_ceil(COLUMNS), |ui, rows| {
+            for row in rows {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::ZERO;
+                    for emoji in list.iter().skip(row * COLUMNS).take(COLUMNS) {
+                        let (rect, response) =
+                            ui.allocate_exact_size(Vec2::splat(CELL), Sense::click());
+                        if response.hovered() {
+                            ui.painter().rect_filled(rect, 4.0, theme::HOVER);
+                        }
+                        match emoji {
+                            PickerEmoji::Unicode(_) => {
+                                ui.painter().text(
+                                    rect.center(),
+                                    Align2::CENTER_CENTER,
+                                    emoji.markup(),
+                                    font.clone(),
+                                    theme::TEXT,
+                                );
+                            }
+                            PickerEmoji::Custom(custom) => {
+                                let url = format!(
+                                    "https://cdn.discordapp.com/emojis/{}.{}?size=48",
+                                    custom.id,
+                                    if custom.animated { "gif" } else { "png" }
+                                );
+                                if let Some(texture) = app.images.get(ui.ctx(), &app.handle, &url) {
+                                    Image::from_texture(&texture).paint_at(ui, rect.shrink(5.0));
+                                }
+                            }
+                        }
+                        if response.on_hover_text(emoji.name()).clicked() {
+                            picked = Some(*emoji);
+                        }
+                    }
+                });
+            }
+        });
+    if let Some(emoji) = picked {
+        app.compose.push_str(&emoji.markup());
+        if !ui.input(|input| input.modifiers.shift) {
+            ui.close();
+        }
+    }
+}
+
 /// Smiley face for the compose box emoji button.
 fn draw_smiley(painter: &egui::Painter, center: egui::Pos2, color: egui::Color32) {
     let stroke = egui::Stroke::new(1.5, color);
@@ -1443,4 +1775,72 @@ fn draw_smiley(painter: &egui::Painter, center: egui::Pos2, color: egui::Color32
         })
         .collect();
     painter.add(egui::Shape::line(mouth, stroke));
+}
+
+#[cfg(test)]
+mod picker_tests {
+    use super::*;
+
+    #[test]
+    fn emoji_search_covers_custom_and_unicode_and_skips_undrawable() {
+        let party = GuildEmoji {
+            id: "1".into(),
+            name: "PartyBlob".into(),
+            animated: true,
+            available: None,
+        };
+        let custom = [&party];
+        let found = picker_emojis(":party", None, &custom, |emoji| {
+            emoji_glyph(emoji).is_some()
+        });
+        let markup: Vec<String> = found.iter().map(|emoji| emoji.markup()).collect();
+        assert_eq!(markup[0], "<a:PartyBlob:1>");
+        assert!(markup.contains(&"🎉".to_string()));
+        // Single glyphs only: no flag pairs, ZWJ or keycap sequences.
+        assert!(
+            found
+                .iter()
+                .skip(1)
+                .all(|emoji| emoji_glyph(&emoji.markup()).is_some())
+        );
+        assert!(
+            picker_emojis("", Some(emojis::Group::Flags), &custom, |emoji| {
+                emoji_glyph(emoji).is_some()
+            })
+            .iter()
+            .all(|emoji| !emoji.markup().contains('\u{1f1e7}'))
+        );
+        // No query: the tab's list, custom ones only on their own tab.
+        assert_eq!(picker_emojis("  ", None, &custom, |_| true).len(), 1);
+        assert_eq!(
+            picker_emojis("", Some(emojis::Group::SmileysAndEmotion), &custom, |_| {
+                true
+            })[0]
+                .markup(),
+            "😀"
+        );
+    }
+
+    #[test]
+    fn gif_results_parse_and_lay_out_in_columns() {
+        let gifs: Vec<crate::model::Gif> = serde_json::from_str(
+            r#"[{"id":"1","title":"","url":"https://tenor.com/view/a-1","src":"https://media.tenor.com/xAAAAM/a.gif","gif_src":"https://media.tenor.com/xAAAAC/a.gif","width":200,"height":100,"preview":"p"},
+                {"id":"2","url":"https://tenor.com/view/b-2","src":"https://media.tenor.com/yAAAAM/b.gif"}]"#,
+        )
+        .unwrap();
+        assert_eq!(gifs[0].url, "https://tenor.com/view/a-1");
+        assert_eq!(gifs[1].width, 0.0);
+        let sizes = [
+            (200.0, 100.0),
+            (100.0, 100.0),
+            (100.0, 100.0),
+            (100.0, 100.0),
+        ];
+        let (rects, height) = masonry(sizes.into_iter(), 312.0);
+        // 100 px columns; the fourth goes under the shortest (the first).
+        assert_eq!(rects[0].height(), 50.0);
+        assert_eq!(rects[3].min, pos2(0.0, 56.0));
+        assert_eq!(height, 156.0);
+        assert_eq!(masonry(std::iter::empty(), 312.0).1, 0.0);
+    }
 }

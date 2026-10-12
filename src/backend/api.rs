@@ -5,7 +5,7 @@
 use serde::de::DeserializeOwned;
 
 use crate::backend::soundboard::SoundboardSound;
-use crate::model::{Channel, Guild, Member, Message, Profile, Relationship, ThreadList, User};
+use crate::model::{Channel, Gif, Guild, Member, Message, Profile, Relationship, ThreadList, User};
 
 pub const REST_BASE: &str = "https://discord.com/api/v10";
 pub const USER_AGENT: &str = concat!(
@@ -360,6 +360,25 @@ impl Api {
             .send()
             .await?;
         Ok(Self::check_status(resp).await?.json().await?)
+    }
+
+    /// The official GIF picker's endpoints: trending for an empty query,
+    /// search otherwise. `tinygif` makes `src` a small GIF the image cache
+    /// can animate (the official client asks for mp4).
+    pub async fn gifs(&self, query: &str) -> ApiResult<Vec<Gif>> {
+        let mut params = vec![
+            ("media_format", "tinygif".to_string()),
+            ("provider", "tenor".to_string()),
+            ("locale", "pt-BR".to_string()),
+            ("limit", "30".to_string()),
+        ];
+        let path = if query.is_empty() {
+            "/gifs/trending-gifs"
+        } else {
+            params.push(("q", query.to_string()));
+            "/gifs/search"
+        };
+        self.get_json(path, &params).await
     }
 
     /// One guild member; used to name users that voice states only

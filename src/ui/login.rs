@@ -110,13 +110,17 @@ fn token_form(app: &mut VesktopApp, ui: &mut egui::Ui) {
         app.connect_from_login();
     }
     ui.add_space(4.0);
-    ui.label(RichText::new("Como obter o token?").small().color(theme::MUTED))
-        .on_hover_text(
-            "1. Abra discord.com no navegador e entre na sua conta;\n\
+    ui.label(
+        RichText::new("Como obter o token?")
+            .small()
+            .color(theme::MUTED),
+    )
+    .on_hover_text(
+        "1. Abra discord.com no navegador e entre na sua conta;\n\
              2. Aperte Ctrl+Shift+I para abrir o DevTools;\n\
              3. Na aba Console, rode: localStorage.token\n\
              4. Copie o valor entre aspas e cole acima.",
-        );
+    );
 }
 
 fn qr_section(app: &mut VesktopApp, ui: &mut egui::Ui) {
@@ -198,7 +202,8 @@ fn paint_qr(ui: &mut egui::Ui, data: &str) {
     let plate = QR * 0.22;
     let icon = egui::Rect::from_center_size(rect.center(), Vec2::splat(plate));
     painter.rect_filled(icon, 6.0, theme::WHITE);
-    egui::Image::from_bytes("bytes://fastdiscord-logo.png", LOGO_PNG).paint_at(ui, icon.shrink(3.0));
+    egui::Image::from_bytes("bytes://fastdiscord-logo.png", LOGO_PNG)
+        .paint_at(ui, icon.shrink(3.0));
 }
 
 pub(crate) const LOGO_PNG: &[u8] = include_bytes!("../../assets/tray.png");

@@ -99,7 +99,11 @@ mod tests {
             frame = tone(0.02);
             agc.process(&mut frame);
         }
-        assert!((rms(&frame) - AGC_TARGET).abs() < 0.02, "agc rms {}", rms(&frame));
+        assert!(
+            (rms(&frame) - AGC_TARGET).abs() < 0.02,
+            "agc rms {}",
+            rms(&frame)
+        );
 
         let mut comp = Dynamics {
             compressor: true,

@@ -843,15 +843,15 @@ fn voice_panel(app: &mut VesktopApp, ui: &mut egui::Ui) {
                 ) {
                     app.toggle_screen_share(ui.ctx());
                 }
-                let extras = &mut app.extras;
-                if action(
+                let soundboard = crate::ui::icons::button(
                     ui,
                     crate::ui::icons::Icon::Soundboard,
-                    extras.soundboard_open,
+                    Vec2::new(button_width, VOICE_ACTIONS_H),
+                    app.extras.soundboard_open,
                     "Soundboard",
-                ) {
-                    extras.soundboard_open = !extras.soundboard_open;
-                }
+                );
+                crate::ui::voice_extras::soundboard(app, &soundboard);
+                let extras = &mut app.extras;
                 if action(
                     ui,
                     crate::ui::icons::Icon::Music,
@@ -894,7 +894,7 @@ fn voice_member_row(app: &mut VesktopApp, ui: &mut egui::Ui, guild_id: &str, mem
     } else {
         fetched
     };
-    let speaking = app.speaking.contains(&member.user_id);
+    let speaking = app.is_speaking(&member.user_id);
     let width = ui.available_width();
     // A live member is clickable: it opens their stream.
     let live = app.is_live(&member.user_id, member.self_stream);

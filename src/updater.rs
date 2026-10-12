@@ -24,7 +24,10 @@ fn target() -> Option<(&'static str, PathBuf)> {
         let appimage = std::env::var_os("APPIMAGE")?;
         Some(("FastDiscord-x86_64.AppImage", appimage.into()))
     } else if cfg!(windows) {
-        Some(("FastDiscord-windows-x86_64.exe", std::env::current_exe().ok()?))
+        Some((
+            "FastDiscord-windows-x86_64.exe",
+            std::env::current_exe().ok()?,
+        ))
     } else {
         None
     }
@@ -132,7 +135,10 @@ pub fn restart(installed: &Installed) {
 /// `v0.10.0` > `0.9.1`; anything unparsable is never newer.
 fn is_newer(tag: &str, current: &str) -> bool {
     let parse = |v: &str| -> Option<Vec<u64>> {
-        v.trim_start_matches('v').split('.').map(|p| p.parse().ok()).collect()
+        v.trim_start_matches('v')
+            .split('.')
+            .map(|p| p.parse().ok())
+            .collect()
     };
     matches!((parse(tag), parse(current)), (Some(t), Some(c)) if t > c)
 }

@@ -113,9 +113,14 @@ fn paint(viewer: &mut ImageViewer, handle: &Handle, root: &mut egui::Ui) {
             ui.add_space(pad.y);
             ui.horizontal(|ui| {
                 ui.add_space(pad.x);
-                let response = ui.add(Image::new((texture.id(), shown)).sense(egui::Sense::click()));
+                let response =
+                    ui.add(Image::new((texture.id(), shown)).sense(egui::Sense::click()));
                 if response.double_clicked() {
-                    viewer.zoom = if viewer.zoom.is_some() { None } else { Some(1.0) };
+                    viewer.zoom = if viewer.zoom.is_some() {
+                        None
+                    } else {
+                        Some(1.0)
+                    };
                 }
             });
         });

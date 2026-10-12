@@ -62,8 +62,14 @@ pub fn bold() -> egui::FontFamily {
 pub fn install_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     for (name, bytes) in [
-        ("noto", &include_bytes!("../assets/fonts/NotoSans-Regular.ttf")[..]),
-        ("noto-bold", &include_bytes!("../assets/fonts/NotoSans-Bold.ttf")[..]),
+        (
+            "noto",
+            &include_bytes!("../assets/fonts/NotoSans-Regular.ttf")[..],
+        ),
+        (
+            "noto-bold",
+            &include_bytes!("../assets/fonts/NotoSans-Bold.ttf")[..],
+        ),
     ] {
         fonts.font_data.insert(
             name.into(),

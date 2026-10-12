@@ -190,6 +190,8 @@ pub struct VesktopApp {
     desync_rejoins: Vec<std::time::Instant>,
     /// Users currently producing audio, for the green indicators.
     pub(crate) speaking: HashSet<String>,
+    /// Soundboard senders, lit as speaking until their sound ends.
+    pub(crate) sound_speaking: HashMap<String, Instant>,
     /// Own mic/headphone flags; op 4 sends them, the panel shows them.
     pub(crate) voice_muted: bool,
     /// Screen share capture (docs/SCREENSHARE.md); local preview for now.
@@ -219,6 +221,10 @@ pub struct VesktopApp {
 
     pub(crate) compose: String,
     pub(crate) compose_error: Option<String>,
+    /// Custom emojis per guild, for the emoji picker.
+    pub(crate) guild_emojis: HashMap<String, Vec<crate::model::GuildEmoji>>,
+    /// The GIF picker's latest results, with the query they answer.
+    pub(crate) gifs: Option<(String, Result<Vec<crate::model::Gif>, String>)>,
     /// Whether the compose box changed since last frame (typing signal).
     pub(crate) last_compose: String,
     pub(crate) last_typing_sent: Option<std::time::Instant>,
@@ -299,6 +305,7 @@ impl VesktopApp {
             desync_rejoins: Vec::new(),
             voice_users_pending: HashSet::new(),
             speaking: HashSet::new(),
+            sound_speaking: HashMap::new(),
             voice_muted: false,
             screen: None,
             screen_texture: None,
@@ -318,6 +325,8 @@ impl VesktopApp {
             viewer: None,
             compose: String::new(),
             compose_error: None,
+            guild_emojis: HashMap::new(),
+            gifs: None,
             last_compose: String::new(),
             last_typing_sent: None,
             jump_to_present: false,
@@ -1012,6 +1021,16 @@ impl VesktopApp {
             .unwrap_or_default()
             .trim()
             .to_string()
+    }
+
+    /// Green ring: producing audio, or a soundboard sound they sent is
+    /// still playing.
+    pub(crate) fn is_speaking(&self, user_id: &str) -> bool {
+        self.speaking.contains(user_id)
+            || self
+                .sound_speaking
+                .get(user_id)
+                .is_some_and(|until| Instant::now() < *until)
     }
 
     /// Whether `user_id` is live, on Discord's Go Live or on FockyTV (by
@@ -1966,11 +1985,32 @@ impl VesktopApp {
                     self.extras.soundboard_error = Some(error);
                 }
             }
-            UiEvent::VoiceEffect { sound_id, volume } => {
-                if !self.voice_deaf {
-                    self.handle
-                        .spawn(crate::backend::soundboard::play(sound_id, volume));
-                }
+            UiEvent::VoiceEffect {
+                user_id,
+                sound_id,
+                volume,
+            } => {
+                // Deafened: silent, but the sender still lights up.
+                let volume = if self.voice_deaf { 0.0 } else { volume };
+                let events = self.event_tx.clone();
+                self.handle.spawn(async move {
+                    let Some(duration) = crate::backend::soundboard::play(sound_id, volume).await
+                    else {
+                        return;
+                    };
+                    events.send(UiEvent::SoundboardPlaying { user_id, duration });
+                    // Repaint once it ends so the ring goes off.
+                    tokio::time::sleep(duration).await;
+                    events.repaint();
+                });
+            }
+            UiEvent::SoundboardPlaying { user_id, duration } => {
+                self.sound_speaking
+                    .insert(user_id, Instant::now() + duration);
+            }
+            UiEvent::GifsLoaded { query, result } => self.gifs = Some((query, result)),
+            UiEvent::GuildEmojis { guild_id, emojis } => {
+                self.guild_emojis.insert(guild_id, emojis);
             }
             UiEvent::UserResolved { user } => {
                 self.voice_users_pending.remove(&user.id);
@@ -2129,6 +2169,7 @@ impl VesktopApp {
                 self.voice = VoiceConn::Disconnected;
                 self.voice_connected_at = None;
                 self.speaking.clear();
+                self.sound_speaking.clear();
             }
             UiEvent::GuildRoles { guild_id, roles } => {
                 let roles = roles.into_iter().map(|role| (role.id.clone(), role));
@@ -2360,7 +2401,11 @@ impl eframe::App for VesktopApp {
             }
         }
 
-        let update = self.update.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let update = self
+            .update
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         if let Some(update) = update {
             egui::Panel::top("update_banner").show(root, |ui| {
                 ui.horizontal(|ui| {
@@ -2940,7 +2985,11 @@ mod tests {
         assert!(!app.detached.contains("channel") && !app.messages.contains_key("channel"));
         assert!(matches!(
             commands.try_recv().unwrap(),
-            Command::LoadMessages { before: None, after: None, .. }
+            Command::LoadMessages {
+                before: None,
+                after: None,
+                ..
+            }
         ));
     }
 }
