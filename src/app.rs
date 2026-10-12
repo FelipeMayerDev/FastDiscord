@@ -44,6 +44,8 @@ fn load_startup_cache(storage: &dyn eframe::Storage, token: &str) -> Option<Star
 pub enum TrayCommand {
     Show,
     Quit,
+    /// One of `settings::STATUSES`.
+    Status(&'static str),
 }
 
 /// What the connection indicator should show right now.
@@ -1183,6 +1185,33 @@ impl VesktopApp {
         });
     }
 
+    /// Own status from the user panel or the tray: kept in settings.json,
+    /// sent over the gateway and saved in the account settings.
+    pub(crate) fn set_own_status(
+        &mut self,
+        status: &str,
+        custom_status: crate::settings::CustomStatus,
+    ) {
+        self.settings.status = status.to_owned();
+        self.settings.custom_status = custom_status;
+        self.settings.save();
+        self.send_presence(true);
+    }
+
+    /// op 3 with the saved status; the own dot follows at once, without
+    /// waiting for Discord to echo it.
+    fn send_presence(&mut self, save: bool) {
+        if let Some(me) = &self.me {
+            self.presence
+                .insert(me.id.clone(), self.settings.status.clone());
+        }
+        self.send(Command::SetPresence {
+            status: self.settings.status.clone(),
+            custom_status: self.settings.custom_status.clone(),
+            save,
+        });
+    }
+
     /// Voice member menu volume: persists and feeds the mixer.
     pub(crate) fn set_user_volume(&mut self, user_id: String, percent: u8) {
         self.settings.user_volumes.insert(user_id.clone(), percent);
@@ -1446,6 +1475,7 @@ impl VesktopApp {
                 self.conn = ConnState::Connected;
                 self.send(Command::LoadGuilds);
                 self.send(Command::LoadDmChannels);
+                self.send_presence(false);
                 self.refresh_relationships();
                 if let Some(channel_id) = self.selected_channel.clone() {
                     self.fetch_channel_if_needed(channel_id);
@@ -2076,6 +2106,10 @@ impl eframe::App for VesktopApp {
                     self.quitting = true;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     return;
+                }
+                TrayCommand::Status(status) => {
+                    let custom = self.settings.custom_status.clone();
+                    self.set_own_status(status, custom);
                 }
             }
         }

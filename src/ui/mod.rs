@@ -90,14 +90,18 @@ pub fn initial_circle(ui: &mut egui::Ui, size: f32, label: &str, color: Color32)
 pub fn presence_dot(ui: &egui::Ui, avatar: Rect, status: Option<&str>, background: Color32) {
     let radius = (avatar.width() * 0.17).clamp(3.0, 6.0);
     let center = avatar.max - Vec2::splat(radius);
-    let color = match status.unwrap_or("offline") {
+    ui.painter().circle_filled(center, radius + 1.5, background);
+    ui.painter()
+        .circle_filled(center, radius, status_color(status.unwrap_or("offline")));
+}
+
+pub fn status_color(status: &str) -> Color32 {
+    match status {
         "online" => crate::theme::GREEN,
         "idle" => crate::theme::YELLOW,
         "dnd" => crate::theme::RED,
         _ => crate::theme::MUTED,
-    };
-    ui.painter().circle_filled(center, radius + 1.5, background);
-    ui.painter().circle_filled(center, radius, color);
+    }
 }
 
 /// Default group avatar, shared by the DM list and conversation header.
