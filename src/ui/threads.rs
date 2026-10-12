@@ -629,16 +629,25 @@ fn post_matches(post: &Channel, query: &str, tags: &[String]) -> bool {
         && (tags.is_empty() || post.applied_tags.iter().any(|tag| tags.contains(tag)))
 }
 
-/// A tag's text: Unicode emoji, then the name. Custom emoji are images.
-fn tag_text(tag: &ForumTag) -> String {
-    match &tag.emoji_name {
-        Some(emoji) if tag.emoji_id.is_none() => format!("{emoji} {}", tag.name),
-        _ => tag.name.clone(),
+/// The image of a tag or reaction emoji: custom from Discord's CDN,
+/// Unicode as Twemoji.
+fn emoji_image(id: Option<&str>, name: Option<&str>) -> Option<String> {
+    match id {
+        Some(id) => Some(crate::ui::emoji::custom_url(id, false)),
+        None => emojis::get(name?).map(crate::ui::emoji::twemoji_url),
     }
 }
 
-fn emoji_url(id: &str) -> String {
-    format!("https://cdn.discordapp.com/emojis/{id}.png?size=48")
+fn tag_emoji(tag: &ForumTag) -> Option<String> {
+    emoji_image(tag.emoji_id.as_deref(), tag.emoji_name.as_deref())
+}
+
+/// A tag's text; its emoji is drawn as an image unless no image is known.
+fn tag_text(tag: &ForumTag) -> String {
+    match &tag.emoji_name {
+        Some(emoji) if tag_emoji(tag).is_none() => format!("{emoji} {}", tag.name),
+        _ => tag.name.clone(),
+    }
 }
 
 /// One line of a post's first message, mentions shown as names.
@@ -707,6 +716,7 @@ fn pill(
     text: &str,
     font: FontId,
     color: Color32,
+    // Image URL of the emoji drawn before the text.
     emoji: Option<&str>,
     height: f32,
     fill: impl FnOnce(&egui::Ui, &egui::Response) -> Color32,
@@ -716,12 +726,12 @@ fn pill(
     ui.painter()
         .rect_filled(rect, height / 2.0, fill(ui, &response));
     let mut x = rect.left() + height / 2.5;
-    if let Some(id) = emoji {
+    if let Some(url) = emoji {
         let icon = egui::Rect::from_min_size(
             pos2(x, rect.center().y - height * 0.3),
             Vec2::splat(height * 0.6),
         );
-        if let Some(texture) = app.images.get(ui.ctx(), &app.handle, &emoji_url(id)) {
+        if let Some(texture) = app.images.get(ui.ctx(), &app.handle, url) {
             egui::Image::from_texture(&texture).paint_at(ui, icon);
         }
         x += icon.width() + 4.0;
@@ -1065,7 +1075,7 @@ fn filter_chips(
         let mut room = ui.available_width() - todos.x - 8.0;
         for tag in &forum.available_tags {
             let text = tag_text(tag);
-            let emoji = tag.emoji_id.as_deref();
+            let emoji = tag_emoji(tag);
             let (_, size) = pill_size(ui, &text, font.clone(), theme::TEXT, emoji.is_some(), CHIP);
             room -= size.x + 8.0;
             if room < 0.0 {
@@ -1078,7 +1088,7 @@ fn filter_chips(
                 &text,
                 font.clone(),
                 theme::TEXT,
-                emoji,
+                emoji.as_deref(),
                 CHIP,
                 |ui, response| chip_fill(ui, response, on),
             );
@@ -1269,7 +1279,7 @@ fn post_card(
                     &tag_text(tag),
                     FontId::new(12.5, theme::bold()),
                     theme::TEXT,
-                    tag.emoji_id.as_deref(),
+                    tag_emoji(tag).as_deref(),
                     24.0,
                     |_, _| theme::SIDEBAR,
                 );
@@ -1280,15 +1290,14 @@ fn post_card(
         ui.spacing_mut().item_spacing.x = 8.0;
         ui.scope(|ui| {
             ui.set_max_width(text_width - if new { 60.0 } else { 0.0 });
-            ui.add(
-                egui::Label::new(
-                    RichText::new(post.display_name())
-                        .family(theme::bold())
-                        .size(19.0)
-                        .color(theme::TEXT),
-                )
-                .truncate()
-                .selectable(false),
+            crate::ui::emoji::label(
+                app,
+                ui,
+                RichText::new(post.display_name())
+                    .family(theme::bold())
+                    .size(19.0)
+                    .color(theme::TEXT),
+                true,
             );
         });
         if new {
@@ -1325,7 +1334,7 @@ fn post_card(
     content.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         if let Some(reaction) = first.as_ref().and_then(|first| first.reactions.first()) {
-            let emoji = reaction.emoji.id.as_deref();
+            let emoji = emoji_image(reaction.emoji.id.as_deref(), reaction.emoji.name.as_deref());
             let name = if emoji.is_some() {
                 String::new()
             } else {
@@ -1334,10 +1343,10 @@ fn post_card(
             pill(
                 app,
                 ui,
-                &format!("{name} {}", reaction.count),
+                format!("{name} {}", reaction.count).trim(),
                 FontId::proportional(14.0),
                 theme::TEXT,
-                emoji,
+                emoji.as_deref(),
                 26.0,
                 |_, _| theme::SIDEBAR,
             );
