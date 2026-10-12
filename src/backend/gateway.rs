@@ -13,7 +13,7 @@ use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message as WsMessage,
 };
 
-use crate::model::{Channel, GuildEmoji, Message, ThreadList, User, VoiceState};
+use crate::model::{Channel, Embed, GuildEmoji, Message, ThreadList, User, VoiceState};
 use crate::settings::CustomStatus;
 
 use super::api::{Api, ApiError};
@@ -381,14 +381,15 @@ fn dispatch(value: Value, event_tx: &EventTx, voice_tx: &UnboundedSender<Wire>, 
             }
         }
         "MESSAGE_UPDATE" => {
-            if let Ok(patch) = serde_json::from_value::<MessagePatch>(data) {
-                if let Some(content) = patch.content {
-                    let _ = event_tx.send(UiEvent::MessageUpdated {
-                        channel_id: patch.channel_id,
-                        message_id: patch.id,
-                        content,
-                    });
-                }
+            if let Ok(patch) = serde_json::from_value::<MessagePatch>(data)
+                && (patch.content.is_some() || patch.embeds.is_some())
+            {
+                let _ = event_tx.send(UiEvent::MessageUpdated {
+                    channel_id: patch.channel_id,
+                    message_id: patch.id,
+                    content: patch.content,
+                    embeds: patch.embeds,
+                });
             }
         }
         "MESSAGE_DELETE" => {
@@ -576,6 +577,8 @@ struct MessagePatch {
     channel_id: String,
     #[serde(default)]
     content: Option<String>,
+    #[serde(default)]
+    embeds: Option<Vec<Embed>>,
 }
 
 /// VOICE_STATE_UPDATE as Discord sends it for guilds, with the embedded
@@ -758,7 +761,8 @@ async fn handle_command(api: &Api, command: Command, event_tx: &EventTx, write: 
             Ok(message) => event_tx.send(UiEvent::MessageUpdated {
                 channel_id,
                 message_id,
-                content: message.content,
+                content: Some(message.content),
+                embeds: Some(message.embeds),
             }),
             Err(err) => event_tx.send(UiEvent::SendFailed {
                 channel_id,

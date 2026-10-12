@@ -39,7 +39,7 @@ fn snowflakes_order_matches_time() {
 }
 
 #[test]
-fn gifv_embeds_play_as_gif() {
+fn gifv_embeds_play_animated() {
     let embed: fastdiscord::model::Embed = serde_json::from_value(serde_json::json!({
         "type": "gifv",
         "thumbnail": { "url": "https://media.tenor.com/abcAAAAe/cat.png" },
@@ -48,6 +48,6 @@ fn gifv_embeds_play_as_gif() {
     .expect("embed");
     assert_eq!(
         util::embed_picture_url(&embed).as_deref(),
-        Some("https://media.tenor.com/abcAAAAC/cat.gif")
+        Some("https://media.tenor.com/abcAAAAx/cat.webp")
     );
 }

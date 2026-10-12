@@ -1940,10 +1940,16 @@ impl VesktopApp {
                 channel_id,
                 message_id,
                 content,
+                embeds,
             } => {
-                if let Some(list) = self.messages.get_mut(&channel_id) {
-                    if let Some(message) = list.iter_mut().find(|m| m.id == message_id) {
+                if let Some(list) = self.messages.get_mut(&channel_id)
+                    && let Some(message) = list.iter_mut().find(|m| m.id == message_id)
+                {
+                    if let Some(content) = content {
                         message.content = content;
+                    }
+                    if let Some(embeds) = embeds {
+                        message.embeds = embeds;
                     }
                 }
             }

@@ -123,8 +123,8 @@ pub fn animated_avatar_url(user: &User) -> Option<String> {
 }
 
 /// The picture an embed shows inline. Tenor and Giphy `gifv` embeds are
-/// mp4 videos; their GIF rendition lives next to the video, so swap the
-/// URL (thumbnail when the pattern doesn't match).
+/// mp4 videos; their animated rendition lives next to the video, so swap
+/// the URL (still thumbnail when the pattern doesn't match).
 pub fn embed_picture_url(embed: &Embed) -> Option<String> {
     let media_url = |media: &Option<crate::model::EmbedMedia>| {
         let media = media.as_ref()?;
@@ -144,15 +144,17 @@ pub fn embed_picture_url(embed: &Embed) -> Option<String> {
     })
 }
 
-/// `media.tenor.com/{id}AAAPo/{slug}.mp4` → `…{id}AAAAC/{slug}.gif` and
-/// `…giphy.com/…/giphy.mp4` → `…/giphy.gif`.
+/// `media.tenor.com/{id}AAAPo/{slug}.mp4` → `…{id}AAAAx/{slug}.webp` and
+/// `…giphy.com/…/giphy.mp4` → `…/giphy.gif`. Tenor's animated WebP is full
+/// size at about a tenth of its full GIF (AAAAC), which runs past 20 MB
+/// and took the decoder ages.
 fn gif_rendition(video: &str) -> Option<String> {
     let video = video.split('?').next()?;
     let base = video.strip_suffix(".mp4")?;
     if video.contains("media.tenor.com/") {
         let (dir, slug) = base.rsplit_once('/')?;
         let id = dir.strip_suffix("AAAPo")?;
-        return Some(format!("{id}AAAAC/{slug}.gif"));
+        return Some(format!("{id}AAAAx/{slug}.webp"));
     }
     video.contains("giphy.com/").then(|| format!("{base}.gif"))
 }
@@ -216,5 +218,33 @@ mod tests {
         assert_eq!(human_size(12), "12 B");
         assert_eq!(human_size(2048), "2.0 KB");
         assert_eq!(human_size(5 * 1024 * 1024), "5.0 MB");
+    }
+
+    #[test]
+    fn gifv_embeds_pick_the_animated_rendition() {
+        let gifv = |video: &str| {
+            let embed: Embed = serde_json::from_value(serde_json::json!({
+                "type": "gifv",
+                "video": { "url": video, "proxy_url": "https://images-ext-1.discordapp.net/v.mp4" },
+                "thumbnail": { "url": "https://x/t.png", "proxy_url": "https://images-ext-1.discordapp.net/t.png" },
+            }))
+            .unwrap();
+            embed_picture_url(&embed)
+        };
+        // Tenor: the animated WebP, not the 20 MB full GIF (AAAAC).
+        assert_eq!(
+            gifv("https://media.tenor.com/lfDATg4Bhc0AAAPo/happy-cat.mp4").as_deref(),
+            Some("https://media.tenor.com/lfDATg4Bhc0AAAAx/happy-cat.webp")
+        );
+        assert_eq!(
+            gifv("https://media2.giphy.com/media/JIX9t2j0ZTN9S/giphy.mp4?cid=1&rid=giphy.mp4")
+                .as_deref(),
+            Some("https://media2.giphy.com/media/JIX9t2j0ZTN9S/giphy.gif")
+        );
+        // Unknown hosts fall back to the (still) thumbnail.
+        assert_eq!(
+            gifv("https://i.imgur.com/abc.mp4").as_deref(),
+            Some("https://images-ext-1.discordapp.net/t.png")
+        );
     }
 }
