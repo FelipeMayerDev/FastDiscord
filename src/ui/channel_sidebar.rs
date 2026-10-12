@@ -5,6 +5,7 @@ use egui::{RichText, Sense, Vec2, pos2};
 
 use crate::app::{ConnState, VesktopApp, VoiceConn};
 use crate::model::{CHANNEL_KIND_CATEGORY, Channel, VoiceState};
+use crate::settings::CustomStatus;
 use crate::theme;
 use crate::ui::{draw_texture_round, fade, initial_circle};
 use crate::util;
@@ -245,6 +246,29 @@ fn user_panel(app: &mut VesktopApp, ui: &mut egui::Ui) {
             // Every gap below is an explicit add_space; the default 8px item
             // spacing is what pushed the gear off the panel edge.
             ui.spacing_mut().item_spacing = Vec2::ZERO;
+            // Control cluster: [mic ⌄] [headset ⌄] [gear] — 20px icons, 12px
+            // chevrons, 2px inside a pair and 4px between pairs, plus 8px of
+            // right padding.
+            let buttons_width = 5.0 * 2.0 + 3.0 * 20.0 + 2.0 * 12.0 + 8.0;
+            let name_width = (width - 8.0 - 32.0 - 8.0 - buttons_width).max(40.0);
+            // Avatar and name together open the status menu, as in Discord.
+            let panel = ui.max_rect();
+            let profile_rect = egui::Rect::from_min_max(
+                pos2(panel.left() + 4.0, panel.center().y - 20.0),
+                pos2(
+                    panel.left() + 8.0 + 32.0 + 8.0 + name_width,
+                    panel.center().y + 20.0,
+                ),
+            );
+            let profile = ui
+                .interact(profile_rect, ui.id().with("own_status"), Sense::click())
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            ui.painter().rect_filled(
+                profile_rect,
+                4.0,
+                crate::ui::control_bg(ui, &profile, false),
+            );
+            status_popup(app, &profile);
             ui.add_space(8.0);
             let name = app
                 .me
@@ -273,10 +297,7 @@ fn user_panel(app: &mut VesktopApp, ui: &mut egui::Ui) {
                         .circle_filled(avatar_rect.center(), 16.0, util::name_color(&name));
                 }
             }
-            // Own status: the client identifies as online.
-            let dot = pos2(avatar_rect.min.x + 26.0, avatar_rect.min.y + 26.0);
-            ui.painter().circle_filled(dot, 5.0, theme::RAIL);
-            ui.painter().circle_filled(dot, 3.5, theme::GREEN);
+            crate::ui::presence_dot(ui, avatar_rect, Some(&app.settings.status), theme::RAIL);
             ui.add_space(8.0);
 
             // Name over the status line: "● Em voz" while connected, else the
@@ -291,14 +312,9 @@ fn user_panel(app: &mut VesktopApp, ui: &mut egui::Ui) {
                 match &app.conn {
                     ConnState::Disconnected(..) => ("Reconectando…".to_string(), theme::YELLOW),
                     ConnState::Connecting => ("Conectando…".to_string(), theme::MUTED),
-                    _ => ("Disponível.".to_string(), theme::GREEN),
+                    _ => (status_line(&app.settings), theme::MUTED),
                 }
             };
-            // Control cluster: [mic ⌄] [headset ⌄] [gear] — 20px icons, 12px
-            // chevrons, 2px inside a pair and 4px between pairs, plus 8px of
-            // right padding.
-            let buttons_width = 5.0 * 2.0 + 3.0 * 20.0 + 2.0 * 12.0 + 8.0;
-            let name_width = (width - 8.0 - 32.0 - 8.0 - buttons_width).max(40.0);
             ui.allocate_ui_with_layout(
                 Vec2::new(name_width, 32.0),
                 egui::Layout::top_down(egui::Align::Min),
@@ -311,9 +327,14 @@ fn user_panel(app: &mut VesktopApp, ui: &mut egui::Ui) {
                                 .family(theme::bold())
                                 .color(theme::TEXT),
                         )
-                        .truncate(),
+                        .truncate()
+                        .selectable(false),
                     );
-                    ui.label(RichText::new(line).small().color(color));
+                    ui.add(
+                        egui::Label::new(RichText::new(line).small().color(color))
+                            .truncate()
+                            .selectable(false),
+                    );
                 },
             );
 
@@ -347,7 +368,10 @@ fn user_panel(app: &mut VesktopApp, ui: &mut egui::Ui) {
                     } else {
                         "Silenciar áudio (surdo)"
                     },
-                    |painter, center, color| draw_headset(painter, center, color, deaf),
+                    |painter, center, color| {
+                        let color = if deaf { theme::RED } else { color };
+                        draw_headset(painter, center, color, deaf.then_some(theme::RAIL), 1.0)
+                    },
                 )
                 .clicked()
                 {
@@ -356,16 +380,20 @@ fn user_panel(app: &mut VesktopApp, ui: &mut egui::Ui) {
                 let muted = app.voice_muted;
                 let chevron = compact_button(ui, "Dispositivos de voz", draw_chevron);
                 devices_popup(app, &chevron, false);
-                if compact_button_accent(
+                if compact_button(
                     ui,
                     if muted {
                         "Ativar microfone"
                     } else {
                         "Silenciar microfone"
                     },
-                    if muted { Some(theme::RED) } else { None },
-                    |painter, center, color| draw_mic(painter, center, color, muted),
-                ) {
+                    |painter, center, color| {
+                        let color = if muted { theme::RED } else { color };
+                        draw_mic(painter, center, color, muted.then_some(theme::RAIL), 1.0)
+                    },
+                )
+                .clicked()
+                {
                     app.set_voice_mute(!muted);
                 }
             });
@@ -383,35 +411,105 @@ fn devices_popup(app: &mut VesktopApp, chevron: &egui::Response, output: bool) {
         .show(|ui| crate::ui::settings_window::voice_devices_menu(app, ui, output));
 }
 
-/// Like `compact_button`, with an optional accent fill — the red rounded
-/// box Discord puts behind the mic while it is muted.
-fn compact_button_accent(
-    ui: &mut egui::Ui,
-    tooltip: &str,
-    accent: Option<egui::Color32>,
-    draw: impl FnOnce(&egui::Painter, egui::Pos2, egui::Color32),
-) -> bool {
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(20.0, 26.0), Sense::click());
-    let idle = accent.unwrap_or(egui::Color32::TRANSPARENT);
-    let hover = accent.unwrap_or(theme::HOVER);
-    ui.painter().rect_filled(
-        rect,
-        4.0,
-        fade(ui, response.id, response.hovered(), idle, hover),
-    );
-    let color = if accent.is_some() || response.hovered() {
-        theme::WHITE
-    } else {
-        theme::TEXT
-    };
-    let motion = crate::ui::animate_bool(
-        ui.ctx(),
-        response.id.with("icon_hover"),
-        response.hovered(),
-        0.12,
-    );
-    draw(ui.painter(), rect.center() - Vec2::new(0.0, motion), color);
-    response.on_hover_text(tooltip).clicked()
+/// The line under the own name: the custom status, else the status label.
+fn status_line(settings: &crate::settings::Settings) -> String {
+    let custom = &settings.custom_status;
+    if !custom.is_empty() {
+        return format!("{} {}", custom.emoji.trim(), custom.text.trim())
+            .trim()
+            .to_string();
+    }
+    crate::settings::STATUSES
+        .iter()
+        .find(|(status, _)| *status == settings.status)
+        .map_or("Online", |(_, label)| label)
+        .to_string()
+}
+
+/// The avatar/name menu: the four statuses and the custom status, saved as
+/// soon as one is picked (Discord's own status menu, in one popover).
+fn status_popup(app: &mut VesktopApp, anchor: &egui::Response) {
+    let draft_id = anchor.id.with("custom_status_draft");
+    if anchor.clicked() {
+        // Each opening starts from the saved custom status.
+        anchor
+            .ctx
+            .data_mut(|data| data.remove::<CustomStatus>(draft_id));
+    }
+    egui::Popup::menu(anchor)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .align(egui::RectAlign::TOP_START)
+        .width(240.0)
+        .show(|ui| {
+            for (status, label) in crate::settings::STATUSES {
+                let selected = app.settings.status == status;
+                let (rect, response) =
+                    ui.allocate_exact_size(Vec2::new(ui.available_width(), 28.0), Sense::click());
+                ui.painter()
+                    .rect_filled(rect, 4.0, crate::ui::control_bg(ui, &response, selected));
+                ui.painter().circle_filled(
+                    pos2(rect.left() + 14.0, rect.center().y),
+                    5.0,
+                    crate::ui::status_color(status),
+                );
+                ui.painter().text(
+                    pos2(rect.left() + 28.0, rect.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    label,
+                    egui::FontId::proportional(14.0),
+                    theme::TEXT,
+                );
+                if response
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    let custom = app.settings.custom_status.clone();
+                    app.set_own_status(status, custom);
+                    ui.close();
+                }
+            }
+            ui.separator();
+            ui.label(
+                RichText::new("Status personalizado")
+                    .small()
+                    .color(theme::MUTED),
+            );
+            let mut draft = ui
+                .data(|data| data.get_temp::<CustomStatus>(draft_id))
+                .unwrap_or_else(|| app.settings.custom_status.clone());
+            let mut submit = false;
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut draft.emoji)
+                        .hint_text("🙂")
+                        .char_limit(8)
+                        .desired_width(28.0),
+                )
+                .on_hover_text("Emoji (opcional)");
+                let text = ui.add(
+                    egui::TextEdit::singleline(&mut draft.text)
+                        .hint_text("O que está rolando?")
+                        .char_limit(128)
+                        .desired_width(f32::INFINITY),
+                );
+                submit = text.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+            });
+            ui.horizontal(|ui| {
+                submit |= ui.button("Salvar").clicked();
+                if !app.settings.custom_status.is_empty() && ui.button("Limpar").clicked() {
+                    draft = CustomStatus::default();
+                    submit = true;
+                }
+            });
+            if submit {
+                let status = app.settings.status.clone();
+                app.set_own_status(&status, draft);
+                ui.data_mut(|data| data.remove::<CustomStatus>(draft_id));
+                ui.close();
+            } else {
+                ui.data_mut(|data| data.insert_temp(draft_id, draft));
+            }
+        });
 }
 
 /// Frameless icon button, Discord-style: a subtle box only while hovered.
@@ -443,77 +541,112 @@ fn compact_button(
     response.on_hover_text(tooltip)
 }
 
-/// Microphone: capsule, U-shaped stand and stem; red slash when muted.
-fn draw_mic(painter: &egui::Painter, center: egui::Pos2, color: egui::Color32, muted: bool) {
-    let stroke = egui::Stroke::new(1.6, color);
-    let cx = center.x;
-    let top = center.y - 8.5;
+/// Discord's microphone in a 20px box times `scale`: filled capsule,
+/// U-shaped holder, stem and foot. `slash` crosses it out, cutting the gap
+/// around the stroke in that background color.
+fn draw_mic(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    color: egui::Color32,
+    slash: Option<egui::Color32>,
+    scale: f32,
+) {
+    let at = |x: f32, y: f32| center + Vec2::new(x, y) * scale;
+    let stroke = egui::Stroke::new(1.8 * scale, color);
     painter.rect_filled(
-        egui::Rect::from_min_size(pos2(cx - 3.0, top), Vec2::new(6.0, 11.0)),
-        3.0,
+        egui::Rect::from_min_max(at(-3.5, -9.0), at(3.5, 2.5)),
+        3.5 * scale,
         color,
     );
-    let stand_top = top + 11.0;
-    let stand_bottom = stand_top + 4.0;
-    painter.line_segment(
-        [pos2(cx - 5.0, stand_top), pos2(cx - 5.0, stand_bottom)],
-        stroke,
-    );
-    painter.line_segment(
-        [pos2(cx + 5.0, stand_top), pos2(cx + 5.0, stand_bottom)],
-        stroke,
-    );
-    painter.line_segment(
-        [pos2(cx - 5.0, stand_bottom), pos2(cx + 5.0, stand_bottom)],
-        stroke,
-    );
-    painter.line_segment(
-        [pos2(cx, stand_bottom), pos2(cx, stand_bottom + 4.0)],
-        stroke,
-    );
-    if muted {
-        painter.line_segment(
-            [
-                pos2(cx - 8.0, center.y - 9.0),
-                pos2(cx + 8.0, center.y + 9.0),
-            ],
-            egui::Stroke::new(2.2, theme::RED),
-        );
+    let holder: Vec<egui::Pos2> = (0..=12)
+        .map(|i| {
+            let angle = std::f32::consts::PI * i as f32 / 12.0;
+            at(6.5 * angle.cos(), -1.5 + 6.5 * angle.sin())
+        })
+        .collect();
+    painter.add(egui::Shape::line(holder, stroke));
+    painter.line_segment([at(0.0, 5.0), at(0.0, 8.5)], stroke);
+    painter.line_segment([at(-4.0, 8.5), at(4.0, 8.5)], stroke);
+    if let Some(background) = slash {
+        draw_slash(painter, center, color, background, scale);
     }
 }
 
-/// Headset: headband arc and two ear cups; red slash when deafened.
-fn draw_headset(painter: &egui::Painter, center: egui::Pos2, color: egui::Color32, deaf: bool) {
-    let stroke = egui::Stroke::new(1.6, color);
-    let cx = center.x;
-    let cy = center.y + 2.0;
-    let r = 6.5;
-    let arc: Vec<egui::Pos2> = (0..=8)
-        .map(|i| {
-            let angle = std::f32::consts::PI * i as f32 / 8.0;
-            pos2(cx - r * angle.cos(), cy - r * angle.sin())
-        })
-        .collect();
-    painter.add(egui::Shape::line(arc, stroke));
-    painter.rect_filled(
-        egui::Rect::from_min_size(pos2(cx - r - 1.5, cy - 2.0), Vec2::new(3.5, 7.0)),
-        1.5,
-        color,
-    );
-    painter.rect_filled(
-        egui::Rect::from_min_size(pos2(cx + r - 2.0, cy - 2.0), Vec2::new(3.5, 7.0)),
-        1.5,
-        color,
-    );
-    if deaf {
-        painter.line_segment(
-            [
-                pos2(cx - 8.0, center.y - 9.0),
-                pos2(cx + 8.0, center.y + 9.0),
-            ],
-            egui::Stroke::new(2.2, theme::RED),
+/// Discord's headphones: headband arc and two filled ear cups; `slash` as
+/// in [`draw_mic`].
+fn draw_headset(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    color: egui::Color32,
+    slash: Option<egui::Color32>,
+    scale: f32,
+) {
+    let at = |x: f32, y: f32| center + Vec2::new(x, y) * scale;
+    let stroke = egui::Stroke::new(1.8 * scale, color);
+    let mut band: Vec<egui::Pos2> = vec![at(7.5, 5.0)];
+    band.extend((0..=12).map(|i| {
+        let angle = std::f32::consts::PI * i as f32 / 12.0;
+        at(7.5 * angle.cos(), 1.0 - 7.5 * angle.sin())
+    }));
+    band.push(at(-7.5, 5.0));
+    painter.add(egui::Shape::line(band, stroke));
+    for x in [-8.5, 4.5] {
+        painter.rect_filled(
+            egui::Rect::from_min_max(at(x, 2.0), at(x + 4.0, 9.0)),
+            1.5 * scale,
+            color,
         );
     }
+    if let Some(background) = slash {
+        draw_slash(painter, center, color, background, scale);
+    }
+}
+
+/// The "/" strike of Discord's slashed icons, with a knocked-out margin so
+/// it reads over the filled parts.
+fn draw_slash(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    color: egui::Color32,
+    background: egui::Color32,
+    scale: f32,
+) {
+    let ends = [
+        center + Vec2::new(8.0, -8.5) * scale,
+        center + Vec2::new(-8.0, 8.5) * scale,
+    ];
+    painter.line_segment(ends, egui::Stroke::new(4.6 * scale, background));
+    painter.line_segment(ends, egui::Stroke::new(1.8 * scale, color));
+}
+
+/// A mute/deafen marker in a voice member row: red glyph when the member
+/// did it, white glyph on a red badge when the server did.
+fn voice_state_icon(
+    ui: &mut egui::Ui,
+    draw: fn(&egui::Painter, egui::Pos2, egui::Color32, Option<egui::Color32>, f32),
+    server: bool,
+    tooltip: &str,
+) {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
+    if server {
+        ui.painter().rect_filled(rect, 4.0, theme::RED);
+        draw(
+            ui.painter(),
+            rect.center(),
+            theme::WHITE,
+            Some(theme::RED),
+            0.7,
+        );
+    } else {
+        draw(
+            ui.painter(),
+            rect.center(),
+            theme::RED,
+            Some(theme::RAIL),
+            0.8,
+        );
+    }
+    response.on_hover_text(tooltip);
 }
 
 /// Small downward options chevron.
@@ -686,7 +819,7 @@ fn voice_panel(app: &mut VesktopApp, ui: &mut egui::Ui) {
                 ui.add_space(8.0);
                 let gap = 6.0;
                 ui.spacing_mut().item_spacing.x = gap;
-                let button_width = (width - 16.0 - 2.0 * gap) / 3.0;
+                let button_width = (width - 16.0 - 3.0 * gap) / 4.0;
                 let action = |ui: &mut egui::Ui, icon, selected, tooltip: &str| {
                     crate::ui::icons::button(
                         ui,
@@ -708,17 +841,30 @@ fn voice_panel(app: &mut VesktopApp, ui: &mut egui::Ui) {
                         "Compartilhar tela"
                     },
                 ) {
-                    app.toggle_screen_share(ui.ctx());
+                    app.toggle_screen_share();
                 }
-                let extras = &mut app.extras;
+                let camera = app.camera.is_some();
                 if action(
                     ui,
-                    crate::ui::icons::Icon::Soundboard,
-                    extras.soundboard_open,
-                    "Soundboard",
+                    crate::ui::icons::Icon::Camera,
+                    camera,
+                    if camera {
+                        "Desligar câmera"
+                    } else {
+                        "Ligar câmera"
+                    },
                 ) {
-                    extras.soundboard_open = !extras.soundboard_open;
+                    app.toggle_camera(ui.ctx());
                 }
+                let soundboard = crate::ui::icons::button(
+                    ui,
+                    crate::ui::icons::Icon::Soundboard,
+                    Vec2::new(button_width, VOICE_ACTIONS_H),
+                    app.extras.soundboard_open,
+                    "Soundboard",
+                );
+                crate::ui::voice_extras::soundboard(app, &soundboard);
+                let extras = &mut app.extras;
                 if action(
                     ui,
                     crate::ui::icons::Icon::Music,
@@ -761,12 +907,14 @@ fn voice_member_row(app: &mut VesktopApp, ui: &mut egui::Ui, guild_id: &str, mem
     } else {
         fetched
     };
-    let speaking = app.speaking.contains(&member.user_id);
+    let speaking = app.is_speaking(&member.user_id);
     let width = ui.available_width();
     // A live member is clickable: it opens their stream.
     let live = app.is_live(&member.user_id, member.self_stream);
+    // Their webcam on FockyTV: a click opens it when there's no live.
+    let camera = app.has_camera(&member.user_id);
     let is_me = app.me.as_ref().is_some_and(|me| me.id == member.user_id);
-    let watchable = live && !is_me;
+    let watchable = (live || camera) && !is_me;
     let sense = if is_me {
         Sense::hover()
     } else {
@@ -784,13 +932,19 @@ fn voice_member_row(app: &mut VesktopApp, ui: &mut egui::Ui, guild_id: &str, mem
             theme::HOVER,
         ),
     );
-    let response = if watchable {
+    let response = if watchable && live {
         response.on_hover_text("Assistir à transmissão (clique direito: volume)")
+    } else if watchable {
+        response.on_hover_text("Ver câmera (clique direito: volume)")
     } else {
         response
     };
     if watchable && response.clicked() {
-        app.watch(&member.user_id);
+        if live {
+            app.watch(&member.user_id);
+        } else {
+            app.watch_camera(&member.user_id);
+        }
     }
     let mut content = ui.new_child(
         egui::UiBuilder::new()
@@ -825,35 +979,63 @@ fn voice_member_row(app: &mut VesktopApp, ui: &mut egui::Ui, guild_id: &str, mem
         );
     }
     content.add_space(6.0);
-    // Server mute/deafen wins over the self flags visually.
-    let icons = if member.deaf || member.self_deaf {
-        " 🎧"
-    } else if member.mute || member.self_mute {
-        " 🔇"
-    } else {
-        ""
-    };
-    content.label(
-        RichText::new(format!("{label}{icons}"))
-            .size(13.0)
-            .color(theme::MUTED),
-    );
     let locally_muted = app.settings.muted_users.contains(&member.user_id);
-    if locally_muted {
-        content
-            .label(RichText::new(" 🔇").size(13.0).color(theme::RED))
+    // Right to left, Discord's order: [AO VIVO] [mic] [headset] at the row
+    // end; the name takes what is left and truncates. A server mute/deafen
+    // replaces the member's own marker.
+    content.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.spacing_mut().item_spacing = Vec2::new(2.0, 0.0);
+        if member.deaf {
+            voice_state_icon(ui, draw_headset, true, "Ensurdecido pelo servidor");
+        } else if member.self_deaf {
+            voice_state_icon(ui, draw_headset, false, "Áudio desativado");
+        }
+        if member.mute {
+            voice_state_icon(ui, draw_mic, true, "Silenciado pelo servidor");
+        } else if member.self_mute {
+            voice_state_icon(ui, draw_mic, false, "Microfone silenciado");
+        }
+        if live {
+            ui.add_space(4.0);
+            ui.add(
+                egui::Label::new(
+                    RichText::new(" AO VIVO ")
+                        .size(9.5)
+                        .family(theme::bold())
+                        .color(egui::Color32::WHITE)
+                        .background_color(theme::RED),
+                )
+                .selectable(false),
+            );
+        }
+        if camera {
+            ui.add_space(4.0);
+            ui.add(
+                egui::Label::new(
+                    RichText::new(" CÂMERA ")
+                        .size(9.5)
+                        .family(theme::bold())
+                        .color(egui::Color32::WHITE)
+                        .background_color(theme::BLURPLE),
+                )
+                .selectable(false),
+            );
+        }
+        if locally_muted {
+            ui.add(
+                egui::Label::new(RichText::new("🔇").size(13.0).color(theme::RED))
+                    .selectable(false),
+            )
             .on_hover_text("Silenciado por você");
-    }
-    if live {
-        content.add_space(6.0);
-        content.label(
-            RichText::new(" AO VIVO ")
-                .size(9.5)
-                .family(theme::bold())
-                .color(egui::Color32::WHITE)
-                .background_color(theme::RED),
-        );
-    }
+        }
+        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            ui.add(
+                egui::Label::new(RichText::new(&label).size(13.0).color(theme::MUTED))
+                    .truncate()
+                    .selectable(false),
+            );
+        });
+    });
 
     if is_me {
         return;
@@ -875,6 +1057,11 @@ fn voice_member_row(app: &mut VesktopApp, ui: &mut egui::Ui, guild_id: &str, mem
         .show(|ui| {
             ui.set_min_width(200.0);
             ui.label(RichText::new(&label).strong().size(13.0));
+            // A click opens the live; the camera next to it is here.
+            if live && camera && ui.button("Ver câmera").clicked() {
+                app.watch_camera(&member.user_id);
+                ui.close();
+            }
             ui.separator();
             ui.label(
                 RichText::new("Volume do usuário")
@@ -1017,6 +1204,14 @@ fn paint_guild_channels(app: &mut VesktopApp, ui: &mut egui::Ui) {
             {
                 *clicked = Some(channel.id.clone());
             }
+            crate::ui::threads::paint_sidebar_threads(
+                app,
+                ui,
+                &guild_id,
+                &channel.id,
+                selected.as_deref(),
+                clicked,
+            );
         }
     };
 

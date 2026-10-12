@@ -17,18 +17,20 @@ forward to viewers (see below).
 
 | File | Role |
 |---|---|
-| `src/backend/capture.rs` | ScreenCast portal + PipeWire capture into a shared latest-frame slot |
+| `src/backend/capture.rs` | Shared latest-frame slot; Linux ScreenCast portal + PipeWire, Windows `d3d11screencapturesrc` and its source list |
+| `src/backend/camera.rs` | Webcam: device list and capture into the same kind of slot |
 | `src/backend/fockytv.rs` | WHIP publish, WHEP watch, `/api/status` polling (GStreamer) |
 | `src/backend/stream.rs` | Go Live stream connection: handshake, DAVE, send and receive |
 | `src/backend/encode.rs` | Go Live encoder thread (openh264) |
 | `src/backend/rtp.rs` | rtpsize AES-GCM, H.264 (de)packetizer, RTCP (PLI, RR, SR) |
-| `src/ui/screen_share.rs` | Sidebar preview ("AO VIVO") and the watch view |
+| `src/ui/screen_share.rs` | Share picker, sidebar previews ("AO VIVO", "CÂMERA") and the watch view |
 
 ## Capture (both backends)
 
-- 🖥️ in the voice action row (only shown while in voice) opens the
-  portal picker; the preview is a 16:9 box above "Voz conectada"; 🖥️ again
-  stops. Every way a share ends goes through `stop_screen_share()`.
+- 🖥️ in the voice action row (only shown while in voice) opens the app's
+  picker (below); the capture starts only on "Compartilhar". The preview
+  is a 16:9 box above "Voz conectada"; 🖥️ again stops. Every way a share
+  ends goes through `stop_screen_share()`.
 - PipeWire delivers SHM BGRx (xdg-desktop-portal-hyprland falls back to
   SHM when the consumer offers no DMA-BUF modifiers). The slot holds an
   `Arc<Frame>`; readers (preview, encoder, WHIP feeder) tell new frames
@@ -45,6 +47,40 @@ Pitfalls hit:
   every later portal call hung. The portal now runs on the app's runtime,
   and sessions are closed explicitly (the cached connection would keep
   them, and their screencopy, alive).
+
+### Picker
+
+A modal (`egui::Modal`), Discord-style. "Cancelar", Escape or a click
+outside close it with nothing captured; leaving voice closes it too. What
+it can offer differs per platform:
+
+| Platform | Source choice | Options |
+|---|---|---|
+| Windows | "Telas" / "Janelas" tabs with a 320 px still of each source | resolution, fps |
+| Linux | none in the app: "Compartilhar" opens the ScreenCast portal dialog | resolution, fps |
+
+- **Windows** lists monitors with `EnumDisplayMonitors` (primary first)
+  and top-level windows with `EnumWindows` (visible, titled, not
+  minimized, owned, tool or DWM-cloaked — suspended UWP apps report
+  "visible"). A monitor is captured with
+  `d3d11screencapturesrc monitor-handle=<HMONITOR>` (Desktop Duplication),
+  a window with `capture-api=wgc window-handle=<HWND>` (Windows Graphics
+  Capture; GStreamer ≥ 1.24, CI bundles 1.26). Stills are one-buffer runs
+  of the same source, one source at a time on a background thread (≤ 2 s
+  each), which stops when the picker closes. Minimized windows are left
+  out: WGC draws nothing for them. **Not verified on Windows** (no
+  Windows build here).
+- **Linux**: Wayland gives apps no way to list or grab other windows; the
+  portal's dialog is the picker, so the app only shows the options. X11
+  could enumerate (`ximagesrc xid=`), but the target desktop is Wayland
+  and the portal works on both, so it isn't done.
+- **Resolução** (Original / 1080p / 720p, `fockytv_max_height`) adds
+  `videoscale` to a fixed even size with the source's aspect; a later
+  size change (a resized window) is letterboxed, not stretched. The
+  bitrate follows the output size (a 6 Mbps tier up to ~720p sits below
+  fockytv-share's 12/20/32). **Taxa de quadros** is the same
+  `fockytv_fps` as the settings page. Both apply to FockyTV only; the
+  Go Live encoder stays at 720p30 and the picker says so.
 
 ## FockyTV backend
 
@@ -137,6 +173,44 @@ If glitches remain, the next lever is a lower bitrate: 20 Mbps for a
   here) or a video-first offer.
 - Lives are matched by Discord username; someone on FockyTV's web UI under
   another nick shows on the server but not on the roster.
+
+### Câmera
+
+The camera button next to 🖥️ turns the webcam on; it goes out through
+FockyTV the same way as the screen, under its own key, so both can run at
+once. Settings → "Voz e áudio" → Câmera picks the device; the sidebar shows
+a "CÂMERA" preview next to (or in place of) the screen's.
+
+```
+DeviceMonitor "Video/Source" → device.create_element()
+  (pipewiresrc or v4l2src on Linux; mfvideosrc or ksvideosrc on Windows)
+ → capsfilter <one exact mode> → decodebin → videoconvert → BGRx appsink
+ → capture slot → the WHIP publish above, 30 fps
+```
+
+- **Mode**: the largest one up to 720p (else the smallest), raw or MJPEG
+  in system memory, at the rate nearest 30 fps. Exact caps because
+  pipewiresrc can't negotiate ranges ("error set output format: -22");
+  most webcams only reach 720p30 as MJPEG, hence `decodebin`.
+- **Key**: `camera_key(nick)` = the nick's first 28 characters + `-cam`.
+  Discord usernames can't contain `-`, so it never matches a member's
+  screen key. Others' cameras match when a live key equals
+  `camera_key(username)`: the member gets a "CÂMERA" badge, a click opens
+  the camera when there's no screen live, and the right-click menu has
+  "Ver câmera" when both are on. One watched video at a time, in the same
+  watch view.
+- **FockyTV server**: no change needed. `live-api` takes any key matching
+  `^[\w.-]{1,32}$`, one publisher per key; the web UI lists
+  `<nick>-cam` as a live of its own.
+- Needs the FockyTV backend; with it off the button opens its settings.
+  The camera list is cached for the session like the audio devices
+  (a camera plugged in later shows after a restart; turning the camera on
+  re-lists, so the first camera still works). Ends with voice like the
+  screen share. Windows sources are **not verified** (no Windows build
+  here).
+- **No Discord-native camera**: Songbird sends no video (see below), and
+  the Go Live stream connection carries a screen stream, not the voice
+  connection's camera. Out of scope.
 
 ## Discord Go Live backend (setting off)
 

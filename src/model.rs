@@ -9,10 +9,20 @@ pub const CHANNEL_KIND_VOICE: i64 = 2;
 pub const CHANNEL_KIND_GROUP_DM: i64 = 3;
 pub const CHANNEL_KIND_CATEGORY: i64 = 4;
 pub const CHANNEL_KIND_ANNOUNCEMENT: i64 = 5;
+pub const CHANNEL_KIND_ANNOUNCEMENT_THREAD: i64 = 10;
+pub const CHANNEL_KIND_PUBLIC_THREAD: i64 = 11;
+pub const CHANNEL_KIND_PRIVATE_THREAD: i64 = 12;
+pub const CHANNEL_KIND_FORUM: i64 = 15;
+pub const CHANNEL_KIND_MEDIA: i64 = 16;
 
 /// Message types rendered as regular chat messages (0 = default, plus the
 /// common "system" ones the client just shows as plain text for now).
 pub const MESSAGE_KIND_DEFAULT: i64 = 0;
+/// "X iniciou um tópico", posted in the parent channel; the reference
+/// points at the thread.
+pub const MESSAGE_KIND_THREAD_CREATED: i64 = 18;
+/// A thread's first message, quoting the parent message it started from.
+pub const MESSAGE_KIND_THREAD_STARTER: i64 = 21;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct User {
@@ -48,6 +58,33 @@ pub struct Guild {
     pub icon: Option<String>,
 }
 
+/// A guild's custom emoji (READY, GUILD_CREATE, GUILD_EMOJIS_UPDATE).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GuildEmoji {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub animated: bool,
+    /// `false` once the guild lost the boost level that unlocked it.
+    #[serde(default)]
+    pub available: Option<bool>,
+}
+
+/// One result of Discord's GIF picker endpoints (`/gifs/search`,
+/// `/gifs/trending-gifs`), Tenor behind them.
+#[derive(Clone, Debug, Deserialize)]
+pub struct Gif {
+    /// Provider page (tenor.com/view/…): what the official client sends,
+    /// which Discord embeds as a gifv.
+    pub url: String,
+    /// The media in the requested `media_format`.
+    pub src: String,
+    #[serde(default)]
+    pub width: f32,
+    #[serde(default)]
+    pub height: f32,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Channel {
     pub id: String,
@@ -69,9 +106,82 @@ pub struct Channel {
     /// Snowflake of the last message, for ordering DMs by recency.
     #[serde(default)]
     pub last_message_id: Option<String>,
+    /// Threads only: their guild (gateway payloads, REST thread lists).
+    #[serde(default)]
+    pub guild_id: Option<String>,
+    /// Threads only: messages sent, not counting the starter message.
+    #[serde(default)]
+    pub message_count: Option<u64>,
+    #[serde(default)]
+    pub thread_metadata: Option<ThreadMetadata>,
+    /// Threads only: set when the current user joined the thread.
+    #[serde(default)]
+    pub member: Option<ThreadMember>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ThreadMetadata {
+    #[serde(default)]
+    pub archived: bool,
+    #[serde(default)]
+    pub locked: bool,
+}
+
+/// The current user's membership in a thread. `id` (the thread) only
+/// comes in lists, where members ride beside the threads.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ThreadMember {
+    #[serde(default)]
+    pub id: Option<String>,
+}
+
+/// `{ threads, members }`: THREAD_LIST_SYNC and the REST thread lists.
+#[derive(Debug, Default, Deserialize)]
+pub struct ThreadList {
+    #[serde(default)]
+    pub threads: Vec<Channel>,
+    #[serde(default)]
+    pub members: Vec<ThreadMember>,
+}
+
+impl ThreadList {
+    /// The threads, with the user's memberships attached.
+    pub fn into_threads(self) -> Vec<Channel> {
+        let mut threads = self.threads;
+        for thread in &mut threads {
+            if let Some(member) = self
+                .members
+                .iter()
+                .find(|member| member.id.as_deref() == Some(thread.id.as_str()))
+            {
+                thread.member = Some(member.clone());
+            }
+        }
+        threads
+    }
 }
 
 impl Channel {
+    pub fn is_thread(&self) -> bool {
+        matches!(
+            self.kind,
+            CHANNEL_KIND_ANNOUNCEMENT_THREAD
+                | CHANNEL_KIND_PUBLIC_THREAD
+                | CHANNEL_KIND_PRIVATE_THREAD
+        )
+    }
+
+    /// Forum and media channels hold posts (threads), not messages.
+    pub fn is_forum(&self) -> bool {
+        matches!(self.kind, CHANNEL_KIND_FORUM | CHANNEL_KIND_MEDIA)
+    }
+
+    pub fn is_archived(&self) -> bool {
+        self.thread_metadata
+            .as_ref()
+            .is_some_and(|meta| meta.archived)
+    }
+
     pub fn is_voice(&self) -> bool {
         self.kind == CHANNEL_KIND_VOICE
     }
@@ -133,6 +243,9 @@ pub struct Message {
     /// The original message, when Discord embeds it alongside the reply.
     #[serde(default)]
     pub referenced_message: Option<Box<Message>>,
+    /// The thread this message started, when it started one.
+    #[serde(default)]
+    pub thread: Option<Box<Channel>>,
 }
 
 /// `message_reference`: which message a reply points at.
@@ -228,4 +341,14 @@ pub struct Member {
     pub user: User,
     #[serde(default)]
     pub nick: Option<String>,
+}
+
+/// The editable bits of our own profile (settings → Perfil). Empty strings
+/// mean unset; `nick` is for the guild selected when it was loaded.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Profile {
+    pub global_name: String,
+    pub pronouns: String,
+    pub bio: String,
+    pub nick: String,
 }

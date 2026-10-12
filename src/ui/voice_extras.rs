@@ -35,6 +35,17 @@ impl VoiceExtras {
 }
 
 pub fn show(app: &mut VesktopApp, ctx: &egui::Context) {
+    if !matches!(app.voice, VoiceConn::Connected { .. }) {
+        return;
+    }
+    if app.extras.music_open {
+        music_window(app, ctx);
+    }
+}
+
+/// The soundboard popover, anchored above its button in the voice panel
+/// like the chat's emoji and GIF pickers.
+pub fn soundboard(app: &mut VesktopApp, button: &egui::Response) {
     let VoiceConn::Connected {
         guild_id,
         channel_id,
@@ -42,27 +53,26 @@ pub fn show(app: &mut VesktopApp, ctx: &egui::Context) {
     else {
         return;
     };
-    if app.extras.soundboard_open {
-        soundboard(app, ctx, &guild_id, &channel_id);
+    let (guild_id, channel_id) = (guild_id.as_str(), channel_id.as_str());
+    if button.clicked() {
+        app.extras.soundboard_open = !app.extras.soundboard_open;
     }
-    if app.extras.music_open {
-        music_window(app, ctx);
-    }
-}
-
-fn soundboard(app: &mut VesktopApp, ctx: &egui::Context, guild_id: &str, channel_id: &str) {
-    if app.extras.begin_soundboard_load(guild_id) {
+    if app.extras.soundboard_open && app.extras.begin_soundboard_load(guild_id) {
         app.send(Command::LoadSoundboard {
             guild_id: guild_id.to_string(),
         });
     }
-    let mut open = true;
+    let mut open = app.extras.soundboard_open;
     let mut play = None;
-    egui::Window::new(RichText::new("Soundboard").strong())
-        .open(&mut open)
-        .collapsible(false)
-        .default_width(320.0)
-        .show(ctx, |ui| {
+    egui::Popup::from_response(button)
+        .id(egui::Id::new("soundboard_picker"))
+        .open_bool(&mut open)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .align(egui::RectAlign::TOP_START)
+        .gap(8.0)
+        .show(|ui| {
+            ui.set_width(320.0);
+            ui.label(RichText::new("Soundboard").strong());
             if let Some(error) = &app.extras.soundboard_error {
                 ui.label(RichText::new(error).small().color(theme::RED));
             }

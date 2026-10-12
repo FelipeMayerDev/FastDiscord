@@ -9,6 +9,7 @@ pub mod app;
 pub mod backend;
 pub mod image_cache;
 pub mod markup;
+pub mod member_list;
 pub mod model;
 pub mod notifications;
 pub mod paths;
@@ -17,5 +18,6 @@ pub mod theme;
 #[cfg(feature = "tray")]
 pub mod tray;
 pub mod ui;
+pub mod updater;
 pub mod util;
 pub mod window;

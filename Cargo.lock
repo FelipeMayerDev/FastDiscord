@@ -1950,6 +1950,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "emojis"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b1514ced566c94991ed9563258ecf61e311fd773bf0a3f20606830386bf66e3"
+dependencies = [
+ "phf",
+]
+
+[[package]]
 name = "encoding_rs"
 version = "0.8.42"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2106,7 +2115,7 @@ dependencies = [
 
 [[package]]
 name = "fastdiscord"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2122,6 +2131,7 @@ dependencies = [
  "eframe",
  "egui",
  "egui_extras",
+ "emojis",
  "futures-util",
  "gstreamer",
  "gstreamer-app",

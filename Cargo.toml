@@ -1,7 +1,7 @@
 [package]
 name = "fastdiscord"
 default-run = "fastdiscord"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.98"
 license = "GPL-3.0-or-later"
@@ -69,6 +69,9 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 rsa = { version = "0.9", features = ["sha2"] }
 base64 = "0.22"
 qrcode = { version = "0.14", default-features = false }
+# Emoji picker: Unicode CLDR names, shortcodes and categories for search
+# and tabs (a hand-kept table would be thousands of lines).
+emojis = "0.9"
 # Voice: WS + UDP + DAVE through the standalone driver (docs/VOICE.md).
 # `gateway` is only there because `receive` fails to build without it in
 # 0.6.0 (`dashmap` is gated behind `gateway`).
@@ -123,7 +126,7 @@ pipewire = "0.10"
 
 [target.'cfg(windows)'.dependencies]
 tray-icon = { version = "0.19", optional = true }
-windows = { version = "0.62.2", features = ["Win32_Media_Audio", "Win32_Media_KernelStreaming", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_System_Threading", "Win32_Security"] }
+windows = { version = "0.62.2", features = ["Win32_Media_Audio", "Win32_Media_KernelStreaming", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_System_Threading", "Win32_Security", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm", "Win32_UI_WindowsAndMessaging"] }
 # Voice audio I/O through WASAPI (src/backend/audio/windows.rs).
 cpal = "0.18"
 # No system libopus on Windows: build it from source for songbird's opus2

@@ -32,8 +32,10 @@ Configurações → Aparência, torna essas transições imediatas e mantém os 
 no primeiro quadro. Transmissões de vídeo continuam sendo conteúdo reproduzido.
 
 **Atividades** está fora da interface enquanto não houver implementação.
-As ações de voz disponíveis são compartilhamento de tela, soundboard e DJ;
-não deve haver um espaço reservado para uma quarta ação.
+As ações de voz disponíveis são compartilhamento de tela, câmera, soundboard e
+DJ; não deve haver espaço reservado para ações sem implementação. Compartilhar
+tela abre um modal para escolher a fonte, a resolução e a taxa de quadros
+([SCREENSHARE.md](SCREENSHARE.md#picker)).
 
 ## Já implementado
 
@@ -41,11 +43,29 @@ não deve haver um espaço reservado para uma quarta ação.
 - Configurações em modal centralizado, com fundo escurecido, navegação por
   seção, conteúdo rolável e abas no topo em janelas estreitas. Fecha por
   botão, Escape ou clique fora; atalhos de canais ficam bloqueados.
+- Aba Perfil: avatar (recorte central, PNG de até 512 px), nome exibido,
+  apelido no servidor selecionado, pronomes e "Sobre mim", com prévia do
+  cartão de perfil.
 - Separadores de datas, agrupamento de mensagens, respostas, indicador de
   novas mensagens, digitação, caixa multilinha e links clicáveis.
+- Status próprio (Online, Ausente, Não perturbe, Invisível) e status
+  personalizado, pelo avatar no painel do usuário ou pela bandeja.
+- Mute/surdo na lista da sala de voz com os ícones do Discord: vermelhos
+  quando o próprio membro ativa, em selo vermelho quando é o servidor.
 - Avatares e status, convites com cartão, GIFs e visualizador de imagens.
-- Amigos e solicitações, busca no histórico em cache, arquivos, emoji básico
-  e envio de GIF por URL.
+- Lista de membros à direita, alternada pelo botão de pessoas do cabeçalho:
+  grupos por cargo exibido separadamente e online/offline, vinda da lista
+  preguiçosa do gateway (op 37); nas DMs, os participantes. Clicar numa
+  resposta rola até a mensagem original e a destaca.
+- Amigos e solicitações, busca no histórico em cache e arquivos.
+- Seletores de emoji (Unicode e personalizados dos servidores), de GIF
+  (endpoints de GIF do Discord, Tenor) e soundboard como popovers ancorados
+  no botão, no padrão `egui::Popup`; fecham com clique fora ou Escape. O
+  seletor de emoji só lista emojis Unicode de um glifo, que a fonte desenha.
+- Quem toca um som do soundboard fica com o anel verde enquanto o som toca.
+- Tópicos: os seguidos aparecem sob o canal pai; botão **Tópicos** no
+  cabeçalho (ativos e arquivados públicos), "Criar tópico" no menu de
+  contexto da mensagem, resumo "N mensagens" e fóruns listando postagens.
 - Canal de voz ativo verde, tempo conectado, soundboard e DJ.
 - Bandeja no Linux e Windows, com restaurar janela, sair e continuar chamadas
   em segundo plano ao fechar a janela.
@@ -53,7 +73,7 @@ não deve haver um espaço reservado para uma quarta ação.
 ## Pendências de paridade
 
 Pastas e ordem de servidores dependem do settings protobuf do Discord.
-Reações, threads, pins e renderização completa de emojis personalizados
+Reações, pins, tags de fórum e renderização completa de emojis personalizados
 continuam no roteiro de [PORT.md](PORT.md). Os nomes e capacidades dos
 controles devem acompanhar recursos realmente implementados.
 

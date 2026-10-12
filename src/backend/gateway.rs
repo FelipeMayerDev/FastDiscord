@@ -13,7 +13,8 @@ use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message as WsMessage,
 };
 
-use crate::model::{Message, User, VoiceState};
+use crate::model::{Channel, GuildEmoji, Message, ThreadList, User, VoiceState};
+use crate::settings::CustomStatus;
 
 use super::api::{Api, ApiError};
 use super::events::{Command, EventTx, UiEvent};
@@ -204,6 +205,16 @@ async fn session(
 }
 
 // Supplemental guild presences are nested arrays; normal presences are flat.
+/// A guild's custom emojis, skipping entries that don't parse.
+fn guild_emojis(value: &Value) -> Vec<GuildEmoji> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|emoji| serde::Deserialize::deserialize(emoji).ok())
+        .collect()
+}
+
 fn seed_presences(value: &Value, event_tx: &EventTx) {
     if let Some(entries) = value.as_array() {
         for entry in entries {
@@ -246,6 +257,7 @@ fn dispatch(value: Value, event_tx: &EventTx, voice_tx: &UnboundedSender<Wire>, 
                     let Some(id) = guild.get("id").and_then(Value::as_str) else {
                         continue;
                     };
+                    send_roles(id, guild, event_tx);
                     let states = guild
                         .get("voice_states")
                         .cloned()
@@ -254,6 +266,11 @@ fn dispatch(value: Value, event_tx: &EventTx, voice_tx: &UnboundedSender<Wire>, 
                     let _ = event_tx.send(UiEvent::GuildVoiceStates {
                         guild_id: id.to_string(),
                         states,
+                    });
+                    sync_guild_threads(guild, id, event_tx);
+                    event_tx.send(UiEvent::GuildEmojis {
+                        guild_id: id.to_string(),
+                        emojis: guild_emojis(&guild["emojis"]),
                     });
                 }
             }
@@ -269,6 +286,7 @@ fn dispatch(value: Value, event_tx: &EventTx, voice_tx: &UnboundedSender<Wire>, 
             let Some(id) = data.get("id").and_then(Value::as_str) else {
                 return;
             };
+            send_roles(id, &data, event_tx);
             let states = data
                 .get("voice_states")
                 .cloned()
@@ -278,6 +296,81 @@ fn dispatch(value: Value, event_tx: &EventTx, voice_tx: &UnboundedSender<Wire>, 
                 guild_id: id.to_string(),
                 states,
             });
+            sync_guild_threads(&data, id, event_tx);
+            event_tx.send(UiEvent::GuildEmojis {
+                guild_id: id.to_string(),
+                emojis: guild_emojis(&data["emojis"]),
+            });
+        }
+        // Threads (docs: Gateway Events → Threads). Active ones arrive with
+        // the guild and in THREAD_LIST_SYNC; archived ones only over REST.
+        "THREAD_LIST_SYNC" => {
+            let Some(guild_id) = data.get("guild_id").and_then(Value::as_str) else {
+                return;
+            };
+            let parent_ids = data
+                .get("channel_ids")
+                .and_then(|ids| serde_json::from_value::<Vec<String>>(ids.clone()).ok());
+            let threads = serde_json::from_value::<ThreadList>(data.clone())
+                .unwrap_or_default()
+                .into_threads();
+            event_tx.send(UiEvent::ThreadsSynced {
+                guild_id: guild_id.to_string(),
+                parent_ids,
+                threads,
+            });
+        }
+        "THREAD_CREATE" | "THREAD_UPDATE" => match serde_json::from_value::<Channel>(data) {
+            Ok(thread) => event_tx.send(UiEvent::ThreadsUpserted {
+                threads: vec![thread],
+            }),
+            Err(err) => log::warn!("{kind} não parseou: {err}"),
+        },
+        "THREAD_DELETE" => {
+            if let Some(id) = data.get("id").and_then(Value::as_str) {
+                event_tx.send(UiEvent::ThreadDeleted {
+                    thread_id: id.to_string(),
+                });
+            }
+        }
+        // Our own membership: a thread member object plus guild_id.
+        "THREAD_MEMBER_UPDATE" => {
+            let id = data.get("id").and_then(Value::as_str);
+            let user_id = data.get("user_id").and_then(Value::as_str);
+            if let (Some(id), Some(user_id)) = (id, user_id) {
+                event_tx.send(UiEvent::ThreadMembers {
+                    thread_id: id.to_string(),
+                    added: vec![user_id.to_string()],
+                    removed: Vec::new(),
+                });
+            }
+        }
+        "THREAD_MEMBERS_UPDATE" => {
+            let Some(id) = data.get("id").and_then(Value::as_str) else {
+                return;
+            };
+            let ids = |values: Option<&Value>, pointer: &str| -> Vec<String> {
+                values
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|value| value.pointer(pointer).and_then(Value::as_str))
+                    .map(str::to_string)
+                    .collect()
+            };
+            event_tx.send(UiEvent::ThreadMembers {
+                thread_id: id.to_string(),
+                added: ids(data.get("added_members"), "/user_id"),
+                removed: ids(data.get("removed_member_ids"), ""),
+            });
+        }
+        "GUILD_EMOJIS_UPDATE" => {
+            if let Some(id) = data.get("guild_id").and_then(Value::as_str) {
+                event_tx.send(UiEvent::GuildEmojis {
+                    guild_id: id.to_string(),
+                    emojis: guild_emojis(&data["emojis"]),
+                });
+            }
         }
         "RELATIONSHIP_ADD" | "RELATIONSHIP_UPDATE" | "RELATIONSHIP_REMOVE" => {
             event_tx.send(UiEvent::RelationshipsChanged);
@@ -333,6 +426,12 @@ fn dispatch(value: Value, event_tx: &EventTx, voice_tx: &UnboundedSender<Wire>, 
             seed_presences(&data["presences"], event_tx);
         }
         "PRESENCE_UPDATE" => seed_presences(&data, event_tx),
+        "GUILD_MEMBER_LIST_UPDATE" => {
+            match serde_json::from_value::<crate::member_list::MemberListUpdate>(data) {
+                Ok(update) => event_tx.send(UiEvent::MemberListUpdate { update }),
+                Err(err) => log::warn!("GUILD_MEMBER_LIST_UPDATE não parseou: {err}"),
+            }
+        }
         "VOICE_STATE_UPDATE" => match serde_json::from_value::<VoiceStatePayload>(data) {
             Ok(payload) => {
                 log::info!(
@@ -407,6 +506,11 @@ fn dispatch(value: Value, event_tx: &EventTx, voice_tx: &UnboundedSender<Wire>, 
         "VOICE_CHANNEL_EFFECT_SEND" => {
             if let Some(sound_id) = data.get("sound_id").filter(|id| !id.is_null()) {
                 event_tx.send(UiEvent::VoiceEffect {
+                    user_id: data
+                        .get("user_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
                     sound_id: sound_id
                         .as_str()
                         .map_or_else(|| sound_id.to_string(), str::to_string),
@@ -435,6 +539,34 @@ fn dispatch(value: Value, event_tx: &EventTx, voice_tx: &UnboundedSender<Wire>, 
             }
         }
         _ => {}
+    }
+}
+
+/// The active threads a guild payload carries (READY, GUILD_CREATE); READY
+/// entries omit `guild_id`.
+fn sync_guild_threads(guild: &Value, guild_id: &str, event_tx: &EventTx) {
+    let Some(threads) = guild.get("threads") else {
+        return;
+    };
+    let mut threads = serde_json::from_value::<Vec<Channel>>(threads.clone()).unwrap_or_default();
+    for thread in &mut threads {
+        thread.guild_id.get_or_insert_with(|| guild_id.to_string());
+    }
+    event_tx.send(UiEvent::ThreadsSynced {
+        guild_id: guild_id.to_string(),
+        parent_ids: None,
+        threads,
+    });
+}
+
+/// Full guild objects (READY, GUILD_CREATE) carry the roles the member
+/// list names its groups and colors names with.
+fn send_roles(guild_id: &str, guild: &Value, event_tx: &EventTx) {
+    if let Ok(roles) = serde_json::from_value(guild["roles"].clone()) {
+        event_tx.send(UiEvent::GuildRoles {
+            guild_id: guild_id.to_string(),
+            roles,
+        });
     }
 }
 
@@ -506,6 +638,27 @@ fn identify_payload(token: &str) -> String {
             },
             "presence": { "status": "online", "afk": false }
         }
+    })
+    .to_string()
+}
+
+/// op 3 PRESENCE_UPDATE; a custom status is the type 4 activity, with
+/// the text in `state` as the official client sends it.
+fn presence_payload(status: &str, custom: &CustomStatus) -> String {
+    let activities = if custom.is_empty() {
+        vec![]
+    } else {
+        let emoji = custom.emoji.trim();
+        vec![json!({
+            "type": 4,
+            "name": "Custom Status",
+            "state": custom.text.trim(),
+            "emoji": (!emoji.is_empty()).then(|| json!({ "name": emoji })),
+        })]
+    };
+    json!({
+        "op": 3,
+        "d": { "status": status, "since": 0, "activities": activities, "afk": false }
     })
     .to_string()
 }
@@ -602,6 +755,19 @@ async fn handle_command(api: &Api, command: Command, event_tx: &EventTx, write: 
                 log::warn!("falha ao avisar digitação: {err}");
             }
         }
+        Command::SetPresence {
+            status,
+            custom_status,
+            save,
+        } => {
+            let payload = presence_payload(&status, &custom_status);
+            if let Err(err) = write.send(WsMessage::text(payload)).await {
+                log::warn!("falha ao atualizar o status: {err}");
+            }
+            if save && let Err(err) = api.save_status(&status, &custom_status).await {
+                log::warn!("falha ao salvar o status na conta: {err}");
+            }
+        }
         Command::JoinVoice {
             guild_id,
             channel_id,
@@ -694,6 +860,81 @@ async fn handle_command(api: &Api, command: Command, event_tx: &EventTx, write: 
                 Err(err) => log::warn!("falha ao carregar membro {user_id}: {err}"),
             }
         }
+        Command::LoadThreads { channel_id } => match api.archived_threads(&channel_id).await {
+            Ok(threads) => event_tx.send(UiEvent::ThreadsUpserted { threads }),
+            Err(err) => report(api, err, event_tx, "carregar tópicos").await,
+        },
+        Command::CreateThread {
+            channel_id,
+            message_id,
+            name,
+            content,
+            kind,
+            forum,
+        } => {
+            let body = if forum {
+                json!({ "name": name, "message": { "content": content } })
+            } else if message_id.is_some() {
+                json!({ "name": name })
+            } else {
+                // v10 defaults a standalone thread to private; ask for the
+                // public kind the browser offers.
+                json!({ "name": name, "type": kind })
+            };
+            let created = api
+                .create_thread(&channel_id, message_id.as_deref(), &body)
+                .await;
+            match created {
+                Ok(thread) => {
+                    let thread_id = thread.id.clone();
+                    event_tx.send(UiEvent::ThreadCreated { thread });
+                    if !forum && message_id.is_none() && !content.is_empty() {
+                        match api.send_message(&thread_id, &content).await {
+                            Ok(message) => event_tx.send(UiEvent::MessageCreated { message }),
+                            Err(err) => event_tx.send(UiEvent::SendFailed {
+                                channel_id: thread_id,
+                                error: err.to_string(),
+                            }),
+                        }
+                    }
+                }
+                Err(err) => event_tx.send(UiEvent::SendFailed {
+                    channel_id,
+                    error: format!("não consegui criar o tópico: {err}"),
+                }),
+            }
+        }
+        Command::SubscribeMemberList {
+            guild_id,
+            channel_id,
+            ranges,
+        } => {
+            let payload = crate::member_list::subscribe_payload(&guild_id, &channel_id, ranges);
+            if let Err(err) = write.send(WsMessage::text(payload)).await {
+                log::warn!("falha ao assinar a lista de membros de {channel_id}: {err}");
+            }
+        }
+        Command::LoadMessagesAround {
+            channel_id,
+            message_id,
+        } => {
+            let messages = match api.messages_around(&channel_id, &message_id).await {
+                Ok(messages) => messages,
+                Err(err) => {
+                    log::warn!("falha ao buscar a mensagem {message_id}: {err}");
+                    Vec::new()
+                }
+            };
+            event_tx.send(UiEvent::MessagesAround {
+                channel_id,
+                message_id,
+                messages,
+            });
+        }
+        Command::SearchGifs { query } => {
+            let result = api.gifs(&query).await.map_err(|err| err.to_string());
+            event_tx.send(UiEvent::GifsLoaded { query, result });
+        }
         Command::LoadSoundboard { guild_id } => match api.soundboard_sounds(&guild_id).await {
             Ok(sounds) => event_tx.send(UiEvent::SoundboardLoaded { guild_id, sounds }),
             Err(err) => event_tx.send(UiEvent::SoundboardError {
@@ -733,6 +974,25 @@ async fn report(api: &Api, err: ApiError, event_tx: &EventTx, context: &str) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn presence_payload_carries_custom_status_as_activity() {
+        let custom = CustomStatus {
+            text: " no ar ".into(),
+            emoji: "🎧".into(),
+        };
+        let value: Value = serde_json::from_str(&presence_payload("dnd", &custom)).unwrap();
+        assert_eq!(value["op"], 3);
+        assert_eq!(value["d"]["status"], "dnd");
+        let activity = &value["d"]["activities"][0];
+        assert_eq!(activity["type"], 4);
+        assert_eq!(activity["state"], "no ar");
+        assert_eq!(activity["emoji"]["name"], "🎧");
+
+        let plain: Value =
+            serde_json::from_str(&presence_payload("idle", &CustomStatus::default())).unwrap();
+        assert_eq!(plain["d"]["activities"], json!([]));
+    }
+
     #[test]
     fn subscriptions_request_current_and_future_member_presences() {
         let ids: Vec<String> = (0..101).map(|id| id.to_string()).collect();

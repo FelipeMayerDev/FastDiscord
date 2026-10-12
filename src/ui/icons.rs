@@ -14,6 +14,7 @@ pub enum Icon {
     Stop,
     Playlist,
     Screen,
+    Camera,
     Soundboard,
     Music,
     Disconnect,
@@ -109,6 +110,25 @@ pub fn draw(p: &egui::Painter, icon: Icon, c: Pos2, color: Color32, hover: f32) 
             line(Vec2::new(0.0, y + 5.0), Vec2::new(0.0, y - 2.0));
             line(Vec2::new(-3.0, y + 1.0), Vec2::new(0.0, y - 2.0));
             line(Vec2::new(0.0, y - 2.0), Vec2::new(3.0, y + 1.0));
+        }
+        Icon::Camera => {
+            // Body plus the lens wedge, which opens a little on hover.
+            p.rect_stroke(
+                Rect::from_center_size(c + Vec2::new(-3.0, 0.0), Vec2::new(13.0, 11.0)),
+                2.0,
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+            let spread = 4.0 + hover;
+            p.add(egui::Shape::closed_line(
+                vec![
+                    c + Vec2::new(4.0, -1.5),
+                    c + Vec2::new(9.0, -spread),
+                    c + Vec2::new(9.0, spread),
+                    c + Vec2::new(4.0, 1.5),
+                ],
+                stroke,
+            ));
         }
         Icon::Soundboard | Icon::Voice => {
             p.add(egui::Shape::closed_line(

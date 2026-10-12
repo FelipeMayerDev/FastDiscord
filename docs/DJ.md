@@ -7,8 +7,10 @@ pelo microfone e não é ouvida no Discord oficial ou em versões antigas do app
 
 ## Usar no app
 
-1. Configure **Configurações → Voz e áudio → DJ compartilhado** com o endereço
-   e a chave do relay. Feche as configurações para aplicar.
+1. O endereço padrão é `wss://dj.felipemayer.com.br`; a chave padrão vem de
+   `FASTDISCORD_DJ_KEY` no momento do build. Para outro relay, altere em
+   **Configurações → Voz e áudio → DJ compartilhado** e feche as configurações
+   para aplicar.
 2. Entre na sala de voz e clique no botão de música/DJ.
 3. Cole um link HTTPS do YouTube para adicionar diretamente, ou pesquise pelo
    nome para ver até dez resultados com título e duração. Escolha **Adicionar**

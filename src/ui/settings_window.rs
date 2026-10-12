@@ -15,6 +15,7 @@ use crate::theme;
 pub enum SettingsTab {
     #[default]
     Account,
+    Profile,
     Appearance,
     Voice,
     ScreenShare,
@@ -25,6 +26,7 @@ impl SettingsTab {
     fn label(self) -> &'static str {
         match self {
             Self::Account => "Minha conta",
+            Self::Profile => "Perfil",
             Self::Appearance => "Aparência",
             Self::Voice => "Voz e áudio",
             Self::ScreenShare => "Tela e transmissão",
@@ -69,6 +71,7 @@ pub fn show(app: &mut VesktopApp, ctx: &egui::Context) {
                 ui.horizontal_wrapped(|ui| {
                     for tab in [
                         SettingsTab::Account,
+                        SettingsTab::Profile,
                         SettingsTab::Appearance,
                         SettingsTab::Voice,
                         SettingsTab::ScreenShare,
@@ -113,6 +116,9 @@ pub fn show(app: &mut VesktopApp, ctx: &egui::Context) {
                                 ui.set_width(ui.available_width());
                                 match app.settings_tab {
                                     SettingsTab::Account => logged_out = account_settings(app, ui),
+                                    SettingsTab::Profile => {
+                                        crate::ui::profile_settings::profile_settings(app, ui)
+                                    }
                                     SettingsTab::Appearance => appearance_settings(app, ui),
                                     SettingsTab::Voice => {
                                         ui.label(RichText::new("Dispositivos e volumes").strong());
@@ -152,7 +158,10 @@ pub fn show(app: &mut VesktopApp, ctx: &egui::Context) {
 
 fn nav(app: &mut VesktopApp, ui: &mut egui::Ui) {
     let groups: [(&str, &[SettingsTab]); 2] = [
-        ("CONFIGURAÇÕES DE USUÁRIO", &[SettingsTab::Account]),
+        (
+            "CONFIGURAÇÕES DE USUÁRIO",
+            &[SettingsTab::Account, SettingsTab::Profile],
+        ),
         (
             "CONFIGURAÇÕES DO APLICATIVO",
             &[
@@ -281,7 +290,7 @@ fn behavior_settings(app: &mut VesktopApp, ui: &mut egui::Ui) {
     if ui
         .add(egui::Checkbox::new(
             &mut updates,
-            "Procurar atualizações automaticamente (em breve)",
+            "Atualizar automaticamente (vale ao reiniciar)",
         ))
         .changed()
     {
@@ -301,6 +310,10 @@ fn voice_settings(app: &mut VesktopApp, ui: &mut egui::Ui) {
     ui.horizontal_wrapped(|ui| {
         ui.label("Entrada:");
         changed |= device_combo(app, ui, false);
+    });
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Câmera:");
+        camera_combo(app, ui);
     });
     changed |= volume_control(app, ui, true);
     changed |= volume_control(app, ui, false);
@@ -462,6 +475,33 @@ fn input_controls(app: &mut VesktopApp, ui: &mut egui::Ui) -> bool {
         )
         .changed();
     changed
+}
+
+/// Webcam picker (`None` = the first camera); applies the next time the
+/// camera is turned on.
+fn camera_combo(app: &mut VesktopApp, ui: &mut egui::Ui) {
+    let devices = crate::backend::camera::devices();
+    let current = app
+        .settings
+        .camera_device
+        .clone()
+        .filter(|name| devices.contains(name))
+        .or_else(|| devices.first().cloned());
+    egui::ComboBox::from_id_salt("camera_device")
+        .selected_text(current.clone().unwrap_or_else(|| "Nenhuma câmera".into()))
+        .show_ui(ui, |ui| {
+            for name in &devices {
+                if ui
+                    .selectable_label(current.as_ref() == Some(name), name)
+                    .clicked()
+                {
+                    app.settings.camera_device = Some(name.clone());
+                    app.settings.save();
+                }
+            }
+        })
+        .response
+        .on_hover_text("Vale a partir da próxima vez que ligar a câmera");
 }
 
 fn apply_voice_change(app: &mut VesktopApp) {

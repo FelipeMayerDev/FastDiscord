@@ -4,10 +4,11 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
+use std::time::Duration;
 
 use serde::{Deserialize, Deserializer};
 
-use super::audio::{EFFECTS, decode};
+use super::audio::{EFFECTS, VOICE_RATE, decode};
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct SoundboardSound {
@@ -44,8 +45,10 @@ pub fn id_string<'de, D: Deserializer<'de>>(de: D) -> Result<String, D::Error> {
 /// Decoded sounds by id; they're short and repeat a lot.
 static CACHE: LazyLock<Mutex<HashMap<String, Arc<[f32]>>>> = LazyLock::new(Mutex::default);
 
-/// Downloads (once), decodes and plays a soundboard sound locally.
-pub async fn play(sound_id: String, volume: f32) {
+/// Downloads (once), decodes and plays a soundboard sound locally (silent
+/// at volume 0, while deafened). Returns how long it plays, for the
+/// sender's speaking ring.
+pub async fn play(sound_id: String, volume: f32) -> Option<Duration> {
     let cached = CACHE.lock().unwrap().get(&sound_id).cloned();
     let clip = match cached {
         Some(clip) => clip,
@@ -55,18 +58,23 @@ pub async fn play(sound_id: String, volume: f32) {
                 Ok(bytes) => bytes,
                 Err(err) => {
                     log::warn!("soundboard: falha ao baixar {sound_id}: {err}");
-                    return;
+                    return None;
                 }
             };
             let Ok(Some(clip)) = tokio::task::spawn_blocking(move || decode(bytes)).await else {
                 log::warn!("soundboard: não consegui decodificar {sound_id}");
-                return;
+                return None;
             };
             CACHE.lock().unwrap().insert(sound_id, Arc::clone(&clip));
             clip
         }
     };
-    EFFECTS.play(clip, volume.clamp(0.0, 1.0));
+    // 48 kHz interleaved stereo.
+    let duration = Duration::from_secs_f64(clip.len() as f64 / 2.0 / f64::from(VOICE_RATE));
+    if volume > 0.0 {
+        EFFECTS.play(clip, volume.min(1.0));
+    }
+    Some(duration)
 }
 
 async fn fetch(url: &str) -> reqwest::Result<Vec<u8>> {

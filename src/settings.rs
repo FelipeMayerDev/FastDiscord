@@ -12,6 +12,28 @@ pub enum Theme {
     Light,
 }
 
+/// Status values Discord accepts, with their labels, in menu order.
+pub const STATUSES: [(&str, &str); 4] = [
+    ("online", "Online"),
+    ("idle", "Ausente"),
+    ("dnd", "Não perturbe"),
+    ("invisible", "Invisível"),
+];
+
+/// Custom status text plus an optional Unicode emoji; both empty = none.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CustomStatus {
+    pub text: String,
+    pub emoji: String,
+}
+
+impl CustomStatus {
+    pub fn is_empty(&self) -> bool {
+        self.text.trim().is_empty() && self.emoji.trim().is_empty()
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -31,6 +53,10 @@ pub struct Settings {
     pub tray: bool,
     pub minimize_to_tray: bool,
     pub check_for_updates: bool,
+    /// Own presence ("online", "idle", "dnd", "invisible") and custom
+    /// status, re-sent after every READY.
+    pub status: String,
+    pub custom_status: CustomStatus,
     /// Voice: chosen sound-server device names (`None` = system default).
     pub input_device: Option<String>,
     pub output_device: Option<String>,
@@ -62,6 +88,11 @@ pub struct Settings {
     pub fockytv_nick: Option<String>,
     /// Frame rate cap for FockyTV broadcasts: 60, 30 or 15.
     pub fockytv_fps: u32,
+    /// Height cap for FockyTV screen shares (1080, 720; 0 = original).
+    pub fockytv_max_height: u32,
+    /// Webcam, by the label `backend::camera::devices` gives it (`None` =
+    /// the first camera).
+    pub camera_device: Option<String>,
     /// Shared DJ relay; the key belongs to the relay, never to Discord.
     pub dj_url: String,
     pub dj_key: String,
@@ -81,6 +112,8 @@ impl Default for Settings {
             tray: true,
             minimize_to_tray: true,
             check_for_updates: true,
+            status: "online".into(),
+            custom_status: CustomStatus::default(),
             input_device: None,
             output_device: None,
             input_volume: 100,
@@ -97,8 +130,11 @@ impl Default for Settings {
             fockytv_url: "https://tv.huestavo.com".into(),
             fockytv_nick: None,
             fockytv_fps: 60,
-            dj_url: String::new(),
-            dj_key: String::new(),
+            fockytv_max_height: 0,
+            camera_device: None,
+            dj_url: "wss://dj.felipemayer.com.br".into(),
+            // Baked in at build time so the key stays out of the public repo.
+            dj_key: option_env!("FASTDISCORD_DJ_KEY").unwrap_or_default().into(),
             dj_volume: 50,
         }
     }

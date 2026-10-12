@@ -1,6 +1,6 @@
 //! Typed messages between the UI thread and the backend task.
 
-use crate::model::{Channel, Guild, Message, User, VoiceState};
+use crate::model::{Channel, Gif, Guild, GuildEmoji, Message, User, VoiceState};
 
 /// Sends [`UiEvent`]s to the UI thread and wakes egui's loop right after.
 /// The loop only redraws on input otherwise, so background events (guild
@@ -65,6 +65,13 @@ pub enum Command {
     SendTyping {
         channel_id: String,
     },
+    /// op 3 with our status and custom status; `save` also stores them in
+    /// the account settings so the other clients follow.
+    SetPresence {
+        status: String,
+        custom_status: crate::settings::CustomStatus,
+        save: bool,
+    },
     /// Join a guild voice channel: op 4 over the live socket. Re-sent with
     /// the same channel and new flags for mute/deafen toggles.
     JoinVoice {
@@ -105,11 +112,42 @@ pub enum Command {
         sound_id: String,
         source_guild_id: Option<String>,
     },
+    /// GIF picker: trending for an empty query, search otherwise.
+    SearchGifs {
+        query: String,
+    },
     /// Fetch a guild member (name/avatar) for a voice state that only
     /// carries a user id, as in READY.
     LoadVoiceUser {
         guild_id: String,
         user_id: String,
+    },
+    /// The thread browser or a forum opened: its archived public threads.
+    LoadThreads {
+        channel_id: String,
+    },
+    /// Start a thread in `channel_id`: from `message_id` when set, else a
+    /// standalone one (`kind` 10/11) or, in a forum, a post whose first
+    /// message is `content`. Outside forums `content` follows as the
+    /// thread's first message.
+    CreateThread {
+        channel_id: String,
+        message_id: Option<String>,
+        name: String,
+        content: String,
+        kind: i64,
+        forum: bool,
+    },
+    /// Op 37: rows `0..ranges * 100` of a channel's member list.
+    SubscribeMemberList {
+        guild_id: String,
+        channel_id: String,
+        ranges: usize,
+    },
+    /// The history page around a replied-to message that isn't loaded.
+    LoadMessagesAround {
+        channel_id: String,
+        message_id: String,
     },
 }
 
@@ -208,8 +246,24 @@ pub enum UiEvent {
     },
     /// Someone (us included) played a soundboard sound in our channel.
     VoiceEffect {
+        user_id: String,
         sound_id: String,
         volume: f32,
+    },
+    /// A soundboard sound started playing: its sender lights up as
+    /// speaking for `duration`.
+    SoundboardPlaying {
+        user_id: String,
+        duration: std::time::Duration,
+    },
+    GifsLoaded {
+        query: String,
+        result: Result<Vec<Gif>, String>,
+    },
+    /// A guild's custom emojis, replacing what the UI had.
+    GuildEmojis {
+        guild_id: String,
+        emojis: Vec<GuildEmoji>,
     },
     /// A member lookup resolved to a user, for the voice roster.
     UserResolved {
@@ -276,5 +330,59 @@ pub enum UiEvent {
     QrExpired,
     QrFailed {
         reason: String,
+    },
+    Profile(ProfileEvent),
+    /// The guild's active threads, from READY, GUILD_CREATE or
+    /// THREAD_LIST_SYNC: they replace the active threads of `parent_ids`
+    /// (the whole guild when `None`).
+    ThreadsSynced {
+        guild_id: String,
+        parent_ids: Option<Vec<String>>,
+        threads: Vec<Channel>,
+    },
+    /// THREAD_CREATE/THREAD_UPDATE, or a fetched archive page.
+    ThreadsUpserted {
+        threads: Vec<Channel>,
+    },
+    /// A thread we created: registered and opened.
+    ThreadCreated {
+        thread: Channel,
+    },
+    ThreadDeleted {
+        thread_id: String,
+    },
+    /// Users joined or left a thread (THREAD_MEMBER(S)_UPDATE).
+    ThreadMembers {
+        thread_id: String,
+        added: Vec<String>,
+        removed: Vec<String>,
+    },
+    /// A guild's roles, from READY or GUILD_CREATE (member list groups).
+    GuildRoles {
+        guild_id: String,
+        roles: Vec<crate::member_list::Role>,
+    },
+    MemberListUpdate {
+        update: crate::member_list::MemberListUpdate,
+    },
+    /// The page around `message_id`; empty when the fetch failed.
+    MessagesAround {
+        channel_id: String,
+        message_id: String,
+        messages: Vec<Message>,
+    },
+}
+
+/// Settings → Perfil (ui/profile_settings.rs), wrapped in [`UiEvent::Profile`].
+#[derive(Debug)]
+pub enum ProfileEvent {
+    Loaded(Result<crate::model::Profile, String>),
+    /// The avatar file, cropped: its data URI and preview; `Ok(None)` = cancelled.
+    AvatarPicked(Result<Option<(String, egui::ColorImage)>, String>),
+    /// `user` is set once PATCH /users/@me went through, even if a later
+    /// request failed.
+    Saved {
+        user: Option<User>,
+        error: Option<String>,
     },
 }

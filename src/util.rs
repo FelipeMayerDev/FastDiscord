@@ -112,7 +112,10 @@ pub fn user_avatar_url(user: &User) -> String {
 
 /// The animated (`a_…` hash) avatar as a GIF, for hover playback.
 pub fn animated_avatar_url(user: &User) -> Option<String> {
-    let hash = user.avatar.as_deref().filter(|hash| hash.starts_with("a_"))?;
+    let hash = user
+        .avatar
+        .as_deref()
+        .filter(|hash| hash.starts_with("a_"))?;
     Some(format!(
         "https://cdn.discordapp.com/avatars/{}/{}.gif?size=64",
         user.id, hash
