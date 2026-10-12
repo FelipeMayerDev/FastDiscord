@@ -118,6 +118,22 @@ pub enum Command {
         guild_id: String,
         user_id: String,
     },
+    /// The thread browser or a forum opened: its archived public threads.
+    LoadThreads {
+        channel_id: String,
+    },
+    /// Start a thread in `channel_id`: from `message_id` when set, else a
+    /// standalone one (`kind` 10/11) or, in a forum, a post whose first
+    /// message is `content`. Outside forums `content` follows as the
+    /// thread's first message.
+    CreateThread {
+        channel_id: String,
+        message_id: Option<String>,
+        name: String,
+        content: String,
+        kind: i64,
+        forum: bool,
+    },
 }
 
 /// Updates from the backend task to the UI thread.
@@ -285,6 +301,31 @@ pub enum UiEvent {
         reason: String,
     },
     Profile(ProfileEvent),
+    /// The guild's active threads, from READY, GUILD_CREATE or
+    /// THREAD_LIST_SYNC: they replace the active threads of `parent_ids`
+    /// (the whole guild when `None`).
+    ThreadsSynced {
+        guild_id: String,
+        parent_ids: Option<Vec<String>>,
+        threads: Vec<Channel>,
+    },
+    /// THREAD_CREATE/THREAD_UPDATE, or a fetched archive page.
+    ThreadsUpserted {
+        threads: Vec<Channel>,
+    },
+    /// A thread we created: registered and opened.
+    ThreadCreated {
+        thread: Channel,
+    },
+    ThreadDeleted {
+        thread_id: String,
+    },
+    /// Users joined or left a thread (THREAD_MEMBER(S)_UPDATE).
+    ThreadMembers {
+        thread_id: String,
+        added: Vec<String>,
+        removed: Vec<String>,
+    },
 }
 
 /// Settings → Perfil (ui/profile_settings.rs), wrapped in [`UiEvent::Profile`].

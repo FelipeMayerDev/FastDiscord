@@ -158,6 +158,8 @@ pub struct VesktopApp {
     pub(crate) dm_channels: Vec<Channel>,
     pub(crate) guild_channels: HashMap<String, Vec<Channel>>,
     pub(crate) channel_index: HashMap<String, ChannelRef>,
+    /// Threads of guilds whose channels aren't loaded yet (ui/threads.rs).
+    pub(crate) pending_threads: HashMap<String, Vec<Channel>>,
     pub(crate) messages: HashMap<String, Vec<Message>>,
     pub(crate) has_more: HashMap<String, bool>,
     /// Cached channels that may have missed messages while the gateway was
@@ -271,6 +273,7 @@ impl VesktopApp {
             dm_channels: Vec::new(),
             guild_channels: HashMap::new(),
             channel_index: HashMap::new(),
+            pending_threads: HashMap::new(),
             messages: HashMap::new(),
             has_more: HashMap::new(),
             stale_channels: HashMap::new(),
@@ -597,6 +600,7 @@ impl VesktopApp {
         self.dm_channels.clear();
         self.guild_channels.clear();
         self.channel_index.clear();
+        self.pending_threads.clear();
         self.messages.clear();
         self.has_more.clear();
         self.stale_channels.clear();
@@ -730,6 +734,13 @@ impl VesktopApp {
 
     fn fetch_channel_if_needed(&mut self, channel_id: String) {
         if self.loading_channels.contains(&channel_id) {
+            return;
+        }
+        // A forum has posts, not messages (ui/threads.rs lists them).
+        if self
+            .find_channel(&channel_id)
+            .is_some_and(Channel::is_forum)
+        {
             return;
         }
         // Cached history shows right away; only a channel that may have
@@ -1610,6 +1621,17 @@ impl VesktopApp {
                 }
             }
             UiEvent::GuildChannelsLoaded { guild_id, channels } => {
+                // REST lists no threads; keep the ones the gateway gave us.
+                let mut channels = channels;
+                channels.extend(
+                    self.guild_channels
+                        .get(&guild_id)
+                        .into_iter()
+                        .flatten()
+                        .filter(|channel| channel.is_thread())
+                        .cloned(),
+                );
+                channels.extend(self.pending_threads.remove(&guild_id).unwrap_or_default());
                 self.channel_index.retain(
                     |_, channel| !matches!(channel, ChannelRef::Guild(id) if id == &guild_id),
                 );
@@ -1679,6 +1701,7 @@ impl VesktopApp {
                 self.loading_channels.remove(&channel_id);
             }
             UiEvent::MessageCreated { message } => {
+                self.note_thread_message(&message);
                 let selected =
                     self.selected_channel.as_deref() == Some(message.channel_id.as_str());
                 let new_author = self
@@ -2094,6 +2117,11 @@ impl VesktopApp {
                 self.qr = QrState::Failed(reason);
             }
             UiEvent::Profile(event) => ui::profile_settings::handle_event(self, event),
+            event @ (UiEvent::ThreadsSynced { .. }
+            | UiEvent::ThreadsUpserted { .. }
+            | UiEvent::ThreadCreated { .. }
+            | UiEvent::ThreadDeleted { .. }
+            | UiEvent::ThreadMembers { .. }) => self.handle_thread_event(event),
         }
     }
 }
@@ -2161,7 +2189,15 @@ impl eframe::App for VesktopApp {
                     me: me.clone(),
                     guilds: self.guilds.clone(),
                     dm_channels: self.dm_channels.clone(),
-                    guild_channels: self.guild_channels.clone(),
+                    // Threads come back with READY; cached ones would go stale.
+                    guild_channels: self
+                        .guild_channels
+                        .iter()
+                        .map(|(id, channels)| {
+                            let channels = channels.iter().filter(|c| !c.is_thread());
+                            (id.clone(), channels.cloned().collect())
+                        })
+                        .collect(),
                     relationships: self.relationships.clone(),
                 },
             );

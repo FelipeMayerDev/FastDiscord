@@ -78,6 +78,14 @@ pub fn paint(app: &mut VesktopApp, ui: &mut egui::Ui) {
         });
         return;
     };
+    crate::ui::threads::draft_window(app, ui.ctx());
+    if app
+        .find_channel(&channel_id)
+        .is_some_and(crate::model::Channel::is_forum)
+    {
+        crate::ui::threads::paint_forum(app, ui, &channel_id);
+        return;
+    }
 
     let tools_id = egui::Id::new(("chat_tools", &channel_id));
     let mut tools = ui
@@ -178,6 +186,10 @@ pub fn paint(app: &mut VesktopApp, ui: &mut egui::Ui) {
             draw_search_icon(ui.painter(), rect.center(), theme::TEXT);
             if response.on_hover_text("Buscar nesta conversa").clicked() {
                 tools.search_open = !tools.search_open;
+            }
+            if !is_dm {
+                ui.add_space(8.0);
+                crate::ui::threads::header_button(app, ui, &channel_id);
             }
         });
     });
@@ -444,6 +456,7 @@ pub fn paint(app: &mut VesktopApp, ui: &mut egui::Ui) {
                 .cloned()
                 .unwrap_or_default()
                 .into_iter()
+                .map(crate::ui::threads::starter_as_original)
                 .filter(|message| {
                     needle.is_empty()
                         || message.content.to_lowercase().contains(&needle)
@@ -550,6 +563,9 @@ fn paint_message(
     grouped: bool,
     channel_names: &HashMap<String, String>,
 ) {
+    if crate::ui::threads::paint_thread_created(app, ui, message) {
+        return;
+    }
     let row_top = ui.cursor().top();
     let row_left = ui.cursor().left();
     let author_name = message.author.display_name();
@@ -654,6 +670,7 @@ fn paint_message(
         egui::Id::new(("msg_row", message.id.as_str())),
         Sense::hover(),
     );
+    crate::ui::threads::message_menu(app, ui, &response, message);
     let hover = fade(
         ui,
         response.id,
@@ -898,6 +915,7 @@ fn paint_content(
             bar_color,
         );
     }
+    crate::ui::threads::message_thread_summary(app, ui, message);
 }
 
 #[derive(Clone)]

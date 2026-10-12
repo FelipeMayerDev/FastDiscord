@@ -11,6 +11,7 @@ pub mod screen_share;
 pub mod server_rail;
 pub mod settings_window;
 pub mod splash;
+pub mod threads;
 pub mod voice_extras;
 pub mod voice_processing;
 
