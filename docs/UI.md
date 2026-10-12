@@ -46,6 +46,9 @@ não deve haver um espaço reservado para uma quarta ação.
 - Avatares e status, convites com cartão, GIFs e visualizador de imagens.
 - Amigos e solicitações, busca no histórico em cache, arquivos, emoji básico
   e envio de GIF por URL.
+- Tópicos: os seguidos aparecem sob o canal pai; botão **Tópicos** no
+  cabeçalho (ativos e arquivados públicos), "Criar tópico" no menu de
+  contexto da mensagem, resumo "N mensagens" e fóruns listando postagens.
 - Canal de voz ativo verde, tempo conectado, soundboard e DJ.
 - Bandeja no Linux e Windows, com restaurar janela, sair e continuar chamadas
   em segundo plano ao fechar a janela.
@@ -53,7 +56,7 @@ não deve haver um espaço reservado para uma quarta ação.
 ## Pendências de paridade
 
 Pastas e ordem de servidores dependem do settings protobuf do Discord.
-Reações, threads, pins e renderização completa de emojis personalizados
+Reações, pins, tags de fórum e renderização completa de emojis personalizados
 continuam no roteiro de [PORT.md](PORT.md). Os nomes e capacidades dos
 controles devem acompanhar recursos realmente implementados.
 

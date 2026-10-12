@@ -1017,6 +1017,14 @@ fn paint_guild_channels(app: &mut VesktopApp, ui: &mut egui::Ui) {
             {
                 *clicked = Some(channel.id.clone());
             }
+            crate::ui::threads::paint_sidebar_threads(
+                app,
+                ui,
+                &guild_id,
+                &channel.id,
+                selected.as_deref(),
+                clicked,
+            );
         }
     };
 

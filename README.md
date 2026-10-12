@@ -43,7 +43,7 @@ e o Discord é falado nativamente — REST + Gateway sobre tokio.
 As notificações no Linux usam `notify-send`, `paplay` e o tema de sons
 freedesktop. O upload básico de anexos aceita arquivos de até 10 MB. A busca
 no chat consulta apenas mensagens já carregadas. Recursos ainda previstos,
-como threads e plugins, estão em [docs/PORT.md](docs/PORT.md).
+como reações e plugins, estão em [docs/PORT.md](docs/PORT.md).
 
 ## Instalação
 

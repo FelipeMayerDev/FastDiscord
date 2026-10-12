@@ -5,7 +5,7 @@
 use serde::de::DeserializeOwned;
 
 use crate::backend::soundboard::SoundboardSound;
-use crate::model::{Channel, Guild, Member, Message, Relationship, User};
+use crate::model::{Channel, Guild, Member, Message, Relationship, ThreadList, User};
 
 pub const REST_BASE: &str = "https://discord.com/api/v10";
 pub const USER_AGENT: &str = concat!(
@@ -279,6 +279,40 @@ impl Api {
             .await?;
         Self::check_status(resp).await?;
         Ok(())
+    }
+
+    /// Archived public threads of a text, announcement or forum channel,
+    /// newest first. Active ones come from the gateway.
+    pub async fn archived_threads(&self, channel_id: &str) -> ApiResult<Vec<Channel>> {
+        Ok(self
+            .get_json::<ThreadList>(
+                &format!("/channels/{channel_id}/threads/archived/public"),
+                &[("limit", "50".to_string())],
+            )
+            .await?
+            .into_threads())
+    }
+
+    /// Starts a thread from `message_id`, or a standalone thread / forum
+    /// post when `None`; `body` is the endpoint's JSON.
+    pub async fn create_thread(
+        &self,
+        channel_id: &str,
+        message_id: Option<&str>,
+        body: &serde_json::Value,
+    ) -> ApiResult<Channel> {
+        let path = match message_id {
+            Some(message_id) => format!("/channels/{channel_id}/messages/{message_id}/threads"),
+            None => format!("/channels/{channel_id}/threads"),
+        };
+        let resp = self
+            .http
+            .post(format!("{REST_BASE}{path}"))
+            .header(reqwest::header::AUTHORIZATION, &self.token)
+            .json(body)
+            .send()
+            .await?;
+        Ok(Self::check_status(resp).await?.json().await?)
     }
 
     /// One guild member; used to name users that voice states only

@@ -46,7 +46,7 @@ meaning without a browser engine and were dropped. `zoom` maps to egui's
 - **Gateway RESUME** — reconnects currently re-IDENTIFY.
 - **Keyring token storage** — the spotifast pattern (`keyring-core`);
   the token currently sits in `settings.json`.
-- **Reactions, threads, pins and full custom-emoji rendering** — links,
+- **Reactions, pins, forum tags and full custom-emoji rendering** — links,
   image previews, animated GIFs and an image viewer are implemented.
 - **UI/UX pass** — splash, QR login layout, server rail, chat timeline:
   see [UI.md](UI.md).

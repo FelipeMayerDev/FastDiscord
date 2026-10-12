@@ -13,7 +13,7 @@ use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message as WsMessage,
 };
 
-use crate::model::{Message, User, VoiceState};
+use crate::model::{Channel, Message, ThreadList, User, VoiceState};
 
 use super::api::{Api, ApiError};
 use super::events::{Command, EventTx, UiEvent};
@@ -255,6 +255,7 @@ fn dispatch(value: Value, event_tx: &EventTx, voice_tx: &UnboundedSender<Wire>, 
                         guild_id: id.to_string(),
                         states,
                     });
+                    sync_guild_threads(guild, id, event_tx);
                 }
             }
         }
@@ -277,6 +278,69 @@ fn dispatch(value: Value, event_tx: &EventTx, voice_tx: &UnboundedSender<Wire>, 
             let _ = event_tx.send(UiEvent::GuildVoiceStates {
                 guild_id: id.to_string(),
                 states,
+            });
+            sync_guild_threads(&data, id, event_tx);
+        }
+        // Threads (docs: Gateway Events → Threads). Active ones arrive with
+        // the guild and in THREAD_LIST_SYNC; archived ones only over REST.
+        "THREAD_LIST_SYNC" => {
+            let Some(guild_id) = data.get("guild_id").and_then(Value::as_str) else {
+                return;
+            };
+            let parent_ids = data
+                .get("channel_ids")
+                .and_then(|ids| serde_json::from_value::<Vec<String>>(ids.clone()).ok());
+            let threads = serde_json::from_value::<ThreadList>(data.clone())
+                .unwrap_or_default()
+                .into_threads();
+            event_tx.send(UiEvent::ThreadsSynced {
+                guild_id: guild_id.to_string(),
+                parent_ids,
+                threads,
+            });
+        }
+        "THREAD_CREATE" | "THREAD_UPDATE" => match serde_json::from_value::<Channel>(data) {
+            Ok(thread) => event_tx.send(UiEvent::ThreadsUpserted {
+                threads: vec![thread],
+            }),
+            Err(err) => log::warn!("{kind} não parseou: {err}"),
+        },
+        "THREAD_DELETE" => {
+            if let Some(id) = data.get("id").and_then(Value::as_str) {
+                event_tx.send(UiEvent::ThreadDeleted {
+                    thread_id: id.to_string(),
+                });
+            }
+        }
+        // Our own membership: a thread member object plus guild_id.
+        "THREAD_MEMBER_UPDATE" => {
+            let id = data.get("id").and_then(Value::as_str);
+            let user_id = data.get("user_id").and_then(Value::as_str);
+            if let (Some(id), Some(user_id)) = (id, user_id) {
+                event_tx.send(UiEvent::ThreadMembers {
+                    thread_id: id.to_string(),
+                    added: vec![user_id.to_string()],
+                    removed: Vec::new(),
+                });
+            }
+        }
+        "THREAD_MEMBERS_UPDATE" => {
+            let Some(id) = data.get("id").and_then(Value::as_str) else {
+                return;
+            };
+            let ids = |values: Option<&Value>, pointer: &str| -> Vec<String> {
+                values
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|value| value.pointer(pointer).and_then(Value::as_str))
+                    .map(str::to_string)
+                    .collect()
+            };
+            event_tx.send(UiEvent::ThreadMembers {
+                thread_id: id.to_string(),
+                added: ids(data.get("added_members"), "/user_id"),
+                removed: ids(data.get("removed_member_ids"), ""),
             });
         }
         "RELATIONSHIP_ADD" | "RELATIONSHIP_UPDATE" | "RELATIONSHIP_REMOVE" => {
@@ -436,6 +500,23 @@ fn dispatch(value: Value, event_tx: &EventTx, voice_tx: &UnboundedSender<Wire>, 
         }
         _ => {}
     }
+}
+
+/// The active threads a guild payload carries (READY, GUILD_CREATE); READY
+/// entries omit `guild_id`.
+fn sync_guild_threads(guild: &Value, guild_id: &str, event_tx: &EventTx) {
+    let Some(threads) = guild.get("threads") else {
+        return;
+    };
+    let mut threads = serde_json::from_value::<Vec<Channel>>(threads.clone()).unwrap_or_default();
+    for thread in &mut threads {
+        thread.guild_id.get_or_insert_with(|| guild_id.to_string());
+    }
+    event_tx.send(UiEvent::ThreadsSynced {
+        guild_id: guild_id.to_string(),
+        parent_ids: None,
+        threads,
+    });
 }
 
 #[derive(serde::Deserialize)]
@@ -692,6 +773,50 @@ async fn handle_command(api: &Api, command: Command, event_tx: &EventTx, write: 
                     let _ = event_tx.send(UiEvent::UserResolved { user: member.user });
                 }
                 Err(err) => log::warn!("falha ao carregar membro {user_id}: {err}"),
+            }
+        }
+        Command::LoadThreads { channel_id } => match api.archived_threads(&channel_id).await {
+            Ok(threads) => event_tx.send(UiEvent::ThreadsUpserted { threads }),
+            Err(err) => report(api, err, event_tx, "carregar tópicos").await,
+        },
+        Command::CreateThread {
+            channel_id,
+            message_id,
+            name,
+            content,
+            kind,
+            forum,
+        } => {
+            let body = if forum {
+                json!({ "name": name, "message": { "content": content } })
+            } else if message_id.is_some() {
+                json!({ "name": name })
+            } else {
+                // v10 defaults a standalone thread to private; ask for the
+                // public kind the browser offers.
+                json!({ "name": name, "type": kind })
+            };
+            let created = api
+                .create_thread(&channel_id, message_id.as_deref(), &body)
+                .await;
+            match created {
+                Ok(thread) => {
+                    let thread_id = thread.id.clone();
+                    event_tx.send(UiEvent::ThreadCreated { thread });
+                    if !forum && message_id.is_none() && !content.is_empty() {
+                        match api.send_message(&thread_id, &content).await {
+                            Ok(message) => event_tx.send(UiEvent::MessageCreated { message }),
+                            Err(err) => event_tx.send(UiEvent::SendFailed {
+                                channel_id: thread_id,
+                                error: err.to_string(),
+                            }),
+                        }
+                    }
+                }
+                Err(err) => event_tx.send(UiEvent::SendFailed {
+                    channel_id,
+                    error: format!("não consegui criar o tópico: {err}"),
+                }),
             }
         }
         Command::LoadSoundboard { guild_id } => match api.soundboard_sounds(&guild_id).await {
