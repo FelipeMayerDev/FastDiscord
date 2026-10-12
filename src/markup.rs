@@ -14,7 +14,8 @@ pub enum Style {
     Mention,
     /// `<#id>` — rendered as `#id`, resolved by the UI if known.
     ChannelName,
-    /// `<:name:id>` / `<a:name:id>` — rendered as `:name:`.
+    /// `<:name:id>` / `<a:name:id>`, kept whole: the UI shows the image,
+    /// `:name:` as its fallback.
     Emoji,
     Link,
 }
@@ -172,10 +173,10 @@ pub fn tokenize(text: &str) -> Vec<Segment> {
             if let Some(close) = plausible_close(rest) {
                 let prefix_len = if rest.starts_with("<a:") { 3 } else { 2 };
                 let inner = &rest[prefix_len..close];
-                if let Some(sep) = inner.find(':') {
+                if inner.contains(':') {
                     flush(&mut plain, &mut segments);
                     segments.push(Segment {
-                        text: format!(":{}:", &inner[..sep]),
+                        text: rest[..=close].to_string(),
                         style: Style::Emoji,
                     });
                     i += close + 1;
@@ -274,7 +275,7 @@ mod tests {
                 (" ve ".to_string(), Style::Normal),
                 ("#98765".to_string(), Style::ChannelName),
                 (" e ".to_string(), Style::Normal),
-                (":sob:".to_string(), Style::Emoji),
+                ("<:sob:123>".to_string(), Style::Emoji),
             ]
         );
     }

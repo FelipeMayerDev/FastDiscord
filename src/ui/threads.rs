@@ -268,7 +268,7 @@ fn message_count_label(thread: &Channel) -> String {
 
 /// The joined threads under a sidebar channel row, with Discord's spine.
 pub(crate) fn paint_sidebar_threads(
-    app: &VesktopApp,
+    app: &mut VesktopApp,
     ui: &mut egui::Ui,
     guild_id: &str,
     parent_id: &str,
@@ -278,7 +278,10 @@ pub(crate) fn paint_sidebar_threads(
     let Some(channels) = app.guild_channels.get(guild_id) else {
         return;
     };
-    let threads = sidebar_threads(channels, parent_id, selected);
+    let threads: Vec<Channel> = sidebar_threads(channels, parent_id, selected)
+        .into_iter()
+        .cloned()
+        .collect();
     let spine_x = ui.cursor().left() + 20.0;
     let spine_top = ui.cursor().top();
     for thread in threads {
@@ -328,7 +331,7 @@ pub(crate) fn paint_sidebar_threads(
                 .max_rect(row.shrink2(Vec2::new(8.0, 2.0)))
                 .layout(egui::Layout::left_to_right(egui::Align::Center)),
         );
-        content.add(egui::Label::new(text).truncate().selectable(false));
+        crate::ui::emoji::label(app, &mut content, text, true);
         if response.clicked() {
             *clicked = Some(thread.id.clone());
         }

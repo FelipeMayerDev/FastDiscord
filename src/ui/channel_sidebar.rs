@@ -1383,11 +1383,14 @@ fn paint_guild_channels(app: &mut VesktopApp, ui: &mut egui::Ui) {
             let (chevron, _) = ui.allocate_exact_size(Vec2::new(14.0, 14.0), Sense::hover());
             draw_chevron(ui.painter(), chevron.center(), theme::MUTED);
             ui.add_space(2.0);
-            ui.label(
+            crate::ui::emoji::label(
+                app,
+                ui,
                 RichText::new(category.display_name().to_uppercase())
                     .size(12.0)
                     .family(theme::bold())
                     .color(theme::MUTED),
+                true,
             );
         });
         ui.add_space(2.0);
@@ -1514,9 +1517,10 @@ fn row(
             seconds % 60
         );
         let timer_width = 66.0;
-        content.add_sized(
-            [content.available_width() - timer_width, height - 6.0],
-            egui::Label::new(text).truncate().selectable(false),
+        content.allocate_ui_with_layout(
+            Vec2::new(content.available_width() - timer_width, height - 6.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| crate::ui::emoji::label(app, ui, text, true),
         );
         ui.painter().text(
             pos2(rect.right() - 8.0, rect.center().y),
@@ -1528,7 +1532,7 @@ fn row(
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_secs(1));
     } else {
-        content.add(egui::Label::new(text).truncate().selectable(false));
+        crate::ui::emoji::label(app, &mut content, text, true);
     }
     response
 }

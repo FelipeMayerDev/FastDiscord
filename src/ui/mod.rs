@@ -2,6 +2,7 @@
 
 pub mod channel_sidebar;
 pub mod chat;
+pub mod emoji;
 pub mod friends;
 pub mod icons;
 pub mod image_viewer;

@@ -147,11 +147,14 @@ pub fn paint(app: &mut VesktopApp, ui: &mut egui::Ui) {
                 }
                 ui.add_space(8.0);
             }
-            ui.label(
+            crate::ui::emoji::label(
+                app,
+                ui,
                 RichText::new(&name)
                     .family(theme::bold())
                     .size(16.0)
                     .color(theme::TEXT),
+                false,
             );
             if let Some(partner_status) = app
                 .dm_channels
@@ -173,11 +176,14 @@ pub fn paint(app: &mut VesktopApp, ui: &mut egui::Ui) {
             }
         } else {
             ui.add_space(2.0);
-            ui.label(
+            crate::ui::emoji::label(
+                app,
+                ui,
                 RichText::new(format!("{prefix} {name}"))
                     .family(theme::bold())
                     .size(16.0)
                     .color(theme::TEXT),
+                false,
             );
             if let Some(topic) = &topic {
                 ui.add_space(10.0);
@@ -801,8 +807,8 @@ fn paint_content(
             && embed.url.as_deref() == Some(message.content.trim())
     });
     if !message.content.is_empty() && !bare_gif {
-        let job = content_job(&message.content, &app.user_cache, channel_names);
-        linked_content(ui, job);
+        let runs = content_runs(&message.content, &app.user_cache, channel_names);
+        paint_runs(app, ui, runs);
     }
     let invites = discord_invites(&message.content);
     for code in &invites {
@@ -1035,26 +1041,30 @@ mod invite_tests {
     fn links_resolve_unicode_positions_and_allow_only_web_urls() {
         let users = std::collections::HashMap::new();
         let channels = std::collections::HashMap::new();
-        let job = super::content_job(
-            "Olá 😀 https://example.com/ação e http://example.org",
-            &users,
-            &channels,
-        );
+        let last_text = |text: &str| match super::content_runs(text, &users, &channels).pop() {
+            Some(super::Inline::Text(job)) => job,
+            _ => panic!("expected text"),
+        };
+        let job = last_text("Olá 😀 https://example.com/ação e http://example.org");
+        assert!(job.text.starts_with(" https://"));
         assert_eq!(
-            super::link_at_char(&job, 6),
+            super::link_at_char(&job, 1),
             Some("https://example.com/ação")
         );
-        assert_eq!(super::link_at_char(&job, 5), None);
+        assert_eq!(super::link_at_char(&job, 0), None);
         let index = job.text.find("http://").unwrap();
         assert_eq!(
             super::link_at_char(&job, job.text[..index].chars().count()),
             Some("http://example.org")
         );
-        let code = super::content_job(
+        let code = super::content_runs(
             "`https://example.com` javascript:alert(1) file:///tmp/test",
             &users,
             &channels,
         );
+        let Some(super::Inline::Text(code)) = code.into_iter().next() else {
+            panic!("expected text");
+        };
         assert_eq!(super::link_at_char(&code, 0), None);
         let mut unsafe_job = job.clone();
         unsafe_job.text = "javascript:alert(1)".into();
@@ -1334,13 +1344,63 @@ fn link_at_char(job: &LayoutJob, char_index: usize) -> Option<&str> {
     (matches!(url.scheme(), "http" | "https") && url.host_str().is_some()).then_some(text)
 }
 
-/// Maps markup segments to a styled `LayoutJob`, resolving mention and
+/// Message text between its emoji: styled text, or an emoji image with the
+/// text it falls back to.
+enum Inline {
+    Text(LayoutJob),
+    Emoji {
+        url: String,
+        alt: String,
+        format: TextFormat,
+    },
+}
+
+/// Message text: one selectable label when it has no emoji; otherwise its
+/// runs wrap between emoji images, selectable run by run. A message of only
+/// emoji (up to 27) shows them jumbo, like Discord.
+fn paint_runs(app: &mut VesktopApp, ui: &mut egui::Ui, runs: Vec<Inline>) {
+    let emojis = runs
+        .iter()
+        .filter(|run| matches!(run, Inline::Emoji { .. }))
+        .count();
+    if emojis == 0 {
+        for run in runs {
+            if let Inline::Text(job) = run {
+                linked_content(ui, job);
+            }
+        }
+        return;
+    }
+    let jumbo = emojis <= 27
+        && runs.iter().all(|run| match run {
+            Inline::Text(job) => job.text.trim().is_empty(),
+            Inline::Emoji { .. } => true,
+        });
+    let size = if jumbo { 48.0 } else { 22.0 };
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        for run in runs {
+            match run {
+                Inline::Text(job) => linked_content(ui, job),
+                Inline::Emoji { url, alt, format } => {
+                    let name = emojis::get(&alt)
+                        .and_then(emojis::Emoji::shortcode)
+                        .map_or_else(|| alt.clone(), |code| format!(":{code}:"));
+                    crate::ui::emoji::image(app, ui, &url, &alt, &format, size).on_hover_text(name);
+                }
+            }
+        }
+    });
+}
+
+/// Maps markup segments to styled runs and emoji, resolving mention and
 /// channel ids against the state the caller already gathered.
-fn content_job(
+fn content_runs(
     text: &str,
     users: &HashMap<String, User>,
     channels: &HashMap<String, String>,
-) -> LayoutJob {
+) -> Vec<Inline> {
+    let mut runs = Vec::new();
     let mut job = LayoutJob::default();
     for segment in markup::tokenize(text) {
         let mut format = TextFormat {
@@ -1388,9 +1448,35 @@ fn content_job(
             }
         };
         let text = resolved.unwrap_or(segment.text);
-        job.append(&text, 0.0, format);
+        let custom = (segment.style == Style::Emoji)
+            .then(|| crate::ui::emoji::custom(&text))
+            .flatten();
+        if let Some((alt, url)) = custom {
+            runs.push(Inline::Text(std::mem::take(&mut job)));
+            runs.push(Inline::Emoji { url, alt, format });
+            continue;
+        }
+        if matches!(segment.style, Style::Code | Style::CodeBlock) {
+            job.append(&text, 0.0, format);
+            continue;
+        }
+        for piece in crate::ui::emoji::split(&text) {
+            match piece {
+                crate::ui::emoji::Piece::Text(text) => job.append(text, 0.0, format.clone()),
+                crate::ui::emoji::Piece::Emoji(emoji) => {
+                    runs.push(Inline::Text(std::mem::take(&mut job)));
+                    runs.push(Inline::Emoji {
+                        url: crate::ui::emoji::twemoji_url(emoji),
+                        alt: emoji.as_str().to_string(),
+                        format: format.clone(),
+                    });
+                }
+            }
+        }
     }
-    job
+    runs.push(Inline::Text(job));
+    runs.retain(|run| !matches!(run, Inline::Text(job) if job.text.is_empty()));
+    runs
 }
 
 /// The compose box pickers' popover: above its button, toggled by it,
@@ -1578,13 +1664,10 @@ enum PickerEmoji<'a> {
 }
 
 impl PickerEmoji<'_> {
-    /// What goes into the compose box: the bare glyph for Unicode (egui
-    /// draws VS16 as a box; Discord treats it as optional).
+    /// What goes into the compose box.
     fn markup(self) -> String {
         match self {
-            Self::Unicode(emoji) => {
-                emoji_glyph(emoji.as_str()).map_or_else(|| emoji.as_str().to_string(), String::from)
-            }
+            Self::Unicode(emoji) => emoji.as_str().to_string(),
             Self::Custom(emoji) => format!(
                 "<{}:{}:{}>",
                 if emoji.animated { "a" } else { "" },
@@ -1604,12 +1687,11 @@ impl PickerEmoji<'_> {
 
 /// The emojis the picker lists: for a query, matches across everything
 /// (custom names, Unicode names and shortcodes), custom first; otherwise
-/// the tab's. `drawable` keeps out the Unicode ones the fonts can't show.
+/// the tab's.
 fn picker_emojis<'a>(
     query: &str,
     tab: Option<emojis::Group>,
     custom: &[&'a GuildEmoji],
-    mut drawable: impl FnMut(&str) -> bool,
 ) -> Vec<PickerEmoji<'a>> {
     let query = query.trim().trim_matches(':').to_lowercase();
     if query.is_empty() {
@@ -1618,11 +1700,7 @@ fn picker_emojis<'a>(
                 .iter()
                 .map(|emoji| PickerEmoji::Custom(emoji))
                 .collect(),
-            Some(group) => group
-                .emojis()
-                .filter(|emoji| drawable(emoji.as_str()))
-                .map(PickerEmoji::Unicode)
-                .collect(),
+            Some(group) => group.emojis().map(PickerEmoji::Unicode).collect(),
         };
     }
     let custom = custom
@@ -1633,20 +1711,8 @@ fn picker_emojis<'a>(
         .filter(|emoji| {
             emoji.name().contains(&query) || emoji.shortcodes().any(|code| code.contains(&query))
         })
-        .filter(|emoji| drawable(emoji.as_str()))
         .map(PickerEmoji::Unicode);
     custom.chain(unicode).collect()
-}
-
-/// The single glyph egui draws for a Unicode emoji (VS16 dropped). ZWJ
-/// sequences, keycaps, skin tones and flags have several, which egui
-/// can't combine, so the picker leaves them out.
-fn emoji_glyph(emoji: &str) -> Option<char> {
-    let mut chars = emoji.chars().filter(|c| *c != '\u{fe0f}');
-    match (chars.next(), chars.next()) {
-        (Some(c), None) => Some(c),
-        _ => None,
-    }
 }
 
 /// Emoji picker: search, category tabs, Unicode emojis and the servers'
@@ -1694,16 +1760,7 @@ fn emoji_picker(app: &mut VesktopApp, ui: &mut egui::Ui, tools: &mut ChatTools, 
         }
     });
     ui.add_space(4.0);
-    let font = FontId::proportional(24.0);
-    // The family's character map: `has_glyph` reports false for everything
-    // in the face that also holds the replacement glyph (Noto Emoji here).
-    let list = ui.ctx().fonts_mut(|fonts| {
-        let mut family = fonts.fonts.font(&font.family);
-        let drawable = family.characters();
-        picker_emojis(&tools.emoji_query, tab, &custom, |emoji| {
-            emoji_glyph(emoji).is_some_and(|glyph| drawable.contains_key(&glyph))
-        })
-    });
+    let list = picker_emojis(&tools.emoji_query, tab, &custom);
     if list.is_empty() {
         ui.label(RichText::new("Nenhum emoji encontrado.").color(theme::MUTED));
         return;
@@ -1722,26 +1779,26 @@ fn emoji_picker(app: &mut VesktopApp, ui: &mut egui::Ui, tools: &mut ChatTools, 
                         if response.hovered() {
                             ui.painter().rect_filled(rect, 4.0, theme::HOVER);
                         }
-                        match emoji {
-                            PickerEmoji::Unicode(_) => {
+                        let url = match emoji {
+                            PickerEmoji::Unicode(emoji) => crate::ui::emoji::twemoji_url(emoji),
+                            PickerEmoji::Custom(custom) => {
+                                crate::ui::emoji::custom_url(&custom.id, custom.animated)
+                            }
+                        };
+                        match app.images.get(ui.ctx(), &app.handle, &url) {
+                            Some(texture) => {
+                                Image::from_texture(&texture).paint_at(ui, rect.shrink(6.0));
+                            }
+                            None if matches!(emoji, PickerEmoji::Unicode(_)) => {
                                 ui.painter().text(
                                     rect.center(),
                                     Align2::CENTER_CENTER,
                                     emoji.markup(),
-                                    font.clone(),
+                                    FontId::proportional(24.0),
                                     theme::TEXT,
                                 );
                             }
-                            PickerEmoji::Custom(custom) => {
-                                let url = format!(
-                                    "https://cdn.discordapp.com/emojis/{}.{}?size=48",
-                                    custom.id,
-                                    if custom.animated { "gif" } else { "png" }
-                                );
-                                if let Some(texture) = app.images.get(ui.ctx(), &app.handle, &url) {
-                                    Image::from_texture(&texture).paint_at(ui, rect.shrink(5.0));
-                                }
-                            }
+                            None => {}
                         }
                         if response.on_hover_text(emoji.name()).clicked() {
                             picked = Some(*emoji);
@@ -1782,7 +1839,7 @@ mod picker_tests {
     use super::*;
 
     #[test]
-    fn emoji_search_covers_custom_and_unicode_and_skips_undrawable() {
+    fn emoji_search_covers_custom_and_unicode() {
         let party = GuildEmoji {
             id: "1".into(),
             name: "PartyBlob".into(),
@@ -1790,33 +1847,20 @@ mod picker_tests {
             available: None,
         };
         let custom = [&party];
-        let found = picker_emojis(":party", None, &custom, |emoji| {
-            emoji_glyph(emoji).is_some()
-        });
+        let found = picker_emojis(":party", None, &custom);
         let markup: Vec<String> = found.iter().map(|emoji| emoji.markup()).collect();
         assert_eq!(markup[0], "<a:PartyBlob:1>");
         assert!(markup.contains(&"🎉".to_string()));
-        // Single glyphs only: no flag pairs, ZWJ or keycap sequences.
+        // Twemoji draws every sequence, flags included.
         assert!(
-            found
+            picker_emojis("", Some(emojis::Group::Flags), &custom)
                 .iter()
-                .skip(1)
-                .all(|emoji| emoji_glyph(&emoji.markup()).is_some())
-        );
-        assert!(
-            picker_emojis("", Some(emojis::Group::Flags), &custom, |emoji| {
-                emoji_glyph(emoji).is_some()
-            })
-            .iter()
-            .all(|emoji| !emoji.markup().contains('\u{1f1e7}'))
+                .any(|emoji| emoji.markup() == "🇧🇷")
         );
         // No query: the tab's list, custom ones only on their own tab.
-        assert_eq!(picker_emojis("  ", None, &custom, |_| true).len(), 1);
+        assert_eq!(picker_emojis("  ", None, &custom).len(), 1);
         assert_eq!(
-            picker_emojis("", Some(emojis::Group::SmileysAndEmotion), &custom, |_| {
-                true
-            })[0]
-                .markup(),
+            picker_emojis("", Some(emojis::Group::SmileysAndEmotion), &custom)[0].markup(),
             "😀"
         );
     }
