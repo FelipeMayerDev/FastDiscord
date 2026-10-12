@@ -34,7 +34,8 @@ pub enum ListItem {
     Member(ListMember),
 }
 
-/// A section header: a hoisted role id, `online` or `offline`.
+/// A section header: a hoisted role id, `online` or `offline`. Header rows
+/// in `items` carry only the id; counts come in the update's `groups`.
 #[derive(Clone, Debug, Deserialize)]
 pub struct ListGroup {
     pub id: String,
@@ -97,6 +98,9 @@ pub enum ListOp {
 pub struct MemberListUpdate {
     pub guild_id: String,
     pub id: String,
+    /// Every group's current count, resent with each update.
+    #[serde(default)]
+    pub groups: Vec<ListGroup>,
     #[serde(default)]
     pub ops: Vec<ListOp>,
 }
@@ -185,6 +189,13 @@ impl MemberList {
                     }
                 }
                 ListOp::Other => {}
+            }
+        }
+        for row in self.items.iter_mut().flatten() {
+            if let ListItem::Group(group) = row
+                && let Some(fresh) = update.groups.iter().find(|g| g.id == group.id)
+            {
+                group.count = fresh.count;
             }
         }
     }
@@ -296,6 +307,46 @@ mod tests {
             json!([{ "op": "SYNC", "range": [0, 99], "items": [member("z")] }]),
         ));
         assert_eq!((list.id.as_str(), ids(&list)), ("4127", vec!["z".into()]));
+    }
+
+    #[test]
+    fn header_counts_come_from_groups() {
+        let counts = |list: &MemberList| -> Vec<(String, u64)> {
+            list.items
+                .iter()
+                .flatten()
+                .filter_map(|item| match item {
+                    ListItem::Group(group) => Some((group.id.clone(), group.count)),
+                    ListItem::Member(_) => None,
+                })
+                .collect()
+        };
+        let mut list = MemberList::default();
+        // Header rows carry no count, as Discord sends them.
+        list.apply(
+            serde_json::from_value(json!({ "guild_id": "g", "id": "everyone",
+                "groups": [{ "id": "online", "count": 1 }, { "id": "offline", "count": 1 }],
+                "ops": [{ "op": "SYNC", "range": [0, 99], "items": [
+                    { "group": { "id": "online" } }, member("a"),
+                    { "group": { "id": "offline" } }, member("b")
+                ] }] }))
+            .unwrap(),
+        );
+        assert_eq!(counts(&list), [("online".into(), 1), ("offline".into(), 1)]);
+
+        // b comes online: the ops move the row, `groups` carries the counts.
+        list.apply(
+            serde_json::from_value(json!({ "guild_id": "g", "id": "everyone",
+                "groups": [{ "id": "online", "count": 2 }],
+                "ops": [
+                    { "op": "DELETE", "index": 3 },
+                    { "op": "DELETE", "index": 2 },
+                    { "op": "INSERT", "index": 2, "item": member("b") }
+                ] }))
+            .unwrap(),
+        );
+        assert_eq!(ids(&list), ["[online]", "a", "b"]);
+        assert_eq!(counts(&list), [("online".into(), 2)]);
     }
 
     #[test]
