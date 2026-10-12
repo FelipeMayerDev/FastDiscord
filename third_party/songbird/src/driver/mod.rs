@@ -66,6 +66,11 @@ pub use opus2::{self as opus, Bitrate};
 use std::time::Duration;
 #[allow(unused_imports)]
 pub use tasks::disposal::DisposalThread;
+
+/// Round trip of the last acknowledged voice-gateway heartbeat, in ms
+/// (0 = none yet). FastDiscord patch for its connection-quality popover;
+/// process-wide because the app holds a single voice connection.
+pub static WS_PING_MS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 use tasks::message::CoreMessage;
 use tracing::instrument;
 

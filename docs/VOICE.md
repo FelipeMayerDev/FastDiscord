@@ -75,6 +75,14 @@ has no voice on Linux. This port follows Acheron's model:
 - **Screenshare + venmic**: the voice-adjacent part Electron Vesktop does
   implement itself (`src/main/venmic.ts`, `src/main/screenShare.ts`).
 
+## Connection quality
+
+The vendored songbird times each voice-gateway heartbeat and stores the
+round trip in `songbird::driver::WS_PING_MS` (process-wide: one voice
+connection). `voice.rs` counts incoming RTP sequence gaps for loss and sends
+both as `UiEvent::VoiceStats` every 5 s; outgoing loss would need RTCP
+receiver reports from Discord and isn't shown.
+
 ## Risks
 
 - No known open-source client runs songbird on a user account. The voice

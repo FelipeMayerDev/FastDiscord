@@ -67,6 +67,9 @@ tela abre um modal para escolher a fonte, a resolução e a taxa de quadros
   cabeçalho (ativos e arquivados públicos), "Criar tópico" no menu de
   contexto da mensagem, resumo "N mensagens" e fóruns listando postagens.
 - Canal de voz ativo verde, tempo conectado, soundboard e DJ.
+- Clicar nas barras de sinal de Voz conectada abre a qualidade da conexão:
+  gráfico de ping dos últimos 5 minutos, ping atual/médio, perda de pacotes
+  recebidos, servidor e codec; a cor das barras segue o ping e a perda.
 - Bandeja no Linux e Windows, com restaurar janela, sair e continuar chamadas
   em segundo plano ao fechar a janela.
 

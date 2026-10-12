@@ -278,6 +278,14 @@ pub enum UiEvent {
         error: String,
     },
     VoiceLeft,
+    /// Connection quality every few seconds while in voice: voice-gateway
+    /// ping, incoming packet loss (0–1; `None` with no audio received) and
+    /// the voice server.
+    VoiceStats {
+        ping_ms: Option<u32>,
+        loss: Option<f32>,
+        endpoint: String,
+    },
     /// A user started or stopped producing audio (speaking indicator).
     VoiceSpeaking {
         user_id: String,

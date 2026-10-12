@@ -12,7 +12,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU64;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -120,6 +120,12 @@ struct Shared {
     roster: Mutex<Vec<u64>>,
     /// Already asked for a desync rejoin since the last successful mapping.
     desync_reported: AtomicBool,
+    /// Incoming RTP since the last `VoiceStats`: packets the senders
+    /// emitted (by sequence number) and packets that arrived.
+    rtp_expected: AtomicU32,
+    rtp_received: AtomicU32,
+    /// Voice server of the live connection, for the quality popover.
+    endpoint: Mutex<String>,
 }
 
 impl Default for Shared {
@@ -133,6 +139,9 @@ impl Default for Shared {
             capture: Arc::new(Mutex::new(Capture::new(0, false, Ring::detached()))),
             roster: Mutex::new(Vec::new()),
             desync_reported: AtomicBool::new(false),
+            rtp_expected: AtomicU32::new(0),
+            rtp_received: AtomicU32::new(0),
+            endpoint: Mutex::new(String::new()),
         }
     }
 }
@@ -208,6 +217,7 @@ struct TickMixer {
     /// its audio cannot be attributed or decrypted, and after a few seconds
     /// the session is provably out of sync (docs/VOICE.md).
     unmapped_since: Mutex<Option<(Instant, bool)>>,
+    last_stats: Mutex<Instant>,
 }
 
 #[async_trait]
@@ -216,6 +226,7 @@ impl EventHandler for TickMixer {
         let EventContext::VoiceTick(tick) = ctx else {
             return None;
         };
+        self.send_stats();
         let map = self.shared.ssrc_map.lock().unwrap();
         let deafened = self.shared.deafened.load(Ordering::Relaxed);
         if !deafened && !tick.speaking.is_empty() {
@@ -334,6 +345,40 @@ impl EventHandler for TickMixer {
     }
 }
 
+impl TickMixer {
+    /// Every few seconds: voice-gateway ping and incoming packet loss for
+    /// the connection-quality popover.
+    fn send_stats(&self) {
+        let mut last = self.last_stats.lock().unwrap();
+        if last.elapsed() < STATS_EVERY {
+            return;
+        }
+        *last = Instant::now();
+        let expected = self.shared.rtp_expected.swap(0, Ordering::Relaxed);
+        let received = self.shared.rtp_received.swap(0, Ordering::Relaxed);
+        let ping_ms = songbird::driver::WS_PING_MS.load(Ordering::Relaxed);
+        self.event_tx.send(UiEvent::VoiceStats {
+            ping_ms: (ping_ms > 0).then_some(ping_ms),
+            loss: (expected > 0)
+                .then(|| expected.saturating_sub(received) as f32 / expected as f32),
+            endpoint: self.shared.endpoint.lock().unwrap().clone(),
+        });
+    }
+}
+
+const STATS_EVERY: Duration = Duration::from_secs(5);
+
+/// Packets a sender emitted up to and including `seq`, given the last
+/// sequence number seen from it: 0 for a duplicate or late packet, 1 for a
+/// first packet or a jump too large to be loss (a restarted stream).
+fn rtp_gap(last: Option<u16>, seq: u16) -> u32 {
+    match last.map(|last| seq.wrapping_sub(last)) {
+        Some(0) | Some(32768..) => 0,
+        Some(gap @ 1..=1000) => gap.into(),
+        _ => 1,
+    }
+}
+
 /// Watches raw RTP arrivals: packets flowing from an SSRC with no user
 /// mapping for a few seconds means the session lost sync (fresh SSRC after
 /// a far-side reconnect, DAVE re-key) — the decode-failure state that never
@@ -342,6 +387,8 @@ struct RtpWatch {
     shared: Arc<Shared>,
     event_tx: EventTx,
     first_seen: Mutex<HashMap<u32, Instant>>,
+    /// Last sequence number per SSRC, for the loss count.
+    last_seq: Mutex<HashMap<u32, u16>>,
 }
 
 #[async_trait]
@@ -351,6 +398,15 @@ impl EventHandler for RtpWatch {
             return None;
         };
         let ssrc = packet.rtp().get_ssrc();
+        let seq = packet.rtp().get_sequence().0.0;
+        let mut last_seq = self.last_seq.lock().unwrap();
+        let gap = rtp_gap(last_seq.get(&ssrc).copied(), seq);
+        if gap > 0 {
+            last_seq.insert(ssrc, seq);
+            self.shared.rtp_expected.fetch_add(gap, Ordering::Relaxed);
+            self.shared.rtp_received.fetch_add(1, Ordering::Relaxed);
+        }
+        drop(last_seq);
         if self.shared.ssrc_map.lock().unwrap().contains_key(&ssrc) {
             let mut first_seen = self.first_seen.lock().unwrap();
             first_seen.remove(&ssrc);
@@ -442,6 +498,7 @@ pub async fn run(
             dump_samples: std::sync::atomic::AtomicUsize::new(0),
             last_log: Mutex::new(Instant::now()),
             unmapped_since: Mutex::new(None),
+            last_stats: Mutex::new(Instant::now()),
         },
     );
     driver.add_global_event(
@@ -456,6 +513,7 @@ pub async fn run(
             shared: Arc::clone(&shared),
             event_tx: event_tx.clone(),
             first_seen: Mutex::new(HashMap::new()),
+            last_seq: Mutex::new(HashMap::new()),
         },
     );
     driver.add_global_event(
@@ -804,6 +862,7 @@ async fn try_connect(
     match driver.connect(info.clone()).await {
         Ok(()) => {
             log::info!("voz conectada ao canal {}", info.channel_id);
+            *shared.endpoint.lock().unwrap() = info.endpoint.clone();
             ensure_audio(driver, shared, audio_links, audio_cfg);
             // Our own green indicator comes from the mic's voice-activity
             // gate; VoiceTicks only carry other users.
@@ -865,5 +924,21 @@ fn conn_channel(conn: &Conn) -> String {
     match conn {
         Conn::Live { info, .. } => info.channel_id.to_string(),
         _ => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rtp_gap;
+
+    #[test]
+    fn rtp_gap_counts_lost_packets_across_wraparound() {
+        assert_eq!(rtp_gap(None, 7), 1);
+        assert_eq!(rtp_gap(Some(7), 8), 1);
+        assert_eq!(rtp_gap(Some(7), 10), 3);
+        assert_eq!(rtp_gap(Some(65535), 1), 2);
+        assert_eq!(rtp_gap(Some(10), 10), 0);
+        assert_eq!(rtp_gap(Some(10), 9), 0);
+        assert_eq!(rtp_gap(Some(10), 20_000), 1);
     }
 }

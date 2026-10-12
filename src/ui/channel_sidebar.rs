@@ -772,7 +772,24 @@ fn voice_panel(app: &mut VesktopApp, ui: &mut egui::Ui) {
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 40.0), Sense::hover());
     ui.painter().rect_filled(rect, 0.0, theme::RAIL);
-    signal_icon(ui, theme::GREEN, pos2(rect.left() + 12.0, rect.center().y));
+    let connected = matches!(app.voice, VoiceConn::Connected { .. });
+    let signal_center = pos2(rect.left() + 12.0, rect.center().y);
+    let signal_color = if connected {
+        quality_color(app.voice_stats.back().copied())
+    } else {
+        theme::GREEN
+    };
+    signal_icon(ui, signal_color, signal_center);
+    if connected {
+        let signal = ui
+            .interact(
+                egui::Rect::from_center_size(signal_center, Vec2::splat(22.0)),
+                ui.id().with("voice_quality"),
+                Sense::click(),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        quality_popup(app, &signal);
+    }
     ui.painter().text(
         pos2(rect.left() + 34.0, rect.center().y - 8.0),
         egui::Align2::LEFT_CENTER,
@@ -881,6 +898,135 @@ fn voice_panel(app: &mut VesktopApp, ui: &mut egui::Ui) {
 
     if leave {
         app.leave_voice();
+    }
+}
+
+/// Discord's signal colors from the latest sample: yellow from 250 ms or
+/// 5 % loss, red from 500 ms or 15 %.
+fn quality_color(sample: Option<(Option<u32>, Option<f32>)>) -> egui::Color32 {
+    let (ping, loss) = sample.unwrap_or_default();
+    let (ping, loss) = (ping.unwrap_or(0), loss.unwrap_or(0.0));
+    if ping >= 500 || loss >= 0.15 {
+        theme::RED
+    } else if ping >= 250 || loss >= 0.05 {
+        theme::YELLOW
+    } else {
+        theme::GREEN
+    }
+}
+
+/// Click on the signal bars: ping graph of the last minutes plus the
+/// connection details, like Discord's voice connection popover.
+fn quality_popup(app: &VesktopApp, anchor: &egui::Response) {
+    egui::Popup::menu(anchor)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .align(egui::RectAlign::TOP_START)
+        .gap(8.0)
+        .width(280.0)
+        .show(|ui| {
+            ui.label(RichText::new("Conexão de voz").strong().color(theme::TEXT));
+            ui.add_space(6.0);
+            let pings: Vec<u32> = app.voice_stats.iter().filter_map(|s| s.0).collect();
+            ping_graph(ui, &app.voice_stats);
+            ui.add_space(6.0);
+            let row = |ui: &mut egui::Ui, label: &str, value: String| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(label).size(12.5).color(theme::MUTED));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(RichText::new(value).size(12.5).color(theme::TEXT));
+                    });
+                });
+            };
+            let ms = |value: Option<u32>| value.map_or("—".to_string(), |v| format!("{v} ms"));
+            row(ui, "Ping atual", ms(pings.last().copied()));
+            let average =
+                (!pings.is_empty()).then(|| pings.iter().sum::<u32>() / pings.len() as u32);
+            row(ui, "Ping médio", ms(average));
+            let loss = app.voice_stats.iter().rev().find_map(|s| s.1);
+            row(
+                ui,
+                "Perda de pacotes recebidos",
+                loss.map_or("—".to_string(), |l| format!("{:.1} %", l * 100.0)),
+            );
+            let server = app.voice_endpoint.split(':').next().unwrap_or_default();
+            row(
+                ui,
+                "Servidor",
+                if server.is_empty() {
+                    "—".into()
+                } else {
+                    server.to_string()
+                },
+            );
+            row(
+                ui,
+                "Codec",
+                format!("Opus {} kbps", app.settings.opus_bitrate_kbps),
+            );
+            ui.add_space(2.0);
+            ui.label(
+                RichText::new("Ping do gateway de voz; perda medida no áudio que chega.")
+                    .size(11.0)
+                    .color(theme::MUTED),
+            );
+        });
+}
+
+/// Ping line over the sampled history (one point per 5 s), scaled to the
+/// worst sample, with the 250/500 ms bands Discord colors by.
+fn ping_graph(ui: &mut egui::Ui, samples: &std::collections::VecDeque<(Option<u32>, Option<f32>)>) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 72.0), Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 4.0, theme::RAIL);
+    let max = samples
+        .iter()
+        .filter_map(|s| s.0)
+        .max()
+        .unwrap_or(0)
+        .max(100) as f32
+        * 1.2;
+    let y = |ms: f32| rect.bottom() - 4.0 - (ms / max).min(1.0) * (rect.height() - 8.0);
+    for (band, color) in [(250.0, theme::YELLOW), (500.0, theme::RED)] {
+        if band < max {
+            painter.hline(
+                rect.x_range(),
+                y(band),
+                egui::Stroke::new(1.0, color.gamma_multiply(0.4)),
+            );
+        }
+    }
+    painter.text(
+        rect.left_top() + Vec2::new(4.0, 2.0),
+        egui::Align2::LEFT_TOP,
+        format!("{} ms", max as u32),
+        egui::FontId::proportional(10.0),
+        theme::MUTED,
+    );
+    // 60 slots = 5 minutes; the newest sample sits at the right edge.
+    let step = rect.width() / 59.0;
+    let offset = 60 - samples.len().min(60);
+    let points: Vec<egui::Pos2> = samples
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| {
+            s.0.map(|ms| pos2(rect.left() + (offset + i) as f32 * step, y(ms as f32)))
+        })
+        .collect();
+    if points.len() == 1 {
+        painter.circle_filled(points[0], 2.0, theme::GREEN);
+    }
+    painter.add(egui::Shape::line(
+        points,
+        egui::Stroke::new(1.5, theme::GREEN),
+    ));
+    if samples.iter().all(|s| s.0.is_none()) {
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "Medindo…",
+            egui::FontId::proportional(12.0),
+            theme::MUTED,
+        );
     }
 }
 

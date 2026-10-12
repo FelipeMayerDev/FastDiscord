@@ -192,6 +192,10 @@ pub struct VesktopApp {
     pub(crate) speaking: HashSet<String>,
     /// Soundboard senders, lit as speaking until their sound ends.
     pub(crate) sound_speaking: HashMap<String, Instant>,
+    /// Connection-quality samples while in voice, oldest first: (ping ms,
+    /// incoming loss 0–1), one every 5 s (backend/voice.rs).
+    pub(crate) voice_stats: std::collections::VecDeque<(Option<u32>, Option<f32>)>,
+    pub(crate) voice_endpoint: String,
     /// Own mic/headphone flags; op 4 sends them, the panel shows them.
     pub(crate) voice_muted: bool,
     /// Screen share capture (docs/SCREENSHARE.md); local preview for now.
@@ -313,6 +317,8 @@ impl VesktopApp {
             voice_users_pending: HashSet::new(),
             speaking: HashSet::new(),
             sound_speaking: HashMap::new(),
+            voice_stats: Default::default(),
+            voice_endpoint: String::new(),
             voice_muted: false,
             screen: None,
             screen_texture: None,
@@ -2269,6 +2275,20 @@ impl VesktopApp {
                 self.voice_connected_at = None;
                 self.speaking.clear();
                 self.sound_speaking.clear();
+                self.voice_stats.clear();
+                self.voice_endpoint.clear();
+            }
+            UiEvent::VoiceStats {
+                ping_ms,
+                loss,
+                endpoint,
+            } => {
+                // Five minutes of history.
+                if self.voice_stats.len() == 60 {
+                    self.voice_stats.pop_front();
+                }
+                self.voice_stats.push_back((ping_ms, loss));
+                self.voice_endpoint = endpoint;
             }
             UiEvent::GuildRoles { guild_id, roles } => {
                 let roles = roles.into_iter().map(|role| (role.id.clone(), role));
