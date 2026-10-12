@@ -38,12 +38,17 @@ não deve haver um espaço reservado para uma quarta ação.
 ## Já implementado
 
 - Noto Sans e família em negrito; cores e espaçamento compartilhados.
+- Configurações em modal centralizado, com fundo escurecido, navegação por
+  seção, conteúdo rolável e abas no topo em janelas estreitas. Fecha por
+  botão, Escape ou clique fora; atalhos de canais ficam bloqueados.
 - Separadores de datas, agrupamento de mensagens, respostas, indicador de
   novas mensagens, digitação, caixa multilinha e links clicáveis.
 - Avatares e status, convites com cartão, GIFs e visualizador de imagens.
 - Amigos e solicitações, busca no histórico em cache, arquivos, emoji básico
   e envio de GIF por URL.
 - Canal de voz ativo verde, tempo conectado, soundboard e DJ.
+- Bandeja no Linux e Windows, com restaurar janela, sair e continuar chamadas
+  em segundo plano ao fechar a janela.
 
 ## Pendências de paridade
 
@@ -51,3 +56,11 @@ Pastas e ordem de servidores dependem do settings protobuf do Discord.
 Reações, threads, pins e renderização completa de emojis personalizados
 continuam no roteiro de [PORT.md](PORT.md). Os nomes e capacidades dos
 controles devem acompanhar recursos realmente implementados.
+
+## DJ compartilhado
+
+O botão DJ abre a playlist em um modal no padrão das configurações. Uma sessão
+ativa mostra um accordion acima de Voz conectada, com voltar, play/pause,
+próxima, parar e playlist. Todos na mesma sala com o mesmo relay recebem os
+controles e a fila; o volume é local. O DJ não cria um usuário na sala nem envia
+áudio pelo microfone. Configuração e operação: [DJ.md](DJ.md).

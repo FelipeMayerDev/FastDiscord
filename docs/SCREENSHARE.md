@@ -4,7 +4,7 @@ Electron Vesktop only owns the picker (`src/main/screenShare.ts`,
 `ScreenSharePicker.tsx`: one portal source on Wayland, resolution/fps,
 venmic audio); Discord's web JS does the rest over WebRTC. Here the whole
 stack is ours, with two backends behind one button, picked in Settings →
-"Compartilhamento de tela":
+"Tela e transmissão":
 
 | Setting "Usar backend de compartilhamento do FockyTV" | Share | Watch |
 |---|---|---|

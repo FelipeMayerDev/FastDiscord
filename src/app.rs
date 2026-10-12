@@ -18,8 +18,31 @@ use crate::settings::{Settings, Theme};
 use crate::theme;
 use crate::ui;
 
-/// Commands the experimental tray can hand to the app.
+const STARTUP_CACHE_KEY: &str = "startup_cache_v1";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StartupCache {
+    session: String,
+    me: User,
+    guilds: Vec<Guild>,
+    dm_channels: Vec<Channel>,
+    guild_channels: HashMap<String, Vec<Channel>>,
+    relationships: Vec<Relationship>,
+}
+
+fn session_key(token: &str) -> String {
+    use rsa::sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(token.as_bytes()))
+}
+
+fn load_startup_cache(storage: &dyn eframe::Storage, token: &str) -> Option<StartupCache> {
+    let cache: StartupCache = eframe::get_value(storage, STARTUP_CACHE_KEY)?;
+    (cache.session == session_key(token)).then_some(cache)
+}
+
+/// Actions sent by the native tray menu.
 pub enum TrayCommand {
+    Show,
     Quit,
 }
 
@@ -122,6 +145,10 @@ pub struct VesktopApp {
     #[cfg_attr(not(feature = "tray"), allow(dead_code))]
     tray_tx: std::sync::mpsc::Sender<TrayCommand>,
     pub(crate) tray_rx: std::sync::mpsc::Receiver<TrayCommand>,
+    #[cfg(feature = "tray")]
+    tray: Option<crate::tray::Tray>,
+    quitting: bool,
+    can_hide_window: bool,
 
     pub(crate) conn: ConnState,
     pub(crate) me: Option<User>,
@@ -303,11 +330,16 @@ impl VesktopApp {
             qr: QrState::Idle,
             tray_tx,
             tray_rx,
+            #[cfg(feature = "tray")]
+            tray: None,
+            quitting: false,
+            can_hide_window: _cc
+                .winit_window()
+                .is_some_and(|window| window.is_visible().is_some()),
         };
 
-        #[cfg(feature = "tray")]
-        if let Err(err) = crate::tray::install(app.tray_tx.clone()) {
-            log::warn!("failed to install the system tray: {err}");
+        if _cc.winit_window().is_some() {
+            app.configure_tray(&_cc.egui_ctx);
         }
 
         // Image loaders for the animated WebP splash.
@@ -315,9 +347,77 @@ impl VesktopApp {
         theme::install_fonts(&_cc.egui_ctx);
 
         if let Some(token) = app.settings.token.clone() {
+            if let Some(cache) = _cc
+                .storage
+                .and_then(|storage| load_startup_cache(storage, &token))
+            {
+                app.me = Some(cache.me);
+                app.guilds = cache.guilds;
+                app.dm_channels = cache.dm_channels;
+                app.guild_channels = cache.guild_channels;
+                app.relationships = cache.relationships;
+                log::info!(
+                    "cache inicial restaurado: {} servidores, {} DMs",
+                    app.guilds.len(),
+                    app.dm_channels.len()
+                );
+                for channel in &app.dm_channels {
+                    app.channel_index.insert(channel.id.clone(), ChannelRef::Dm);
+                    for user in &channel.recipients {
+                        app.user_cache.insert(user.id.clone(), user.clone());
+                    }
+                }
+                for (guild_id, channels) in &app.guild_channels {
+                    for channel in channels {
+                        app.channel_index
+                            .insert(channel.id.clone(), ChannelRef::Guild(guild_id.clone()));
+                    }
+                }
+                app.selected_guild = app
+                    .settings
+                    .selected_guild_id
+                    .clone()
+                    .filter(|id| app.guilds.iter().any(|guild| &guild.id == id));
+                app.selected_channel = app
+                    .settings
+                    .selected_channel_id
+                    .clone()
+                    .filter(|id| app.channel_index.contains_key(id));
+            }
             app.start_backend(token);
         }
         app
+    }
+
+    pub(crate) fn tray_available(&self) -> bool {
+        if !self.can_hide_window {
+            return false;
+        }
+        #[cfg(feature = "tray")]
+        {
+            self.tray
+                .as_ref()
+                .is_some_and(crate::tray::Tray::is_available)
+        }
+        #[cfg(not(feature = "tray"))]
+        {
+            false
+        }
+    }
+
+    pub(crate) fn configure_tray(&mut self, ctx: &egui::Context) {
+        #[cfg(feature = "tray")]
+        {
+            self.tray = None;
+            if self.settings.tray {
+                match crate::tray::install(self.tray_tx.clone(), ctx.clone(), &self.handle) {
+                    Ok(tray) => self.tray = Some(tray),
+                    Err(err) => log::warn!("bandeja indisponível: {err}"),
+                }
+            }
+        }
+        #[cfg(not(feature = "tray"))]
+        let _ = ctx;
     }
 
     pub(crate) fn send(&self, command: Command) {
@@ -468,6 +568,7 @@ impl VesktopApp {
     }
 
     pub(crate) fn logout(&mut self) {
+        self.extras.dj.disconnect();
         self.finish_screen_share();
         if let Some(task) = self.backend.take() {
             task.abort();
@@ -520,14 +621,15 @@ impl VesktopApp {
         self.settings.selected_channel_id = None;
         if self.guild_channels.contains_key(guild_id) {
             self.restore_channel_for_guild(guild_id);
-        } else {
-            self.loading_guilds.insert(guild_id.to_string());
+        }
+        if self.loading_guilds.insert(guild_id.to_string()) {
             self.send(Command::LoadGuildChannels {
                 guild_id: guild_id.to_string(),
             });
         }
         self.send(Command::SubscribeGuild {
             guild_id: guild_id.to_string(),
+            user_ids: Vec::new(),
         });
         self.settings.save();
     }
@@ -580,7 +682,37 @@ impl VesktopApp {
         }
         self.settings.selected_channel_id = Some(channel_id.clone());
         self.settings.save();
+        self.request_channel_presences(&channel_id);
         self.fetch_channel_if_needed(channel_id);
+    }
+
+    fn request_channel_presences(&self, channel_id: &str) {
+        let Some(ChannelRef::Guild(guild_id)) = self.channel_index.get(channel_id) else {
+            return;
+        };
+        let mut user_ids: Vec<String> = self
+            .messages
+            .get(channel_id)
+            .into_iter()
+            .flatten()
+            .map(|message| message.author.id.clone())
+            .collect();
+        if let Some(roster) = self.voice_states.get(guild_id) {
+            user_ids.extend(
+                roster
+                    .values()
+                    .filter(|state| state.channel_id.is_some())
+                    .map(|state| state.user_id.clone()),
+            );
+        }
+        user_ids.sort();
+        user_ids.dedup();
+        if !user_ids.is_empty() {
+            self.send(Command::SubscribeGuild {
+                guild_id: guild_id.clone(),
+                user_ids,
+            });
+        }
     }
 
     fn fetch_channel_if_needed(&mut self, channel_id: String) {
@@ -1140,8 +1272,8 @@ impl VesktopApp {
         if matches!(self.voice, VoiceConn::Connected { .. }) {
             play_sound(Sound::Disconnect);
         }
-        // ponytail: a desync rejoin passes through here too and ends the DJ.
-        self.extras.music.stop();
+        // A desync rejoin leaves the shared DJ locally; other listeners keep playing.
+        self.extras.dj.disconnect();
         self.stop_screen_share();
         self.stop_watching();
         self.voice = VoiceConn::Disconnected;
@@ -1277,7 +1409,10 @@ impl VesktopApp {
             {
                 ui::chat::attachment_selected(ctx, channel_id, path);
             }
-            self.handle_event(event, ctx.input(|input| input.focused));
+            self.handle_event(
+                event,
+                ctx.input(|input| input.focused && input.viewport().visible().unwrap_or(true)),
+            );
             ctx.request_repaint();
         }
     }
@@ -1325,6 +1460,20 @@ impl VesktopApp {
                     .selected_guild_id
                     .clone()
                     .filter(|id| guilds.iter().any(|guild| &guild.id == id));
+                self.guild_channels
+                    .retain(|id, _| guilds.iter().any(|guild| &guild.id == id));
+                self.channel_index.retain(|_, channel| match channel {
+                    ChannelRef::Guild(id) => guilds.iter().any(|guild| &guild.id == id),
+                    ChannelRef::Dm => true,
+                });
+                if self
+                    .selected_guild
+                    .as_ref()
+                    .is_some_and(|id| !guilds.iter().any(|guild| &guild.id == id))
+                {
+                    self.selected_guild = None;
+                    self.selected_channel = None;
+                }
                 self.guilds = guilds;
                 if let Some(id) = restored {
                     self.select_guild(&id);
@@ -1378,6 +1527,8 @@ impl VesktopApp {
                 self.handle_event(UiEvent::MessageCreated { message }, focused);
             }
             UiEvent::DmChannelsLoaded { channels } => {
+                self.channel_index
+                    .retain(|_, channel| !matches!(channel, ChannelRef::Dm));
                 for channel in &channels {
                     self.channel_index
                         .insert(channel.id.clone(), ChannelRef::Dm);
@@ -1401,6 +1552,14 @@ impl VesktopApp {
                 });
                 self.dm_channels = channels;
                 if self.selected_guild.is_none()
+                    && self
+                        .selected_channel
+                        .as_ref()
+                        .is_some_and(|id| !self.channel_index.contains_key(id))
+                {
+                    self.selected_channel = None;
+                }
+                if self.selected_guild.is_none()
                     && self.selected_channel.is_none()
                     && self.home_page == ui::friends::HomePage::DirectMessages
                 {
@@ -1410,6 +1569,9 @@ impl VesktopApp {
                 }
             }
             UiEvent::GuildChannelsLoaded { guild_id, channels } => {
+                self.channel_index.retain(
+                    |_, channel| !matches!(channel, ChannelRef::Guild(id) if id == &guild_id),
+                );
                 for channel in &channels {
                     self.channel_index
                         .insert(channel.id.clone(), ChannelRef::Guild(guild_id.clone()));
@@ -1417,8 +1579,12 @@ impl VesktopApp {
                 self.guild_channels.insert(guild_id.clone(), channels);
                 self.loading_guilds.remove(&guild_id);
                 if self.selected_guild.as_deref() == Some(guild_id.as_str())
-                    && self.selected_channel.is_none()
+                    && self
+                        .selected_channel
+                        .as_ref()
+                        .is_none_or(|id| !self.channel_index.contains_key(id))
                 {
+                    self.selected_channel = None;
                     self.restore_channel_for_guild(&guild_id);
                 }
             }
@@ -1452,6 +1618,9 @@ impl VesktopApp {
                     // response overlap the cache: merge and dedupe.
                     merge_messages(entry, messages);
                 }
+                if self.selected_channel.as_deref() == Some(channel_id.as_str()) {
+                    self.request_channel_presences(&channel_id);
+                }
                 if let Some(after) = next_after {
                     self.stale_channels
                         .insert(channel_id.clone(), after.clone());
@@ -1471,6 +1640,10 @@ impl VesktopApp {
             UiEvent::MessageCreated { message } => {
                 let selected =
                     self.selected_channel.as_deref() == Some(message.channel_id.as_str());
+                let new_author = self
+                    .messages
+                    .get(&message.channel_id)
+                    .is_none_or(|list| !list.iter().any(|old| old.author.id == message.author.id));
                 let duplicate = self
                     .messages
                     .get(&message.channel_id)
@@ -1516,6 +1689,9 @@ impl VesktopApp {
                                 .or_insert_with(|| message.id.clone());
                         }
                     }
+                }
+                if selected && new_author {
+                    self.request_channel_presences(&message.channel_id);
                 }
                 if !selected && self.channel_index.contains_key(&message.channel_id) {
                     *self.unread.entry(message.channel_id.clone()).or_insert(0) += 1;
@@ -1595,6 +1771,11 @@ impl VesktopApp {
                     self.join_voice(guild_id.clone(), channel_id);
                 }
                 self.voice_states.insert(guild_id.clone(), roster);
+                if self.selected_guild.as_deref() == Some(guild_id.as_str())
+                    && let Some(channel_id) = self.selected_channel.as_deref()
+                {
+                    self.request_channel_presences(channel_id);
+                }
                 if let VoiceConn::Connecting {
                     guild_id: active_guild,
                     channel_id,
@@ -1621,6 +1802,12 @@ impl VesktopApp {
                     self.join_voice(guild_id.clone(), channel_id);
                 }
                 let user_id = state.user_id.clone();
+                let joined = state.channel_id.is_some()
+                    && self
+                        .voice_states
+                        .get(&guild_id)
+                        .and_then(|roster| roster.get(&user_id))
+                        .is_none_or(|previous| previous.channel_id.is_none());
                 if let VoiceConn::Connected { channel_id, .. } = &self.voice
                     && !is_me
                     && let Some(sound) = ui::voice_extras::roster_sound(
@@ -1637,6 +1824,12 @@ impl VesktopApp {
                     .entry(guild_id.clone())
                     .or_default()
                     .insert(user_id, state);
+                if joined
+                    && self.selected_guild.as_deref() == Some(guild_id.as_str())
+                    && let Some(channel_id) = self.selected_channel.as_deref()
+                {
+                    self.request_channel_presences(channel_id);
+                }
                 // Always seed the active call, including departures and moves to another room.
                 if let VoiceConn::Connecting {
                     guild_id: active_guild,
@@ -1690,6 +1883,7 @@ impl VesktopApp {
                 self.push_voice_roster(&channel_id);
             }
             UiEvent::VoiceFailed { error } => {
+                self.extras.dj.disconnect();
                 log::warn!("voz falhou: {error}");
                 self.voice = VoiceConn::Failed { error };
                 self.voice_connected_at = None;
@@ -1820,7 +2014,7 @@ impl VesktopApp {
                 if matches!(self.voice, VoiceConn::Connected { .. }) {
                     play_sound(Sound::Disconnect);
                 }
-                self.extras.music.stop();
+                self.extras.dj.disconnect();
                 self.stop_screen_share();
                 self.stop_watching();
                 self.voice = VoiceConn::Disconnected;
@@ -1863,7 +2057,75 @@ impl VesktopApp {
 }
 
 impl eframe::App for VesktopApp {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        while let Ok(command) = self.tray_rx.try_recv() {
+            match command {
+                TrayCommand::Show => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+                TrayCommand::Quit => {
+                    self.quitting = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    return;
+                }
+            }
+        }
+        if ctx.input(|input| input.viewport().close_requested())
+            && !self.quitting
+            && self.settings.minimize_to_tray
+            && self.tray_available()
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
+        self.poll_events(ctx);
+        self.poll_fockytv();
+        let dj_room = match &self.voice {
+            VoiceConn::Connected {
+                guild_id,
+                channel_id,
+            } => Some(format!("{guild_id}:{channel_id}")),
+            _ => None,
+        };
+        if !self.settings_open || dj_room.is_none() {
+            self.extras.dj.configure(
+                &self.handle,
+                ctx,
+                dj_room,
+                &self.settings.dj_url,
+                &self.settings.dj_key,
+            );
+        }
+        self.extras.dj.music.set_volume(if self.voice_deaf {
+            0
+        } else {
+            self.settings.dj_volume
+        });
+    }
+
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        if let (Some(token), Some(me)) = (&self.settings.token, &self.me) {
+            eframe::set_value(
+                storage,
+                STARTUP_CACHE_KEY,
+                &StartupCache {
+                    session: session_key(token),
+                    me: me.clone(),
+                    guilds: self.guilds.clone(),
+                    dm_channels: self.dm_channels.clone(),
+                    guild_channels: self.guild_channels.clone(),
+                    relationships: self.relationships.clone(),
+                },
+            );
+        } else {
+            storage.remove_string(STARTUP_CACHE_KEY);
+        }
+    }
+
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.extras.dj.disconnect();
         self.finish_screen_share();
     }
 
@@ -1882,15 +2144,9 @@ impl eframe::App for VesktopApp {
             ctx.set_pixels_per_point(target_scale);
         }
 
-        while let Ok(command) = self.tray_rx.try_recv() {
-            if matches!(command, TrayCommand::Quit) {
-                self.settings.save();
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                return;
-            }
+        if self.quitting {
+            return;
         }
-
-        self.poll_events(ctx);
 
         ui::login::compact_window(ctx, self.me.is_none());
         if self.me.is_none() {
@@ -1908,12 +2164,8 @@ impl eframe::App for VesktopApp {
             return;
         }
 
-        // Shortcuts (docs/UI.md §5): Esc closes settings, Alt+↑/↓ moves
-        // through the channel list. Ctrl+K quick switcher comes last.
-        if self.settings_open && ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
-            self.settings_open = false;
-        }
-        if ctx.input(|input| input.modifiers.alt) {
+        // Alt+↑/↓ moves through channels when no settings modal is open.
+        if !self.settings_open && ctx.input(|input| input.modifiers.alt) {
             if ctx.input(|input| input.key_pressed(egui::Key::ArrowDown)) {
                 self.switch_channel(1);
             } else if ctx.input(|input| input.key_pressed(egui::Key::ArrowUp)) {
@@ -1957,7 +2209,6 @@ impl eframe::App for VesktopApp {
         if self.watch.is_some() && !self.watch_docked() {
             ui::screen_share::paint_floating(self, ctx);
         }
-        self.poll_fockytv();
         if self.settings.fockytv_share && matches!(self.voice, VoiceConn::Connected { .. }) {
             ctx.request_repaint_after(Duration::from_secs(5));
         }
@@ -1995,6 +2246,246 @@ fn merge_messages(cache: &mut Vec<Message>, page: Vec<Message>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tray_actions_work_without_painting_and_quit_does_not_hide_again() {
+        let (_rt, mut app, _, _) = test_app();
+        let ctx = egui::Context::default();
+        let mut frame = eframe::Frame::_new_kittest();
+        app.tray_tx.send(TrayCommand::Show).unwrap();
+        let output = ctx.run_logic(&egui::RawInput::default(), |ctx| {
+            eframe::App::logic(&mut app, ctx, &mut frame)
+        });
+        let commands = &output.viewport_commands[&egui::ViewportId::ROOT];
+        assert!(
+            commands
+                .iter()
+                .any(|command| matches!(command, egui::ViewportCommand::Visible(true)))
+        );
+        assert!(
+            commands
+                .iter()
+                .any(|command| matches!(command, egui::ViewportCommand::Focus))
+        );
+        app.tray_tx.send(TrayCommand::Quit).unwrap();
+        let output = ctx.run_logic(&egui::RawInput::default(), |ctx| {
+            eframe::App::logic(&mut app, ctx, &mut frame)
+        });
+        assert!(app.quitting);
+        assert!(
+            output.viewport_commands[&egui::ViewportId::ROOT]
+                .iter()
+                .any(|command| matches!(command, egui::ViewportCommand::Close))
+        );
+    }
+
+    #[test]
+    fn closing_without_a_tray_does_not_hide_the_window() {
+        let (_rt, mut app, _, _) = test_app();
+        let ctx = egui::Context::default();
+        let mut input = egui::RawInput::default();
+        input
+            .viewports
+            .get_mut(&egui::ViewportId::ROOT)
+            .unwrap()
+            .events
+            .push(egui::ViewportEvent::Close);
+        let mut frame = eframe::Frame::_new_kittest();
+        let output = ctx.run_logic(&input, |ctx| eframe::App::logic(&mut app, ctx, &mut frame));
+        assert!(
+            output
+                .viewport_commands
+                .values()
+                .flatten()
+                .all(|command| !matches!(
+                    command,
+                    egui::ViewportCommand::CancelClose | egui::ViewportCommand::Visible(false)
+                ))
+        );
+    }
+
+    #[test]
+    fn settings_modal_stays_centered_and_fits_smaller_windows() {
+        let (_rt, mut app, _, _) = test_app();
+        let ctx = egui::Context::default();
+        app.settings_open = true;
+        for size in [egui::vec2(1280.0, 800.0), egui::vec2(480.0, 420.0)] {
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+            for tab in [
+                ui::settings_window::SettingsTab::Account,
+                ui::settings_window::SettingsTab::Appearance,
+                ui::settings_window::SettingsTab::Voice,
+                ui::settings_window::SettingsTab::ScreenShare,
+                ui::settings_window::SettingsTab::Behavior,
+            ] {
+                app.settings_tab = tab;
+                for _ in 0..3 {
+                    let mut output = ctx.run_ui(
+                        egui::RawInput {
+                            screen_rect: Some(screen),
+                            ..Default::default()
+                        },
+                        |root| {
+                            ui::settings_window::show(&mut app, root.ctx());
+                        },
+                    );
+                    output.textures_delta.clear();
+                }
+                let rect = ctx
+                    .memory(|memory| memory.area_rect(egui::Id::new("settings_modal")))
+                    .unwrap();
+                assert!(rect.center().distance(screen.center()) <= 1.0, "{rect:?}");
+                assert!(screen.contains_rect(rect), "{tab:?}: {rect:?}");
+                assert!(app.settings_open);
+            }
+        }
+    }
+
+    #[test]
+    fn dj_player_fits_sidebar_and_playlist_is_centered() {
+        let (_rt, mut app, _, _) = test_app();
+        app.voice = VoiceConn::Connected {
+            guild_id: "1".into(),
+            channel_id: "2".into(),
+        };
+        let mut session = crate::backend::dj::Session::default();
+        session
+            .apply(
+                crate::backend::dj::Action::Add(crate::backend::dj::Track {
+                    video_id: "abcdefghijk".into(),
+                    title: "A very long title ".repeat(25),
+                    duration_ms: 180_000,
+                }),
+                1000,
+            )
+            .unwrap();
+        session.participants = 12;
+        {
+            let mut view = app.extras.dj.view.lock().unwrap();
+            view.session = Some(session);
+            view.connected = true;
+            view.clock = Some(crate::backend::dj::Clock::new(1000));
+        }
+        let ctx = Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(480.0, 420.0));
+        for collapsed in [false, true] {
+            app.extras.dj_collapsed = collapsed;
+            let expected = ui::voice_extras::music_height(&app);
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |root| {
+                    let response = root.allocate_ui_with_layout(
+                        egui::vec2(242.0, expected),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| ui::voice_extras::music_panel(&mut app, ui),
+                    );
+                    assert!(
+                        response.response.rect.height() <= expected + 1.0,
+                        "{:?}",
+                        response.response.rect
+                    );
+                    assert!(
+                        response.response.rect.width() <= 243.0,
+                        "{:?}",
+                        response.response.rect
+                    );
+                },
+            );
+            output.textures_delta.clear();
+        }
+        app.extras.music_open = true;
+        app.extras.dj.view.lock().unwrap().search_results = (0..10)
+            .map(|_| crate::backend::dj::Track {
+                video_id: "abcdefghijk".into(),
+                title: "Long search result ".repeat(30),
+                duration_ms: 180_000,
+            })
+            .collect();
+        for _ in 0..3 {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |root| ui::voice_extras::show(&mut app, root.ctx()),
+            );
+            output.textures_delta.clear();
+        }
+        let rect = ctx
+            .memory(|memory| memory.area_rect(egui::Id::new("dj_playlist")))
+            .unwrap();
+        assert!(screen.contains_rect(rect), "{rect:?}");
+        assert!(rect.center().distance(screen.center()) <= 1.0, "{rect:?}");
+    }
+
+    #[test]
+    fn startup_cache_is_scoped_to_the_session_and_ignores_corruption() {
+        #[derive(Default)]
+        struct Storage(std::collections::HashMap<String, String>);
+        impl eframe::Storage for Storage {
+            fn get_string(&self, key: &str) -> Option<String> {
+                self.0.get(key).cloned()
+            }
+            fn set_string(&mut self, key: &str, value: String) {
+                self.0.insert(key.into(), value);
+            }
+            fn remove_string(&mut self, key: &str) {
+                self.0.remove(key);
+            }
+            fn flush(&mut self) {}
+        }
+        let mut storage = Storage::default();
+        assert!(load_startup_cache(&storage, "session-a").is_none());
+        let cache = StartupCache {
+            session: session_key("session-a"),
+            me: serde_json::from_value(serde_json::json!({"id": "1", "username": "cached"}))
+                .unwrap(),
+            guilds: vec![crate::model::Guild {
+                id: "2".into(),
+                name: "Server".into(),
+                icon: None,
+            }],
+            dm_channels: Vec::new(),
+            guild_channels: std::collections::HashMap::new(),
+            relationships: Vec::new(),
+        };
+        eframe::set_value(&mut storage, STARTUP_CACHE_KEY, &cache);
+        let restored = load_startup_cache(&storage, "session-a").unwrap();
+        assert_eq!(restored.me.id, "1");
+        assert_eq!(restored.guilds[0].name, "Server");
+        assert!(load_startup_cache(&storage, "session-b").is_none());
+        assert!(!storage.0[STARTUP_CACHE_KEY].contains("session-a"));
+        eframe::Storage::set_string(&mut storage, STARTUP_CACHE_KEY, "broken".into());
+        assert!(load_startup_cache(&storage, "session-a").is_none());
+        let (_rt, mut app, _, _) = test_app();
+        app.settings.token = Some("session-a".into());
+        app.me = Some(cache.me);
+        app.guilds = cache.guilds;
+        eframe::App::save(&mut app, &mut storage);
+        assert!(load_startup_cache(&storage, "session-a").is_some());
+        app.settings.token = None;
+        eframe::App::save(&mut app, &mut storage);
+        assert!(!storage.0.contains_key(STARTUP_CACHE_KEY));
+    }
+
+    #[test]
+    fn refresh_discards_channels_of_removed_cached_guilds() {
+        let (_rt, mut app, mut commands, _) = test_app();
+        app.selected_guild = Some("old-guild".into());
+        app.selected_channel = Some("old-channel".into());
+        app.channel_index
+            .insert("old-channel".into(), ChannelRef::Guild("old-guild".into()));
+        app.guild_channels.insert("old-guild".into(), Vec::new());
+        app.handle_event(UiEvent::GuildsLoaded { guilds: Vec::new() }, true);
+        assert!(app.selected_guild.is_none());
+        assert!(app.selected_channel.is_none());
+        assert!(app.guild_channels.is_empty());
+        assert!(!app.channel_index.contains_key("old-channel"));
+        assert!(commands.try_recv().is_err());
+    }
+
     fn test_app() -> (
         tokio::runtime::Runtime,
         VesktopApp,

@@ -232,6 +232,8 @@ fn dispatch(value: Value, event_tx: &EventTx, voice_tx: &UnboundedSender<Wire>, 
     match kind {
         "READY" => {
             seed_presences(&data["presences"], event_tx);
+            seed_presences(&data["merged_presences"]["friends"], event_tx);
+            seed_presences(&data["merged_presences"]["guilds"], event_tx);
             let user = data.pointer("/user").cloned().unwrap_or(Value::Null);
             if let Ok(user) = serde_json::from_value::<User>(user) {
                 event_tx.send(UiEvent::Ready { user });
@@ -316,16 +318,21 @@ fn dispatch(value: Value, event_tx: &EventTx, voice_tx: &UnboundedSender<Wire>, 
                 });
             }
         }
-        "PRESENCE_UPDATE" => {
-            let user_id = data.pointer("/user/id").and_then(Value::as_str);
-            let status = data.get("status").and_then(Value::as_str);
-            if let (Some(user_id), Some(status)) = (user_id, status) {
-                let _ = event_tx.send(UiEvent::PresenceUpdate {
-                    user_id: user_id.to_string(),
-                    status: status.to_string(),
-                });
+        "GUILD_MEMBERS_CHUNK" => {
+            // Offline members can be omitted from the presence array.
+            if let Some(members) = data["members"].as_array() {
+                for member in members {
+                    if let Some(user_id) = member.pointer("/user/id").and_then(Value::as_str) {
+                        event_tx.send(UiEvent::PresenceUpdate {
+                            user_id: user_id.to_owned(),
+                            status: "offline".into(),
+                        });
+                    }
+                }
             }
+            seed_presences(&data["presences"], event_tx);
         }
+        "PRESENCE_UPDATE" => seed_presences(&data, event_tx),
         "VOICE_STATE_UPDATE" => match serde_json::from_value::<VoiceStatePayload>(data) {
             Ok(payload) => {
                 log::info!(
@@ -454,19 +461,34 @@ struct VoiceMember {
     user: User,
 }
 
-/// op 37 GUILD_SUBSCRIPTIONS_BULK for one guild, with the flags the
-/// official client sends on opening it (no member list ranges: the sidebar
-/// doesn't show one).
-fn subscribe_payload(guild_id: &str) -> String {
+/// op 37 subscribes to future changes; op 8 fetches the current status.
+fn subscribe_payload(guild_id: &str, user_ids: &[String]) -> String {
+    let mut subscription = json!({ "typing": true, "activities": true, "threads": true });
+    if !user_ids.is_empty() {
+        subscription["members"] = json!(user_ids);
+    }
     json!({
         "op": 37,
         "d": {
             "subscriptions": {
-                guild_id: { "typing": true, "activities": true, "threads": true }
+                guild_id: subscription
             }
         }
     })
     .to_string()
+}
+
+fn presence_requests(guild_id: &str, user_ids: &[String]) -> Vec<String> {
+    user_ids
+        .chunks(100)
+        .map(|ids| {
+            json!({
+                "op": 8,
+                "d": { "guild_id": guild_id, "user_ids": ids, "presences": true }
+            })
+            .to_string()
+        })
+        .collect()
 }
 
 fn identify_payload(token: &str) -> String {
@@ -650,12 +672,18 @@ async fn handle_command(api: &Api, command: Command, event_tx: &EventTx, write: 
                 log::warn!("falha ao encerrar a transmissão: {err}");
             }
         }
-        Command::SubscribeGuild { guild_id } => {
+        Command::SubscribeGuild { guild_id, user_ids } => {
             if let Err(err) = write
-                .send(WsMessage::text(subscribe_payload(&guild_id)))
+                .send(WsMessage::text(subscribe_payload(&guild_id, &user_ids)))
                 .await
             {
                 log::warn!("falha ao assinar a guild {guild_id}: {err}");
+            }
+            for payload in presence_requests(&guild_id, &user_ids) {
+                if let Err(err) = write.send(WsMessage::text(payload)).await {
+                    log::warn!("falha ao consultar presenças da guild {guild_id}: {err}");
+                    break;
+                }
             }
         }
         Command::LoadVoiceUser { guild_id, user_id } => {
@@ -705,6 +733,68 @@ async fn report(api: &Api, err: ApiError, event_tx: &EventTx, context: &str) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn subscriptions_request_current_and_future_member_presences() {
+        let ids: Vec<String> = (0..101).map(|id| id.to_string()).collect();
+        let subscription: Value = serde_json::from_str(&subscribe_payload("guild", &ids)).unwrap();
+        assert_eq!(
+            subscription["d"]["subscriptions"]["guild"]["members"],
+            json!(ids)
+        );
+        assert_eq!(subscription["d"]["subscriptions"]["guild"]["typing"], true);
+        let requests: Vec<Value> = presence_requests("guild", &ids)
+            .iter()
+            .map(|payload| serde_json::from_str(payload).unwrap())
+            .collect();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0]["d"]["user_ids"].as_array().unwrap().len(), 100);
+        assert_eq!(requests[1]["d"]["user_ids"], json!(["100"]));
+        for request in requests {
+            assert_eq!(request["op"], 8);
+            assert_eq!(request["d"]["guild_id"], "guild");
+            assert_eq!(request["d"]["presences"], true);
+        }
+        assert!(presence_requests("guild", &[]).is_empty());
+        let subscription: Value = serde_json::from_str(&subscribe_payload("guild", &[])).unwrap();
+        assert!(
+            subscription["d"]["subscriptions"]["guild"]
+                .get("members")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn ready_and_member_chunks_seed_statuses_including_offline_members() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let events = EventTx::new(tx, egui::Context::default());
+        let (voice_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        dispatch(
+            json!({"t": "READY", "d": {"merged_presences": {
+                "friends": [{"user_id": "1", "status": "online"}],
+                "guilds": [[{"user_id": "2", "status": "idle"}]]
+            }}}),
+            &events,
+            &voice_tx,
+            "",
+        );
+        dispatch(
+            json!({"t": "GUILD_MEMBERS_CHUNK", "d": {
+                "members": [{"user": {"id": "2"}}, {"user": {"id": "3"}}],
+                "presences": [{"user": {"id": "2"}, "status": "dnd"}]
+            }}),
+            &events,
+            &voice_tx,
+            "",
+        );
+        let mut statuses = std::collections::HashMap::new();
+        while let Ok(UiEvent::PresenceUpdate { user_id, status }) = rx.try_recv() {
+            statuses.insert(user_id, status);
+        }
+        assert_eq!(statuses.get("1").map(String::as_str), Some("online"));
+        assert_eq!(statuses.get("2").map(String::as_str), Some("dnd"));
+        assert_eq!(statuses.get("3").map(String::as_str), Some("offline"));
+    }
+
     #[test]
     fn initial_presence_handles_flat_and_supplemental_lists() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();

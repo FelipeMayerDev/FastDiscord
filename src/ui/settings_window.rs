@@ -26,8 +26,8 @@ impl SettingsTab {
         match self {
             Self::Account => "Minha conta",
             Self::Appearance => "Aparência",
-            Self::Voice => "Voz e vídeo",
-            Self::ScreenShare => "Compartilhamento de tela",
+            Self::Voice => "Voz e áudio",
+            Self::ScreenShare => "Tela e transmissão",
             Self::Behavior => "Comportamento",
         }
     }
@@ -40,41 +40,111 @@ pub fn open_at(app: &mut VesktopApp, tab: SettingsTab) {
 }
 
 pub fn show(app: &mut VesktopApp, ctx: &egui::Context) {
-    let mut open = app.settings_open;
+    let size = (ctx.content_rect().size() - egui::vec2(80.0, 80.0)).min(egui::vec2(840.0, 580.0));
+    let compact = size.x < 680.0;
+    let mut close = false;
     let mut logged_out = false;
-    egui::Window::new(RichText::new("Configurações").strong())
-        .open(&mut open)
-        .resizable(false)
-        .collapsible(false)
-        .fixed_size([720.0, 460.0])
+    let response = egui::Modal::new(egui::Id::new("settings_modal"))
+        .backdrop_color(egui::Color32::from_black_alpha(160))
+        .frame(
+            egui::Frame::popup(&ctx.global_style())
+                .inner_margin(24)
+                .corner_radius(16),
+        )
         .show(ctx, |ui| {
-            ui.horizontal_top(|ui| {
-                ui.allocate_ui_with_layout(
-                    egui::vec2(180.0, 460.0),
-                    egui::Layout::top_down_justified(egui::Align::Min),
-                    |ui| nav(app, ui),
-                );
-                ui.separator();
-                ui.vertical(|ui| {
-                    ui.heading(app.settings_tab.label());
-                    ui.add_space(8.0);
-                    egui::ScrollArea::vertical()
-                        .auto_shrink(false)
-                        .show(ui, |ui| match app.settings_tab {
-                            SettingsTab::Account => logged_out = account_settings(app, ui),
-                            SettingsTab::Appearance => appearance_settings(app, ui),
-                            SettingsTab::Voice => {
-                                voice_settings(app, ui);
-                                crate::ui::voice_processing::voice_processing_settings(app, ui);
-                            }
-                            SettingsTab::ScreenShare => screen_share_settings(app, ui),
-                            SettingsTab::Behavior => behavior_settings(app, ui),
-                        });
+            ui.set_width(size.x);
+            ui.set_height(size.y);
+            ui.spacing_mut().item_spacing = egui::vec2(12.0, 12.0);
+            ui.horizontal(|ui| {
+                ui.heading(RichText::new("Configurações").size(24.0));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    close = ui
+                        .button("Fechar")
+                        .on_hover_text("Fechar configurações (Esc)")
+                        .clicked();
                 });
             });
+            ui.separator();
+            if compact {
+                ui.horizontal_wrapped(|ui| {
+                    for tab in [
+                        SettingsTab::Account,
+                        SettingsTab::Appearance,
+                        SettingsTab::Voice,
+                        SettingsTab::ScreenShare,
+                        SettingsTab::Behavior,
+                    ] {
+                        if ui
+                            .selectable_label(app.settings_tab == tab, tab.label())
+                            .clicked()
+                        {
+                            app.settings_tab = tab;
+                        }
+                    }
+                });
+                ui.separator();
+            }
+            let body_height = (ui.available_height() - 32.0).max(100.0);
+            ui.horizontal_top(|ui| {
+                if !compact {
+                    egui::Frame::new()
+                        .fill(ui.visuals().faint_bg_color)
+                        .inner_margin(12)
+                        .corner_radius(10)
+                        .show(ui, |ui| {
+                            ui.set_width(176.0);
+                            ui.set_height(body_height - 24.0);
+                            ui.with_layout(
+                                egui::Layout::top_down_justified(egui::Align::Min),
+                                |ui| nav(app, ui),
+                            );
+                        });
+                }
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), body_height),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.heading(app.settings_tab.label());
+                        egui::ScrollArea::vertical()
+                            .id_salt(("settings_page", app.settings_tab.label()))
+                            .auto_shrink(false)
+                            .max_height(ui.available_height())
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                match app.settings_tab {
+                                    SettingsTab::Account => logged_out = account_settings(app, ui),
+                                    SettingsTab::Appearance => appearance_settings(app, ui),
+                                    SettingsTab::Voice => {
+                                        ui.label(RichText::new("Dispositivos e volumes").strong());
+                                        voice_settings(app, ui);
+                                        ui.separator();
+                                        ui.label(
+                                            RichText::new("Processamento do microfone").strong(),
+                                        );
+                                        crate::ui::voice_processing::voice_processing_settings(
+                                            app, ui,
+                                        );
+                                    }
+                                    SettingsTab::ScreenShare => screen_share_settings(app, ui),
+                                    SettingsTab::Behavior => behavior_settings(app, ui),
+                                }
+                            });
+                    },
+                );
+            });
+            ui.separator();
+            ui.label(
+                RichText::new("As alterações são salvas automaticamente.")
+                    .small()
+                    .color(ui.visuals().weak_text_color()),
+            )
+            .on_hover_text(format!(
+                "Arquivo de configurações: {}",
+                paths::settings_file().display()
+            ));
         });
 
-    if (!open || logged_out) && app.settings_open {
+    if (close || response.should_close() || logged_out) && app.settings_open {
         app.settings_open = false;
         app.settings.save();
     }
@@ -94,7 +164,12 @@ fn nav(app: &mut VesktopApp, ui: &mut egui::Ui) {
         ),
     ];
     for (title, tabs) in groups {
-        ui.label(RichText::new(title).small().strong().color(theme::MUTED));
+        ui.label(
+            RichText::new(title)
+                .small()
+                .strong()
+                .color(ui.visuals().weak_text_color()),
+        );
         for &tab in tabs {
             if ui
                 .selectable_label(app.settings_tab == tab, tab.label())
@@ -105,21 +180,23 @@ fn nav(app: &mut VesktopApp, ui: &mut egui::Ui) {
         }
         ui.add_space(12.0);
     }
-    ui.label(
-        RichText::new(format!(
-            "Configurações salvas em {}",
-            paths::settings_file().display()
-        ))
-        .small()
-        .color(theme::MUTED),
-    );
 }
 
 /// Who is signed in, and the logout button; true once logged out.
 fn account_settings(app: &mut VesktopApp, ui: &mut egui::Ui) -> bool {
     if let Some(user) = &app.me {
-        ui.label(format!("Conectado como {}", user.display_name()));
+        egui::Frame::group(ui.style())
+            .inner_margin(16)
+            .corner_radius(10)
+            .show(ui, |ui| {
+                ui.label(RichText::new(user.display_name()).size(20.0).strong());
+                ui.label(
+                    RichText::new(format!("@{}", user.username))
+                        .color(ui.visuals().weak_text_color()),
+                );
+            });
     }
+    ui.add_space(8.0);
     if ui
         .button("Sair (remover token deste dispositivo)")
         .clicked()
@@ -131,7 +208,7 @@ fn account_settings(app: &mut VesktopApp, ui: &mut egui::Ui) -> bool {
 }
 
 fn appearance_settings(app: &mut VesktopApp, ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.label("Tema:");
         if ui
             .radio(app.settings.theme == Theme::Dark, "Escuro")
@@ -148,7 +225,7 @@ fn appearance_settings(app: &mut VesktopApp, ui: &mut egui::Ui) {
             app.settings.save();
         }
     });
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.label("Zoom:");
         let response = ui.add(egui::Slider::new(&mut app.settings.zoom, 0.5..=2.0).step_by(0.05));
         if response.changed() {
@@ -170,11 +247,36 @@ fn appearance_settings(app: &mut VesktopApp, ui: &mut egui::Ui) {
 }
 
 fn behavior_settings(app: &mut VesktopApp, ui: &mut egui::Ui) {
-    let mut tray = app.settings.tray;
-    ui.add_enabled(
-        false,
-        egui::Checkbox::new(&mut tray, "Minimizar para a bandeja (em breve)"),
-    );
+    if ui
+        .add_enabled(
+            cfg!(feature = "tray"),
+            egui::Checkbox::new(
+                &mut app.settings.tray,
+                "Mostrar ícone na bandeja do sistema",
+            ),
+        )
+        .changed()
+    {
+        app.settings.save();
+        app.configure_tray(ui.ctx());
+    }
+    let available = app.tray_available();
+    if ui
+        .add_enabled(
+            available,
+            egui::Checkbox::new(
+                &mut app.settings.minimize_to_tray,
+                "Manter em execução na bandeja ao fechar a janela",
+            ),
+        )
+        .changed()
+    {
+        app.settings.save();
+    }
+    if app.settings.tray && !available {
+        ui.weak("Manter na bandeja está indisponível neste ambiente. Fechar a janela encerra o aplicativo.");
+        ui.weak("Se acabou de ativar a bandeja no Linux, reinicie o aplicativo.");
+    }
     let mut updates = app.settings.check_for_updates;
     if ui
         .add(egui::Checkbox::new(
@@ -192,11 +294,11 @@ fn behavior_settings(app: &mut VesktopApp, ui: &mut egui::Ui) {
 /// restart the audio streams live when in a call (docs/VOICE.md, phase 4).
 fn voice_settings(app: &mut VesktopApp, ui: &mut egui::Ui) {
     let mut changed = false;
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.label("Saída:");
         changed |= device_combo(app, ui, true);
     });
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.label("Entrada:");
         changed |= device_combo(app, ui, false);
     });
@@ -205,6 +307,35 @@ fn voice_settings(app: &mut VesktopApp, ui: &mut egui::Ui) {
     changed |= input_controls(app, ui);
     if changed {
         apply_voice_change(app);
+    }
+    ui.separator();
+    ui.heading("DJ compartilhado");
+    ui.label("Todos na sala devem usar o mesmo servidor e chave do DJ.");
+    ui.label(
+        RichText::new("A conexão será atualizada ao fechar as configurações.")
+            .small()
+            .color(theme::MUTED),
+    );
+    ui.label("Servidor (wss://):");
+    let url = ui.add(
+        egui::TextEdit::singleline(&mut app.settings.dj_url)
+            .hint_text("wss://dj.seudominio.com")
+            .desired_width(f32::INFINITY),
+    );
+    ui.label("Chave do servidor DJ (não é o token do Discord):");
+    let key = ui.add(
+        egui::TextEdit::singleline(&mut app.settings.dj_key)
+            .password(true)
+            .desired_width(f32::INFINITY),
+    );
+    if url.changed() || key.changed() {
+        app.settings.save();
+    }
+    if !app.settings.dj_url.is_empty()
+        && let Err(error) =
+            crate::backend::dj::validate_endpoint(&app.settings.dj_url, &app.settings.dj_key)
+    {
+        ui.label(RichText::new(error).small().color(theme::RED));
     }
 }
 
@@ -317,15 +448,13 @@ fn volume_control(app: &mut VesktopApp, ui: &mut egui::Ui, output: bool) -> bool
 /// Sensitivity slider and noise suppression; true when either changed.
 fn input_controls(app: &mut VesktopApp, ui: &mut egui::Ui) -> bool {
     let mut changed = false;
-    ui.horizontal(|ui| {
-        ui.label("Sensibilidade do microfone:");
-        changed |= ui
-            .add(
-                egui::Slider::new(&mut app.settings.input_sensitivity, 0..=100)
-                    .text("0 = sempre aberto"),
-            )
-            .changed();
-    });
+    ui.label("Sensibilidade do microfone:");
+    changed |= ui
+        .add(
+            egui::Slider::new(&mut app.settings.input_sensitivity, 0..=100)
+                .text("0 = sempre aberto"),
+        )
+        .changed();
     changed |= ui
         .checkbox(
             &mut app.settings.noise_suppression,
@@ -350,13 +479,13 @@ fn screen_share_settings(app: &mut VesktopApp, ui: &mut egui::Ui) {
         .on_hover_text("Desligado: Go Live do Discord (experimental)")
         .changed();
     ui.add_enabled_ui(app.settings.fockytv_share, |ui| {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("Servidor:");
             changed |= ui
                 .text_edit_singleline(&mut app.settings.fockytv_url)
                 .changed();
         });
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("Taxa de quadros:");
             for fps in [60, 30, 15] {
                 if ui
@@ -370,7 +499,7 @@ fn screen_share_settings(app: &mut VesktopApp, ui: &mut egui::Ui) {
         })
         .response
         .on_hover_text("Vale para a próxima transmissão");
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("Nick:");
             let username = app
                 .me

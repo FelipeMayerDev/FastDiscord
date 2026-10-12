@@ -9,7 +9,7 @@ use crate::theme;
 pub fn voice_processing_settings(app: &mut VesktopApp, ui: &mut egui::Ui) {
     let settings = &mut app.settings;
     let mut changed = false;
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.label("Qualidade do áudio (bitrate):");
         changed |= ui
             .add(egui::Slider::new(&mut settings.opus_bitrate_kbps, 8..=128).suffix(" kbps"))

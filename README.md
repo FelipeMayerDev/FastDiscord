@@ -25,12 +25,18 @@ e o Discord é falado nativamente — REST + Gateway sobre tokio.
 - Cancelamento de eco pelo servidor de som no Linux e por WASAPI no Windows
   quando o sistema e o dispositivo oferecem AEC; a interface informa quando
   o Windows precisa usar captura sem cancelamento.
-- Soundboard e DJ com fila, pausa e cancelamento; o pacote Windows inclui
+- Soundboard e [DJ compartilhado](docs/DJ.md) entre usuários do app na mesma
+  sala, com seleção dos resultados de busca, playlist, download temporário completo,
+  controles sincronizados e volume individual. O DJ exige
+  um relay configurado em Voz e áudio; o pacote Windows inclui
   `yt-dlp`, `ffmpeg`, `ffprobe` e Deno. No Linux/build local, instale as ferramentas
   do DJ no sistema (Deno dá suporte completo ao YouTube no `yt-dlp` atual).
 - Compartilhamento de tela pelo FockyTV, sons do Discord, notificações de DMs e
   menções, configurações em abas e animações de hover, seleção e clique.
-- Configurações persistentes e bandeja experimental (`--features tray`).
+- Cache persistente de servidores, canais, DMs e amigos para abrir a navegação
+  rapidamente, com atualização em segundo plano.
+- Configurações persistentes e bandeja no Linux e Windows: fechar mantém
+  o app e as chamadas em execução; o menu permite abrir a janela ou sair.
 
 As notificações no Linux usam `notify-send`, `paplay` e o tema de sons
 freedesktop. O upload básico de anexos aceita arquivos de até 10 MB. A busca
@@ -58,12 +64,24 @@ git clone https://github.com/FelipeMayerDev/FastDiscord
 cd FastDiscord
 
 cargo run --release
-# bandeja experimental:
-cargo run --release --features tray
+# build sem bandeja, se necessário:
+cargo run --release --no-default-features
 ```
 
 Dica: `cargo build --release` gera o binário em `target/release/fastdiscord`;
 a primeira compilação resolve `Cargo.lock` automaticamente.
+
+## Bandeja do sistema
+
+Em Configurações → Comportamento, escolha mostrar o ícone na bandeja e manter
+o app em execução ao fechar a janela. No menu da bandeja, **Abrir FastDiscord**
+restaura a janela e **Sair do FastDiscord** encerra o app, inclusive as chamadas.
+
+No Linux, o desktop precisa oferecer StatusNotifier (KDE e barras compatíveis;
+no GNOME, uma extensão de AppIndicator). Se não houver bandeja disponível,
+fechar a janela encerra o aplicativo normalmente. O suporte usa D-Bus, sem GTK. Com a bandeja ativada, a janela usa X11/XWayland
+para permitir esconder e restaurar; um ambiente somente Wayland fecha
+normalmente. Reinicie o app ao ativar a bandeja pela primeira vez no Linux.
 
 ## Como obter o token
 

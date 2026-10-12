@@ -23,14 +23,15 @@ history.
 | `src/image_cache.rs` | (web app image loading) | avatars/guild icons fetched off-thread into egui textures |
 | `src/settings.rs`, `src/paths.rs` | `src/shared/settings.ts`, `settingsStore` | JSON settings in the user config dir |
 | `src/theme.rs` | custom CSS theming | Discord palette applied via `egui::Visuals` |
-| `src/window.rs`, `src/tray.rs` | `src/main/tray.ts`, window icon, splash | ICO window icon; tray behind `--features tray` |
+| `src/window.rs`, `src/tray.rs` | `src/main/tray.ts`, window icon, splash | ICO window icon; Linux/Windows tray enabled by default |
 | `src/util.rs` | `src/shared/utils` | snowflake math, timestamps, CDN URLs |
 | `assets/*` | `build/icon.*`, `static/tray/*` | same artwork carried over |
 
 ## Vesktop settings, native equivalents
 
-`tray`, `minimizeToTray` and `checkForUpdates` are stored (and surfaced in
-the settings window); the first two only take effect once the tray lands.
+`tray` and `minimizeToTray` control the Linux/Windows tray and close-to-tray
+behavior. Hidden windows keep processing backend and tray events through
+`eframe::App::logic`. `checkForUpdates` remains a stored placeholder.
 `discordBranch`, Vencord, splash and hardware-acceleration toggles have no
 meaning without a browser engine and were dropped. `zoom` maps to egui's
 `pixels_per_point`; `theme` to dark/light visuals.

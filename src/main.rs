@@ -57,7 +57,8 @@ fn main() -> anyhow::Result<()> {
         viewport = viewport.with_icon(icon);
     }
 
-    let options = eframe::NativeOptions {
+    #[allow(unused_mut)]
+    let mut options = eframe::NativeOptions {
         viewport,
         // With vsync, eglSwapBuffers waits for the compositor's frame
         // callback, which Hyprland withholds from windows that aren't
@@ -71,6 +72,15 @@ fn main() -> anyhow::Result<()> {
         },
         ..Default::default()
     };
+
+    #[cfg(all(feature = "tray", target_os = "linux"))]
+    if settings.tray && std::env::var_os("DISPLAY").is_some() {
+        use winit::platform::x11::EventLoopBuilderExtX11;
+        // winit cannot hide or restore Wayland windows; XWayland supports both.
+        options.event_loop_builder = Some(Box::new(|builder| {
+            builder.with_x11();
+        }));
+    }
 
     eframe::run_native(
         "FastDiscord",

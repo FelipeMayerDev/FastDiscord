@@ -36,7 +36,8 @@ pub fn paint(app: &mut VesktopApp, ui: &mut egui::Ui) {
     };
     let available = ui.available_rect_before_wrap();
     let preview_h = crate::ui::screen_share::height(app, available.width());
-    let total = preview_h + voice_h + USER_PANEL_H;
+    let dj_h = crate::ui::voice_extras::music_height(app);
+    let total = preview_h + dj_h + voice_h + USER_PANEL_H;
     let block = egui::Rect::from_min_max(
         pos2(available.left(), available.bottom() - total),
         pos2(available.right(), available.bottom()),
@@ -77,6 +78,7 @@ pub fn paint(app: &mut VesktopApp, ui: &mut egui::Ui) {
     // would overflow the reserved height and get clipped.
     bottom.spacing_mut().item_spacing = Vec2::ZERO;
     crate::ui::screen_share::paint(app, &mut bottom);
+    crate::ui::voice_extras::music_panel(app, &mut bottom);
     voice_panel(app, &mut bottom);
     user_panel(app, &mut bottom);
 }

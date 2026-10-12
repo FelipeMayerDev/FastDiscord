@@ -91,10 +91,10 @@ pub enum Command {
     StopStream {
         stream_key: String,
     },
-    /// op 37: subscribe to the open guild's typing/activity/thread events,
-    /// like the official client does when a guild is opened.
+    /// Subscribe to guild events and request the listed members' presences.
     SubscribeGuild {
         guild_id: String,
+        user_ids: Vec<String>,
     },
     /// The soundboard picker opened in a guild.
     LoadSoundboard {

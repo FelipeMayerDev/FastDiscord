@@ -1,4 +1,4 @@
-//! Window icon (and, behind the `tray` feature, the tray icon) decoded from
+//! Window icon and Windows tray icon decoded from
 //! the FastDiscord logo in assets/ (icon.svg is the source).
 
 use egui::IconData;
@@ -15,7 +15,7 @@ pub fn load_icon() -> Option<IconData> {
     })
 }
 
-#[cfg(feature = "tray")]
+#[cfg(all(feature = "tray", windows))]
 pub fn load_tray_icon() -> Option<tray_icon::Icon> {
     const TRAY_ICON: &[u8] = include_bytes!("../assets/tray.png");
     let img = image::load_from_memory(TRAY_ICON).ok()?.into_rgba8();

@@ -282,7 +282,6 @@ impl Read for MicSource {
         self.scratch.resize(want, 0.0);
         let block = &mut self.scratch[..want];
         self.ring.pop(block);
-        EFFECTS.add_send(block);
         for (i, sample) in block.iter().enumerate() {
             buf[i * 4..i * 4 + 4].copy_from_slice(&sample.to_le_bytes());
         }

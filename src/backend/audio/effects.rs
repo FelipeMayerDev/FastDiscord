@@ -1,6 +1,5 @@
 //! Local sound effects mixed into the playback stream on top of the call
-//! (#14 join/leave tones, #12 soundboard, #15 the DJ's local monitor), and
-//! the DJ's send ring that `MicSource` mixes into what goes to the channel.
+//! (#14 join/leave tones, #12 soundboard, and the shared DJ).
 //! One global: there is one sound card and one voice connection.
 
 use std::sync::{Arc, LazyLock, Mutex};
@@ -10,7 +9,6 @@ use super::{Ring, VOICE_RATE};
 pub static EFFECTS: LazyLock<Effects> = LazyLock::new(|| Effects {
     clips: Mutex::new(Vec::new()),
     music: Ring::new(VOICE_RATE as usize * 2),
-    send: Ring::new(VOICE_RATE as usize / 2),
 });
 
 /// A playing clip: stereo samples, read position, gain.
@@ -20,8 +18,6 @@ pub struct Effects {
     clips: Mutex<Vec<Clip>>,
     /// DJ audio for our own speakers, stereo.
     pub music: Arc<Ring>,
-    /// DJ audio for the channel, mono (the send mix is mono).
-    pub send: Arc<Ring>,
 }
 
 impl Effects {
@@ -50,21 +46,10 @@ impl Effects {
         if !self.music.is_empty() {
             let mut music = vec![0.0; out.len()];
             self.music.pop(&mut music);
+            self.music.apply_volume(&mut music);
             for (slot, sample) in out.iter_mut().zip(music) {
                 *slot += sample;
             }
-        }
-    }
-
-    /// Adds the DJ's pending send audio into a mono mic block.
-    /// Called per mixer read (often a single sample), so no allocation.
-    pub fn add_send(&self, block: &mut [f32]) {
-        let mut send = self.send.samples.lock().unwrap();
-        for slot in block.iter_mut() {
-            let Some(sample) = send.pop_front() else {
-                break;
-            };
-            *slot += sample;
         }
     }
 }
@@ -190,7 +175,6 @@ mod tests {
         let effects = Effects {
             clips: Mutex::new(Vec::new()),
             music: Ring::new(16),
-            send: Ring::new(16),
         };
         effects.play(Arc::from(vec![0.5; 6]), 2.0);
         let mut block = [0.25; 4];
@@ -204,6 +188,27 @@ mod tests {
 
         // 24 kHz → 48 kHz doubles the frame count.
         assert_eq!(resample(&[0.0; 8], 24_000).len(), 16);
+    }
+
+    #[test]
+    fn dj_volume_only_changes_music_in_the_local_mix() {
+        let effects = Effects {
+            clips: Mutex::new(Vec::new()),
+            music: Ring::new(16),
+        };
+        effects.music.set_volume(50);
+        effects.music.push(&[0.8; 4]);
+        effects.play(Arc::from(vec![0.2; 4]), 1.0);
+        let mut block = [0.1; 4];
+        effects.mix_into(&mut block);
+        for value in block {
+            assert!((value - 0.7).abs() < 0.0001);
+        }
+        effects.music.set_volume(0);
+        effects.music.push(&[0.8; 4]);
+        let mut block = [0.1; 4];
+        effects.mix_into(&mut block);
+        assert_eq!(block, [0.1; 4]);
     }
 
     #[test]

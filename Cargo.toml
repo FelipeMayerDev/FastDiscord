@@ -1,6 +1,7 @@
 [package]
 name = "fastdiscord"
-version = "0.1.2"
+default-run = "fastdiscord"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.98"
 license = "GPL-3.0-or-later"
@@ -18,11 +19,8 @@ name = "fastdiscord"
 path = "src/main.rs"
 
 [features]
-default = []
-# Experimental system tray, written against tray-icon 0.19. Off by default so
-# the first build on a machine needs no GTK/libappindicator dev packages;
-# enable with `cargo build --release --features tray`.
-tray = ["dep:tray-icon"]
+default = ["tray"]
+tray = ["dep:tray-icon", "dep:ksni", "dep:winit"]
 
 [dependencies]
 anyhow = "1"
@@ -71,8 +69,6 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 rsa = { version = "0.9", features = ["sha2"] }
 base64 = "0.22"
 qrcode = { version = "0.14", default-features = false }
-# System tray (feature `tray`).
-tray-icon = { version = "0.19", optional = true }
 # Voice: WS + UDP + DAVE through the standalone driver (docs/VOICE.md).
 # `gateway` is only there because `receive` fails to build without it in
 # 0.6.0 (`dashmap` is gated behind `gateway`).
@@ -113,6 +109,10 @@ gstreamer-app = "0.25"
 openh264 = "0.9"
 
 [target.'cfg(target_os = "linux")'.dependencies]
+# StatusNotifier tray over D-Bus, without GTK.
+ksni = { version = "0.3.6", optional = true }
+# The existing eframe window backend, also used to select X11 for close-to-tray.
+winit = { version = "0.30", default-features = false, features = ["x11"], optional = true }
 # Voice audio I/O through the desktop's sound server (PipeWire via the
 # PulseAudio API): real device names, resampling and per-app volume.
 libpulse-binding = "2"
@@ -122,6 +122,7 @@ ashpd = { version = "0.13", default-features = false, features = ["tokio", "scre
 pipewire = "0.10"
 
 [target.'cfg(windows)'.dependencies]
+tray-icon = { version = "0.19", optional = true }
 windows = { version = "0.62.2", features = ["Win32_Media_Audio", "Win32_Media_KernelStreaming", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_System_Threading", "Win32_Security"] }
 # Voice audio I/O through WASAPI (src/backend/audio/windows.rs).
 cpal = "0.18"

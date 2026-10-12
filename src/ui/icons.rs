@@ -7,6 +7,12 @@ use egui::{Color32, Pos2, Rect, Response, Sense, Stroke, Ui, Vec2, pos2};
 
 #[derive(Clone, Copy)]
 pub enum Icon {
+    Previous,
+    Play,
+    Pause,
+    Next,
+    Stop,
+    Playlist,
     Screen,
     Soundboard,
     Music,
@@ -56,6 +62,40 @@ pub fn draw(p: &egui::Painter, icon: Icon, c: Pos2, color: Color32, hover: f32) 
         p.line_segment([c + a, c + b], stroke);
     };
     match icon {
+        Icon::Play | Icon::Previous | Icon::Next => {
+            let backwards = matches!(icon, Icon::Previous);
+            let sign = if backwards { -1.0 } else { 1.0 };
+            p.add(egui::Shape::convex_polygon(
+                vec![
+                    c + Vec2::new(-5.0 * sign, -7.0),
+                    c + Vec2::new(7.0 * sign, 0.0),
+                    c + Vec2::new(-5.0 * sign, 7.0),
+                ],
+                color,
+                Stroke::NONE,
+            ));
+            if !matches!(icon, Icon::Play) {
+                line(Vec2::new(8.0 * sign, -7.0), Vec2::new(8.0 * sign, 7.0));
+            }
+        }
+        Icon::Pause => {
+            for x in [-4.0, 4.0] {
+                p.rect_filled(
+                    Rect::from_center_size(c + Vec2::new(x, 0.0), Vec2::new(4.0, 14.0)),
+                    1.0,
+                    color,
+                );
+            }
+        }
+        Icon::Stop => {
+            p.rect_filled(Rect::from_center_size(c, Vec2::splat(13.0)), 1.0, color);
+        }
+        Icon::Playlist => {
+            for y in [-6.0, 0.0, 6.0] {
+                p.circle_filled(c + Vec2::new(-7.0, y), 1.5, color);
+                line(Vec2::new(-2.0, y), Vec2::new(8.0, y));
+            }
+        }
         Icon::Screen => {
             p.rect_stroke(
                 Rect::from_center_size(c, Vec2::new(19.0, 13.0)),

@@ -62,6 +62,10 @@ pub struct Settings {
     pub fockytv_nick: Option<String>,
     /// Frame rate cap for FockyTV broadcasts: 60, 30 or 15.
     pub fockytv_fps: u32,
+    /// Shared DJ relay; the key belongs to the relay, never to Discord.
+    pub dj_url: String,
+    pub dj_key: String,
+    pub dj_volume: u8,
 }
 
 impl Default for Settings {
@@ -93,6 +97,9 @@ impl Default for Settings {
             fockytv_url: "https://tv.huestavo.com".into(),
             fockytv_nick: None,
             fockytv_fps: 60,
+            dj_url: String::new(),
+            dj_key: String::new(),
+            dj_volume: 50,
         }
     }
 }

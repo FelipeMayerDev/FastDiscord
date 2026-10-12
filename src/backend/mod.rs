@@ -4,6 +4,8 @@
 pub mod api;
 pub mod audio;
 pub mod capture;
+pub mod dj;
+pub mod dj_server;
 pub mod encode;
 pub mod events;
 pub mod file_picker;

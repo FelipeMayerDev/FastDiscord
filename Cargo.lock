@@ -2106,7 +2106,7 @@ dependencies = [
 
 [[package]]
 name = "fastdiscord"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2126,6 +2126,7 @@ dependencies = [
  "gstreamer",
  "gstreamer-app",
  "image",
+ "ksni",
  "libpulse-binding",
  "log",
  "nnnoiseless",
@@ -2146,6 +2147,7 @@ dependencies = [
  "tracing-subscriber",
  "tray-icon",
  "windows 0.62.2",
+ "winit",
 ]
 
 [[package]]
@@ -3710,6 +3712,19 @@ name = "khronos_api"
 version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
+
+[[package]]
+name = "ksni"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "814b44c24cd2cb236c3b8a41c7f08237b452a8e76ecaa81f1cec40b5b678215b"
+dependencies = [
+ "futures-util",
+ "pastey",
+ "serde",
+ "tokio",
+ "zbus",
+]
 
 [[package]]
 name = "kstring"
