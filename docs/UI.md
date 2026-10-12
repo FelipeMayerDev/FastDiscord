@@ -32,8 +32,10 @@ Configurações → Aparência, torna essas transições imediatas e mantém os 
 no primeiro quadro. Transmissões de vídeo continuam sendo conteúdo reproduzido.
 
 **Atividades** está fora da interface enquanto não houver implementação.
-As ações de voz disponíveis são compartilhamento de tela, soundboard e DJ;
-não deve haver um espaço reservado para uma quarta ação.
+As ações de voz disponíveis são compartilhamento de tela, câmera, soundboard e
+DJ; não deve haver espaço reservado para ações sem implementação. Compartilhar
+tela abre um modal para escolher a fonte, a resolução e a taxa de quadros
+([SCREENSHARE.md](SCREENSHARE.md#picker)).
 
 ## Já implementado
 

@@ -3,6 +3,7 @@
 
 pub mod api;
 pub mod audio;
+pub mod camera;
 pub mod capture;
 pub mod dj;
 pub mod dj_server;

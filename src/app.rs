@@ -207,6 +207,13 @@ pub struct VesktopApp {
     /// FockyTV lives now: lowercased key (matched to usernames) → key.
     pub(crate) fockytv_live: HashMap<String, String>,
     fockytv_polled: Option<Instant>,
+    /// The screen share picker while it's open; the capture starts only
+    /// when it's confirmed.
+    pub(crate) share_picker: Option<ui::screen_share::Picker>,
+    /// Our webcam and its FockyTV publish under `camera_key(nick)`.
+    pub(crate) camera: Option<crate::backend::capture::Capture>,
+    pub(crate) camera_texture: Option<egui::TextureHandle>,
+    pub(crate) camera_publisher: Option<crate::backend::fockytv::Publisher>,
     pub(crate) voice_deaf: bool,
     /// Voice-state user ids we already asked the API for.
     voice_users_pending: HashSet<String>,
@@ -315,6 +322,10 @@ impl VesktopApp {
             fockytv: None,
             fockytv_live: HashMap::new(),
             fockytv_polled: None,
+            share_picker: None,
+            camera: None,
+            camera_texture: None,
+            camera_publisher: None,
             voice_deaf: false,
             disconnected_at: None,
             selected_guild: None,
@@ -944,13 +955,32 @@ impl VesktopApp {
         });
     }
 
-    /// Starts the portal picker + capture and goes live in the connected
-    /// voice channel, or stops a running share.
-    pub(crate) fn toggle_screen_share(&mut self, ctx: &egui::Context) {
+    /// Opens the share picker (source, resolution, fps), or stops a
+    /// running share.
+    pub(crate) fn toggle_screen_share(&mut self) {
         if self.screen.is_some() {
             self.stop_screen_share();
             return;
         }
+        if !matches!(self.voice, VoiceConn::Connected { .. }) || self.me.is_none() {
+            return;
+        }
+        if self.settings.fockytv_share
+            && crate::backend::fockytv::validate_stream_key(&self.fockytv_nick()).is_err()
+        {
+            ui::settings_window::open_at(self, ui::settings_window::SettingsTab::ScreenShare);
+            return;
+        }
+        self.share_picker = Some(ui::screen_share::Picker::new());
+    }
+
+    /// The picker's "Compartilhar": captures `source` (Linux: the portal
+    /// dialog picks) and goes live in the connected voice channel.
+    pub(crate) fn start_screen_share(
+        &mut self,
+        ctx: &egui::Context,
+        source: Option<crate::backend::capture::Source>,
+    ) {
         let VoiceConn::Connected {
             guild_id,
             channel_id,
@@ -963,18 +993,16 @@ impl VesktopApp {
         };
         if self.settings.fockytv_share {
             let nick = self.fockytv_nick();
-            if crate::backend::fockytv::validate_stream_key(&nick).is_err() {
-                ui::settings_window::open_at(self, ui::settings_window::SettingsTab::ScreenShare);
-                return;
-            }
             let ctx = ctx.clone();
-            let capture =
-                crate::backend::capture::start(self.handle.clone(), move || ctx.request_repaint());
+            let capture = crate::backend::capture::start(self.handle.clone(), source, move || {
+                ctx.request_repaint()
+            });
             play_sound(Sound::StreamStart);
             self.fockytv = Some(crate::backend::fockytv::publish(
                 &self.settings.fockytv_url,
                 &nick,
                 self.settings.fockytv_fps,
+                self.settings.fockytv_max_height,
                 Arc::clone(&capture.frame),
             ));
             self.screen = Some(capture);
@@ -991,8 +1019,49 @@ impl VesktopApp {
         let ctx = ctx.clone();
         self.screen = Some(crate::backend::capture::start(
             self.handle.clone(),
+            source,
             move || ctx.request_repaint(),
         ));
+    }
+
+    /// Turns the webcam on (published to FockyTV as `camera_key(nick)`, so
+    /// it runs next to a screen share) or off. FockyTV only: Songbird sends
+    /// no video, so there's no Discord-native camera.
+    pub(crate) fn toggle_camera(&mut self, ctx: &egui::Context) {
+        if self.camera.is_some() {
+            self.stop_camera();
+            return;
+        }
+        if !matches!(self.voice, VoiceConn::Connected { .. }) {
+            return;
+        }
+        let nick = self.fockytv_nick();
+        if !self.settings.fockytv_share
+            || crate::backend::fockytv::validate_stream_key(&nick).is_err()
+        {
+            ui::settings_window::open_at(self, ui::settings_window::SettingsTab::ScreenShare);
+            return;
+        }
+        let ctx = ctx.clone();
+        let camera =
+            crate::backend::camera::start(self.settings.camera_device.clone(), move || {
+                ctx.request_repaint()
+            });
+        self.camera_publisher = Some(crate::backend::fockytv::publish(
+            &self.settings.fockytv_url,
+            &crate::backend::fockytv::camera_key(&nick),
+            30,
+            0,
+            Arc::clone(&camera.frame),
+        ));
+        self.camera = Some(camera);
+    }
+
+    /// Every way the camera ends (button, device gone, left voice).
+    pub(crate) fn stop_camera(&mut self) {
+        self.camera = None;
+        self.camera_texture = None;
+        self.camera_publisher = None;
     }
 
     /// The one way a share ends (button, picker cancelled, source gone,
@@ -1045,25 +1114,49 @@ impl VesktopApp {
         if self.me.as_ref().is_some_and(|me| me.id == user_id) {
             return self.fockytv.is_some();
         }
-        self.user_cache.get(user_id).is_some_and(|user| {
-            self.fockytv_live
-                .contains_key(&user.username.to_lowercase())
-        })
+        self.fockytv_key(user_id, false).is_some()
+    }
+
+    /// Whether `user_id`'s webcam is live on FockyTV.
+    pub(crate) fn has_camera(&self, user_id: &str) -> bool {
+        if self.me.as_ref().is_some_and(|me| me.id == user_id) {
+            return self.camera_publisher.is_some();
+        }
+        self.fockytv_key(user_id, true).is_some()
+    }
+
+    /// `user_id`'s live FockyTV key: their username for the screen,
+    /// `camera_key(username)` for the webcam.
+    fn fockytv_key(&self, user_id: &str, camera: bool) -> Option<String> {
+        if !self.settings.fockytv_share {
+            return None;
+        }
+        let username = &self.user_cache.get(user_id)?.username;
+        let key = if camera {
+            crate::backend::fockytv::camera_key(username)
+        } else {
+            username.clone()
+        };
+        self.fockytv_live.get(&key.to_lowercase()).cloned()
     }
 
     /// "Assistir": the member's FockyTV live (WHEP) or Discord's Go Live,
     /// both in the watch view in place of the chat.
     pub(crate) fn watch(&mut self, user_id: &str) {
-        let fockytv_key = self
-            .settings
-            .fockytv_share
-            .then(|| self.user_cache.get(user_id))
-            .flatten()
-            .and_then(|user| self.fockytv_live.get(&user.username.to_lowercase()))
-            .cloned();
-        let Some(key) = fockytv_key else {
-            return self.watch_stream(user_id);
-        };
+        match self.fockytv_key(user_id, false) {
+            Some(key) => self.watch_fockytv(key),
+            None => self.watch_stream(user_id),
+        }
+    }
+
+    /// The member's webcam, in the same watch view as a live.
+    pub(crate) fn watch_camera(&mut self, user_id: &str) {
+        if let Some(key) = self.fockytv_key(user_id, true) {
+            self.watch_fockytv(key);
+        }
+    }
+
+    fn watch_fockytv(&mut self, key: String) {
         if crate::backend::fockytv::validate_stream_key(&self.fockytv_nick()).is_err() {
             ui::settings_window::open_at(self, ui::settings_window::SettingsTab::ScreenShare);
             return;
@@ -1109,7 +1202,11 @@ impl VesktopApp {
         if let Some(publisher) = self.fockytv.take() {
             publisher.stop_and_wait();
         }
+        if let Some(publisher) = self.camera_publisher.take() {
+            publisher.stop_and_wait();
+        }
         self.stop_screen_share();
+        self.stop_camera();
     }
 
     /// Starts watching `user_id`'s stream in the voice channel we're in.
@@ -1383,6 +1480,7 @@ impl VesktopApp {
         // A desync rejoin leaves the shared DJ locally; other listeners keep playing.
         self.extras.dj.disconnect();
         self.stop_screen_share();
+        self.stop_camera();
         self.stop_watching();
         self.voice = VoiceConn::Disconnected;
         self.voice_connected_at = None;
@@ -2165,6 +2263,7 @@ impl VesktopApp {
                 }
                 self.extras.dj.disconnect();
                 self.stop_screen_share();
+                self.stop_camera();
                 self.stop_watching();
                 self.voice = VoiceConn::Disconnected;
                 self.voice_connected_at = None;
@@ -2452,6 +2551,7 @@ impl eframe::App for VesktopApp {
         ui::voice_extras::show(self, ctx);
         ui::screen_share::poll(self, ctx);
         ui::screen_share::poll_watch(self, ctx);
+        ui::screen_share::picker(self, ctx);
         if self.watch.is_some() && !self.watch_docked() {
             ui::screen_share::paint_floating(self, ctx);
         }
@@ -2767,7 +2867,7 @@ mod tests {
             channel_id: "channel".into(),
         };
         app.settings.fockytv_nick = Some("Discord RUST".into());
-        app.toggle_screen_share(&Context::default());
+        app.toggle_screen_share();
         assert!(app.screen.is_none());
         assert!(app.fockytv.is_none());
         assert!(app.settings_open);
@@ -2778,6 +2878,13 @@ mod tests {
         assert!(commands.try_recv().is_err());
         app.settings.fockytv_nick = Some(" Discord-RUST ".into());
         assert_eq!(app.fockytv_nick(), "Discord-RUST");
+        // A valid nick opens the picker; nothing is captured until it's
+        // confirmed.
+        app.settings_open = false;
+        app.toggle_screen_share();
+        assert!(app.share_picker.is_some());
+        assert!(app.screen.is_none());
+        assert!(!app.settings_open);
     }
 
     #[test]

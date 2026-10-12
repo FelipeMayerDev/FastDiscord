@@ -58,10 +58,30 @@ pub fn validate_stream_key(key: &str) -> Result<(), String> {
     }
 }
 
+/// The webcam's stream key: the nick plus `-cam`, cut to fit 32 bytes.
+/// Discord usernames can't contain `-`, so it never matches a member's
+/// screen key, and screen and camera can be live at once.
+pub fn camera_key(nick: &str) -> String {
+    format!("{}-cam", nick.chars().take(28).collect::<String>())
+}
+
+/// Output size for a `max_height` cap (0 = original): `None` when the
+/// source already fits, else the source's aspect at even dimensions (H.264
+/// encoders want 4:2:0 macroblock-friendly sizes).
+fn scaled_size(width: u32, height: u32, max_height: u32) -> Option<(u32, u32)> {
+    if max_height == 0 || height <= max_height {
+        return None;
+    }
+    let out_h = max_height & !1;
+    let out_w = ((u64::from(width) * u64::from(out_h) / u64::from(height)) as u32 + 1) & !1;
+    Some((out_w, out_h))
+}
+
 /// Starts publishing `frames` as `key` to `server` (e.g.
-/// `https://tv.huestavo.com`), capped at `fps` (the settings offer 60, 30
-/// and 15, like fockytv-share). The pipeline runs on its own thread.
-pub fn publish(server: &str, key: &str, fps: u32, frames: Shared) -> Publisher {
+/// `https://tv.huestavo.com`), capped at `fps` (the picker offers 60, 30
+/// and 15, like fockytv-share) and scaled down to `max_height` (0 = the
+/// source's size). The pipeline runs on its own thread.
+pub fn publish(server: &str, key: &str, fps: u32, max_height: u32, frames: Shared) -> Publisher {
     let stop = Arc::new(AtomicBool::new(false));
     let ended = Arc::new(Mutex::new(None));
     let (server, key) = (server.trim_end_matches('/').to_string(), key.to_string());
@@ -69,7 +89,8 @@ pub fn publish(server: &str, key: &str, fps: u32, frames: Shared) -> Publisher {
     let spawned = std::thread::Builder::new()
         .name("fastdiscord-whip".into())
         .spawn(move || {
-            let reason = match run(&server, &key, fps.clamp(1, 60), &frames, &thread_stop) {
+            let fps = fps.clamp(1, 60);
+            let reason = match run(&server, &key, fps, max_height, &frames, &thread_stop) {
                 Ok(()) => "transmissão encerrada".to_string(),
                 Err(err) => {
                     log::warn!("fockytv: {err}");
@@ -92,6 +113,7 @@ fn run(
     server: &str,
     key: &str,
     fps: u32,
+    max_height: u32,
     frames: &Shared,
     stop: &AtomicBool,
 ) -> Result<(), String> {
@@ -111,13 +133,22 @@ fn run(
         std::thread::sleep(Duration::from_millis(20));
     };
     let encoder = select_encoder()?;
-    let bitrate = bitrate_for(first.width, first.height);
+    // A later size change (a resized window) keeps this output size;
+    // videoscale letterboxes instead of stretching.
+    let scaled = scaled_size(first.width, first.height, max_height);
+    let (width, height) = scaled.unwrap_or((first.width, first.height));
+    let scale = scaled
+        .map(|(w, h)| {
+            format!("! videoscale ! video/x-raw,width={w},height={h},pixel-aspect-ratio=1/1")
+        })
+        .unwrap_or_default();
+    let bitrate = bitrate_for(width, height);
     let launch = format!(
         r#"
         appsrc name=vid is-live=true do-timestamp=true format=time max-bytes=8388608 block=false
         ! queue leaky=downstream max-size-buffers=2 max-size-time=0
         ! videorate drop-only=true ! capsfilter caps=video/x-raw,framerate={fps}/1
-        ! videoconvert
+        ! videoconvert {scale}
         ! queue leaky=downstream max-size-buffers=2 max-size-time=0
         ! {encoder}
         ! h264parse
@@ -145,8 +176,8 @@ fn run(
     log::info!(
         "fockytv: publicando \"{key}\" em {server} ({} {}x{} @ {fps} fps, {} kbps)",
         encoder.element(),
-        first.width,
-        first.height,
+        width,
+        height,
         bitrate / 1000
     );
 
@@ -242,9 +273,11 @@ impl AsRef<[u8]> for FrameBytes {
     }
 }
 
-/// fockytv-share's `bitrate_for`: by source pixel count.
+/// fockytv-share's `bitrate_for`, by output pixel count, plus a 720p tier
+/// for the picker's 720p option and the webcam.
 fn bitrate_for(width: u32, height: u32) -> u64 {
     match u64::from(width) * u64::from(height) {
+        pixels if pixels <= 1_000_000 => 6_000_000,
         pixels if pixels <= 2_300_000 => 12_000_000,
         pixels if pixels <= 3_800_000 => 20_000_000,
         _ => 32_000_000,
@@ -544,7 +577,26 @@ pub async fn live_keys(server: &str) -> Result<Vec<String>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{bitrate_for, validate_stream_key};
+    use super::{bitrate_for, camera_key, scaled_size, validate_stream_key};
+
+    #[test]
+    fn camera_key_is_valid_and_distinct() {
+        assert_eq!(camera_key("member"), "member-cam");
+        let long = "a".repeat(32);
+        let key = camera_key(&long);
+        assert_eq!(key.len(), 32);
+        assert!(validate_stream_key(&key).is_ok());
+        assert_ne!(key, long);
+    }
+
+    #[test]
+    fn scaling_keeps_aspect_at_even_sizes() {
+        assert_eq!(scaled_size(2560, 1080, 0), None);
+        assert_eq!(scaled_size(1280, 720, 1080), None);
+        assert_eq!(scaled_size(1920, 1080, 720), Some((1280, 720)));
+        assert_eq!(scaled_size(2560, 1080, 720), Some((1706, 720)));
+        assert_eq!(scaled_size(3840, 2160, 1080), Some((1920, 1080)));
+    }
 
     #[test]
     fn stream_key_matches_server_rules() {
@@ -565,6 +617,7 @@ mod tests {
 
     #[test]
     fn bitrate_follows_source_size() {
+        assert_eq!(bitrate_for(1280, 720), 6_000_000);
         assert_eq!(bitrate_for(1920, 1080), 12_000_000);
         assert_eq!(bitrate_for(2560, 1080), 20_000_000);
         assert_eq!(bitrate_for(3840, 2160), 32_000_000);

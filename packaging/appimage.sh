@@ -19,7 +19,7 @@ rm -rf "$APPDIR"
 
 # Required elements: WHIP publish, WHEP watch, the encoder probe and the
 # webrtcbin internals (ICE, DTLS/SRTP, RTP session, NACK/RTX).
-ELEMENTS=(appsrc appsink queue videorate capsfilter videoconvert videotestsrc fakesink
+ELEMENTS=(appsrc appsink queue videorate capsfilter videoconvert videoscale videotestsrc fakesink
           h264parse rtph264pay rtph264depay openh264enc openh264dec
           whipsink whepsrc webrtcbin nicesrc nicesink dtlssrtpenc dtlssrtpdec
           srtpenc srtpdec rtpbin rtpsession rtpjitterbuffer rtprtxsend rtprtxreceive
@@ -27,6 +27,8 @@ ELEMENTS=(appsrc appsink queue videorate capsfilter videoconvert videotestsrc fa
 # The encoder/decoder ladders probe at runtime; whatever the build machine
 # lacks only shortens the ladder (VAAPI also needs a driver on the host).
 OPTIONAL=(vah264lpenc vah264enc x264enc vah264dec)
+# Webcam (docs/SCREENSHARE.md, "Câmera"): V4L2 source, MJPEG decode.
+OPTIONAL+=(v4l2src decodebin jpegparse jpegdec)
 
 echo "── release build"
 cargo build --release
