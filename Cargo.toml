@@ -69,6 +69,9 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 rsa = { version = "0.9", features = ["sha2"] }
 base64 = "0.22"
 qrcode = { version = "0.14", default-features = false }
+# Emoji picker: Unicode CLDR names, shortcodes and categories for search
+# and tabs (a hand-kept table would be thousands of lines).
+emojis = "0.9"
 # Voice: WS + UDP + DAVE through the standalone driver (docs/VOICE.md).
 # `gateway` is only there because `receive` fails to build without it in
 # 0.6.0 (`dashmap` is gated behind `gateway`).

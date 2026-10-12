@@ -44,8 +44,12 @@ não deve haver um espaço reservado para uma quarta ação.
 - Separadores de datas, agrupamento de mensagens, respostas, indicador de
   novas mensagens, digitação, caixa multilinha e links clicáveis.
 - Avatares e status, convites com cartão, GIFs e visualizador de imagens.
-- Amigos e solicitações, busca no histórico em cache, arquivos, emoji básico
-  e envio de GIF por URL.
+- Amigos e solicitações, busca no histórico em cache e arquivos.
+- Seletores de emoji (Unicode e personalizados dos servidores), de GIF
+  (endpoints de GIF do Discord, Tenor) e soundboard como popovers ancorados
+  no botão, no padrão `egui::Popup`; fecham com clique fora ou Escape. O
+  seletor de emoji só lista emojis Unicode de um glifo, que a fonte desenha.
+- Quem toca um som do soundboard fica com o anel verde enquanto o som toca.
 - Canal de voz ativo verde, tempo conectado, soundboard e DJ.
 - Bandeja no Linux e Windows, com restaurar janela, sair e continuar chamadas
   em segundo plano ao fechar a janela.

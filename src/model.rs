@@ -48,6 +48,33 @@ pub struct Guild {
     pub icon: Option<String>,
 }
 
+/// A guild's custom emoji (READY, GUILD_CREATE, GUILD_EMOJIS_UPDATE).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GuildEmoji {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub animated: bool,
+    /// `false` once the guild lost the boost level that unlocked it.
+    #[serde(default)]
+    pub available: Option<bool>,
+}
+
+/// One result of Discord's GIF picker endpoints (`/gifs/search`,
+/// `/gifs/trending-gifs`), Tenor behind them.
+#[derive(Clone, Debug, Deserialize)]
+pub struct Gif {
+    /// Provider page (tenor.com/view/…): what the official client sends,
+    /// which Discord embeds as a gifv.
+    pub url: String,
+    /// The media in the requested `media_format`.
+    pub src: String,
+    #[serde(default)]
+    pub width: f32,
+    #[serde(default)]
+    pub height: f32,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Channel {
     pub id: String,

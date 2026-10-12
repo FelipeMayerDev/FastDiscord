@@ -1,6 +1,6 @@
 //! Typed messages between the UI thread and the backend task.
 
-use crate::model::{Channel, Guild, Message, User, VoiceState};
+use crate::model::{Channel, Gif, Guild, GuildEmoji, Message, User, VoiceState};
 
 /// Sends [`UiEvent`]s to the UI thread and wakes egui's loop right after.
 /// The loop only redraws on input otherwise, so background events (guild
@@ -105,6 +105,10 @@ pub enum Command {
         sound_id: String,
         source_guild_id: Option<String>,
     },
+    /// GIF picker: trending for an empty query, search otherwise.
+    SearchGifs {
+        query: String,
+    },
     /// Fetch a guild member (name/avatar) for a voice state that only
     /// carries a user id, as in READY.
     LoadVoiceUser {
@@ -208,8 +212,24 @@ pub enum UiEvent {
     },
     /// Someone (us included) played a soundboard sound in our channel.
     VoiceEffect {
+        user_id: String,
         sound_id: String,
         volume: f32,
+    },
+    /// A soundboard sound started playing: its sender lights up as
+    /// speaking for `duration`.
+    SoundboardPlaying {
+        user_id: String,
+        duration: std::time::Duration,
+    },
+    GifsLoaded {
+        query: String,
+        result: Result<Vec<Gif>, String>,
+    },
+    /// A guild's custom emojis, replacing what the UI had.
+    GuildEmojis {
+        guild_id: String,
+        emojis: Vec<GuildEmoji>,
     },
     /// A member lookup resolved to a user, for the voice roster.
     UserResolved {
