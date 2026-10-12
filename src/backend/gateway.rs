@@ -750,6 +750,35 @@ async fn handle_command(api: &Api, command: Command, event_tx: &EventTx, write: 
                 });
             }
         },
+        Command::EditMessage {
+            channel_id,
+            message_id,
+            content,
+        } => match api.edit_message(&channel_id, &message_id, &content).await {
+            Ok(message) => event_tx.send(UiEvent::MessageUpdated {
+                channel_id,
+                message_id,
+                content: message.content,
+            }),
+            Err(err) => event_tx.send(UiEvent::SendFailed {
+                channel_id,
+                error: format!("não consegui editar a mensagem: {err}"),
+            }),
+        },
+        Command::DeleteMessage {
+            channel_id,
+            message_id,
+        } => match api.delete_message(&channel_id, &message_id).await {
+            // MESSAGE_DELETE follows; removing it now feels instant.
+            Ok(()) => event_tx.send(UiEvent::MessageDeleted {
+                channel_id,
+                message_id,
+            }),
+            Err(err) => event_tx.send(UiEvent::SendFailed {
+                channel_id,
+                error: format!("não consegui apagar a mensagem: {err}"),
+            }),
+        },
         Command::SendTyping { channel_id } => {
             if let Err(err) = api.send_typing(&channel_id).await {
                 log::warn!("falha ao avisar digitação: {err}");

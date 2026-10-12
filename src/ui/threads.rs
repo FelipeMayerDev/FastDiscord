@@ -1416,7 +1416,8 @@ fn post_card(
     response.clicked()
 }
 
-/// Right-click on a message: open the thread it started, or start one.
+/// Right-click on a message: open the thread it started, or start one;
+/// on our own messages, edit or delete them too.
 pub(crate) fn message_menu(
     app: &mut VesktopApp,
     ui: &egui::Ui,
@@ -1439,27 +1440,150 @@ pub(crate) fn message_menu(
             )
         })
         .cloned();
-    let can_start =
-        parent.is_some() && matches!(message.kind, MESSAGE_KIND_DEFAULT | MESSAGE_KIND_REPLY);
-    if thread.is_none() && !can_start {
+    let regular = matches!(message.kind, MESSAGE_KIND_DEFAULT | MESSAGE_KIND_REPLY);
+    let can_start = parent.is_some() && regular;
+    let own = regular && app.me.as_ref().is_some_and(|me| me.id == message.author.id);
+    if thread.is_none() && !can_start && !own {
         return;
     }
     egui::Popup::menu(row)
         .open_memory(opened.then_some(egui::SetOpenCommand::Bool(true)))
         .at_pointer_fixed()
-        .show(|ui| match (thread, parent) {
-            (Some(thread), _) => {
+        .show(|ui| {
+            if let Some(thread) = thread {
                 if ui.button("Abrir tópico").clicked() {
                     app.open_thread(thread);
                 }
+            } else if can_start
+                && let Some(parent) = parent
+                && ui.button("Criar tópico").clicked()
+            {
+                start_draft(ui.ctx(), ThreadDraft::from_message(&parent, message));
             }
-            (None, Some(parent)) => {
-                if ui.button("Criar tópico").clicked() {
-                    start_draft(ui.ctx(), ThreadDraft::from_message(&parent, message));
+            if own {
+                let action = |delete| MessageAction {
+                    channel_id: message.channel_id.clone(),
+                    message_id: message.id.clone(),
+                    content: message.content.clone(),
+                    delete,
+                };
+                if ui.button("Editar mensagem").clicked() {
+                    start_message_action(ui.ctx(), action(false));
+                }
+                if ui
+                    .button(RichText::new("Apagar mensagem").color(theme::RED))
+                    .clicked()
+                {
+                    start_message_action(ui.ctx(), action(true));
                 }
             }
-            (None, None) => {}
         });
+}
+
+/// "Editar mensagem" / "Apagar mensagem" on one of our messages, open in
+/// a modal until saved, confirmed or cancelled.
+#[derive(Clone)]
+struct MessageAction {
+    channel_id: String,
+    message_id: String,
+    content: String,
+    delete: bool,
+}
+
+fn message_action_id() -> egui::Id {
+    egui::Id::new("message_action")
+}
+
+fn start_message_action(ctx: &egui::Context, action: MessageAction) {
+    ctx.data_mut(|data| data.insert_temp(message_action_id(), Some(action)));
+}
+
+/// The edit box or the delete confirmation while one is open.
+pub(crate) fn message_action_window(app: &mut VesktopApp, ctx: &egui::Context) {
+    let Some(mut action) = ctx.data(|data| {
+        data.get_temp::<Option<MessageAction>>(message_action_id())
+            .flatten()
+    }) else {
+        return;
+    };
+    let mut done = false;
+    let modal = egui::Modal::new(message_action_id()).show(ctx, |ui| {
+        ui.set_width(420.0);
+        let title = if action.delete {
+            "Apagar mensagem"
+        } else {
+            "Editar mensagem"
+        };
+        ui.label(
+            RichText::new(title)
+                .family(theme::bold())
+                .size(18.0)
+                .color(theme::TEXT),
+        );
+        ui.add_space(6.0);
+        if action.delete {
+            ui.label("Tem certeza que deseja apagar esta mensagem?");
+            egui::Frame::new()
+                .fill(theme::SIDEBAR)
+                .corner_radius(theme::RADIUS_SM)
+                .inner_margin(egui::Margin::same(10))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.add(
+                        egui::Label::new(RichText::new(&action.content).color(theme::MUTED)).wrap(),
+                    );
+                });
+        } else {
+            // Enter saves, Shift+Enter breaks the line, as in the compose box.
+            if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) {
+                done = true;
+            }
+            let response = ui.add(
+                egui::TextEdit::multiline(&mut action.content)
+                    .desired_rows(3)
+                    .desired_width(f32::INFINITY),
+            );
+            if ui.memory(|memory| memory.focused().is_none()) {
+                response.request_focus();
+            }
+        }
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            let confirm = if action.delete {
+                egui::Button::new(RichText::new("Apagar").color(theme::WHITE)).fill(theme::RED)
+            } else {
+                egui::Button::new(RichText::new("Salvar").color(theme::WHITE)).fill(theme::BLURPLE)
+            };
+            if ui.add(confirm).clicked() {
+                done = true;
+            }
+            if ui.button("Cancelar").clicked() {
+                ui.close();
+            }
+        });
+    });
+    // Emptying a message asks to delete it, as Discord does.
+    let content = action.content.trim().to_string();
+    if done && !action.delete && content.is_empty() {
+        action.delete = true;
+        done = false;
+    } else if done {
+        app.compose_error = None;
+        app.send(if action.delete {
+            Command::DeleteMessage {
+                channel_id: action.channel_id.clone(),
+                message_id: action.message_id.clone(),
+            }
+        } else {
+            Command::EditMessage {
+                channel_id: action.channel_id.clone(),
+                message_id: action.message_id.clone(),
+                content,
+            }
+        });
+    }
+    let open = !done && !modal.should_close();
+    ctx.data_mut(|data| data.insert_temp(message_action_id(), open.then_some(action)));
 }
 
 /// Under a message that started a thread: its name and "N mensagens ›".

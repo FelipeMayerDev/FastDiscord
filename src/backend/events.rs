@@ -61,6 +61,16 @@ pub enum Command {
         channel_id: String,
         content: String,
     },
+    /// Edit or delete one of our own messages.
+    EditMessage {
+        channel_id: String,
+        message_id: String,
+        content: String,
+    },
+    DeleteMessage {
+        channel_id: String,
+        message_id: String,
+    },
     /// Signal the user is typing, at most once every few seconds.
     SendTyping {
         channel_id: String,

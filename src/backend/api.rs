@@ -248,6 +248,37 @@ impl Api {
         Ok(Self::check_status(resp).await?.json::<Message>().await?)
     }
 
+    pub async fn edit_message(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        content: &str,
+    ) -> ApiResult<Message> {
+        let resp = self
+            .http
+            .patch(format!(
+                "{REST_BASE}/channels/{channel_id}/messages/{message_id}"
+            ))
+            .header(reqwest::header::AUTHORIZATION, &self.token)
+            .json(&serde_json::json!({ "content": content }))
+            .send()
+            .await?;
+        Ok(Self::check_status(resp).await?.json::<Message>().await?)
+    }
+
+    pub async fn delete_message(&self, channel_id: &str, message_id: &str) -> ApiResult<()> {
+        let resp = self
+            .http
+            .delete(format!(
+                "{REST_BASE}/channels/{channel_id}/messages/{message_id}"
+            ))
+            .header(reqwest::header::AUTHORIZATION, &self.token)
+            .send()
+            .await?;
+        Self::check_status(resp).await?;
+        Ok(())
+    }
+
     /// Stores status and custom status in the account settings, which the
     /// other clients apply on their next update or login. The legacy JSON
     /// route still maps onto the protobuf settings server-side.
