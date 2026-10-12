@@ -5,16 +5,19 @@
 //! Threads live in `guild_channels` next to their parents, so the chat,
 //! mentions and unread routing treat them as ordinary channels. Active
 //! ones come from the gateway; archived ones only from the browser's REST
-//! fetch.
+//! fetch or, in forums, from `threads/search` pages, which also bring the
+//! posts' first messages (`post-data` fills in the active posts').
 
-use egui::{RichText, Sense, Vec2, pos2};
+use std::collections::{HashMap, HashSet};
+
+use egui::{Color32, FontId, RichText, Sense, Vec2, pos2};
 
 use crate::app::{ChannelRef, VesktopApp};
 use crate::backend::{Command, UiEvent};
 use crate::model::{
     CHANNEL_KIND_ANNOUNCEMENT, CHANNEL_KIND_ANNOUNCEMENT_THREAD, CHANNEL_KIND_GUILD_TEXT,
-    CHANNEL_KIND_PUBLIC_THREAD, Channel, MESSAGE_KIND_DEFAULT, MESSAGE_KIND_THREAD_CREATED,
-    MESSAGE_KIND_THREAD_STARTER, Message, ThreadMember,
+    CHANNEL_KIND_PUBLIC_THREAD, Channel, ForumTag, MESSAGE_KIND_DEFAULT,
+    MESSAGE_KIND_THREAD_CREATED, MESSAGE_KIND_THREAD_STARTER, Message, ThreadMember,
 };
 use crate::theme;
 use crate::ui::fade;
@@ -123,6 +126,28 @@ impl VesktopApp {
                     self.select_channel(parent);
                 }
             }
+            UiEvent::ForumPosts {
+                forum_id,
+                sort_by,
+                threads,
+                first_messages,
+                has_more,
+            } => {
+                // A page for a sort since abandoned only adds posts.
+                if let Some(paging) = self
+                    .forums
+                    .pages
+                    .get_mut(&forum_id)
+                    .filter(|paging| paging.sort.param() == sort_by)
+                {
+                    paging.offset += threads.len();
+                    paging.has_more = has_more;
+                    paging.loading = false;
+                }
+                self.forums.store(first_messages);
+                self.upsert_threads(threads);
+            }
+            UiEvent::ForumFirstMessages { messages } => self.forums.store(messages),
             UiEvent::ThreadMembers {
                 thread_id,
                 added,
@@ -493,55 +518,890 @@ fn thread_card(ui: &mut egui::Ui, thread: &Channel) -> bool {
     response.clicked()
 }
 
-/// A forum channel: its posts instead of a chat, plus "Nova postagem".
-pub(crate) fn paint_forum(app: &mut VesktopApp, ui: &mut egui::Ui, forum_id: &str) {
-    // Archived posts come over REST, once per forum and session.
-    let loaded_id = egui::Id::new("forum_threads_loaded");
-    let first_visit = ui.ctx().data_mut(|data| {
-        data.get_temp_mut_or_default::<std::collections::HashSet<String>>(loaded_id)
-            .insert(forum_id.to_string())
-    });
-    if first_visit {
-        app.send(Command::LoadThreads {
-            channel_id: forum_id.to_string(),
+/// What the forum view keeps beside the threads (`app.forums`): posts'
+/// first messages, which the gateway doesn't carry, and archive paging.
+#[derive(Default)]
+pub(crate) struct Forums {
+    /// By post id: a post's first message has the post's snowflake.
+    first_messages: HashMap<String, Message>,
+    /// Posts whose first message was already asked for.
+    requested: HashSet<String>,
+    pages: HashMap<String, ForumPaging>,
+}
+
+impl Forums {
+    fn store(&mut self, messages: Vec<Message>) {
+        for message in messages {
+            self.first_messages.insert(message.id.clone(), message);
+        }
+    }
+}
+
+/// Archived posts come from `threads/search`, 25 at a time.
+struct ForumPaging {
+    sort: ForumSort,
+    offset: usize,
+    has_more: bool,
+    loading: bool,
+}
+
+impl ForumPaging {
+    fn new(sort: ForumSort) -> Self {
+        Self {
+            sort,
+            offset: 0,
+            has_more: true,
+            loading: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ForumSort {
+    Activity,
+    Creation,
+}
+
+impl ForumSort {
+    fn param(self) -> &'static str {
+        match self {
+            Self::Activity => "last_message_time",
+            Self::Creation => "creation_time",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Activity => "Atividade recente",
+            Self::Creation => "Data de criação",
+        }
+    }
+}
+
+/// The forum's search text and tag filter, per forum (egui memory).
+#[derive(Clone, Default)]
+struct ForumView {
+    query: String,
+    tags: Vec<String>,
+}
+
+const MINUTE_MS: i64 = 60_000;
+const DAY_MS: i64 = 24 * 60 * MINUTE_MS;
+
+/// Discord's compact age: "Há 5 min", "Há 3h", "Há 1d", "Há 2 meses".
+fn ago(then_ms: i64, now_ms: i64) -> String {
+    let minutes = (now_ms - then_ms).max(0) / MINUTE_MS;
+    match minutes {
+        0 => "Agora".to_string(),
+        1..60 => format!("Há {minutes} min"),
+        60..1440 => format!("Há {}h", minutes / 60),
+        1440..43_200 => format!("Há {}d", minutes / 1440),
+        43_200..525_600 => match minutes / 43_200 {
+            1 => "Há 1 mês".to_string(),
+            months => format!("Há {months} meses"),
+        },
+        _ => match minutes / 525_600 {
+            1 => "Há 1 ano".to_string(),
+            years => format!("Há {years} anos"),
+        },
+    }
+}
+
+/// The "NOVO" badge. Discord shows it for posts unread and created after
+/// the user's last look at the forum, from read states this client doesn't
+/// keep. Approximated: never opened nor joined, and created in the last
+/// three days.
+fn is_new(post: &Channel, opened: bool, now_ms: i64) -> bool {
+    !opened
+        && post.member.is_none()
+        && crate::util::snowflake_ms(&post.id).is_some_and(|ms| now_ms - ms < 3 * DAY_MS)
+}
+
+/// Title contains the search text (any case) and, with tags picked, the
+/// post carries one of them (Discord's "match some").
+fn post_matches(post: &Channel, query: &str, tags: &[String]) -> bool {
+    post.display_name()
+        .to_lowercase()
+        .contains(&query.trim().to_lowercase())
+        && (tags.is_empty() || post.applied_tags.iter().any(|tag| tags.contains(tag)))
+}
+
+/// A tag's text: Unicode emoji, then the name. Custom emoji are images.
+fn tag_text(tag: &ForumTag) -> String {
+    match &tag.emoji_name {
+        Some(emoji) if tag.emoji_id.is_none() => format!("{emoji} {}", tag.name),
+        _ => tag.name.clone(),
+    }
+}
+
+fn emoji_url(id: &str) -> String {
+    format!("https://cdn.discordapp.com/emojis/{id}.png?size=48")
+}
+
+/// One line of a post's first message, mentions shown as names.
+fn preview_text(app: &VesktopApp, message: &Message) -> String {
+    let text: String = crate::markup::tokenize(&message.content)
+        .into_iter()
+        .map(|segment| match segment.style {
+            crate::markup::Style::Mention => message
+                .mentions
+                .iter()
+                .find(|user| user.id == segment.text.trim_start_matches('@'))
+                .map(|user| format!("@{}", user.display_name()))
+                .unwrap_or(segment.text),
+            crate::markup::Style::ChannelName => app
+                .find_channel(segment.text.trim_start_matches('#'))
+                .map(|channel| format!("#{}", channel.display_name()))
+                .unwrap_or(segment.text),
+            _ => segment.text,
+        })
+        .collect();
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The first image attached to a message, for the post's thumbnail.
+fn first_image(message: &Message) -> Option<String> {
+    message
+        .attachments
+        .iter()
+        .find(|attachment| {
+            attachment
+                .content_type
+                .as_deref()
+                .is_some_and(|kind| kind.starts_with("image/"))
+        })
+        .and_then(|attachment| attachment.url.clone())
+}
+
+impl VesktopApp {
+    /// Asks for the forum's next page of archived posts, unless one is on
+    /// its way or the archive is exhausted.
+    fn load_forum_page(&mut self, forum_id: &str) {
+        let paging = self
+            .forums
+            .pages
+            .entry(forum_id.to_string())
+            .or_insert_with(|| ForumPaging::new(ForumSort::Activity));
+        if paging.loading || !paging.has_more {
+            return;
+        }
+        paging.loading = true;
+        let (sort_by, offset) = (paging.sort.param(), paging.offset);
+        self.send(Command::SearchForumPosts {
+            forum_id: forum_id.to_string(),
+            sort_by,
+            offset,
         });
     }
+}
+
+/// A rounded label: tags, badges, chips. `emoji` is a custom emoji painted
+/// before the text; `fill` sees the response, for hover.
+#[allow(clippy::too_many_arguments)]
+fn pill(
+    app: &mut VesktopApp,
+    ui: &mut egui::Ui,
+    text: &str,
+    font: FontId,
+    color: Color32,
+    emoji: Option<&str>,
+    height: f32,
+    fill: impl FnOnce(&egui::Ui, &egui::Response) -> Color32,
+) -> egui::Response {
+    let (galley, size) = pill_size(ui, text, font, color, emoji.is_some(), height);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    ui.painter()
+        .rect_filled(rect, height / 2.0, fill(ui, &response));
+    let mut x = rect.left() + height / 2.5;
+    if let Some(id) = emoji {
+        let icon = egui::Rect::from_min_size(
+            pos2(x, rect.center().y - height * 0.3),
+            Vec2::splat(height * 0.6),
+        );
+        if let Some(texture) = app.images.get(ui.ctx(), &app.handle, &emoji_url(id)) {
+            egui::Image::from_texture(&texture).paint_at(ui, icon);
+        }
+        x += icon.width() + 4.0;
+    }
+    let y = rect.center().y - galley.size().y / 2.0;
+    ui.painter().galley(pos2(x, y), galley, color);
+    response
+}
+
+fn pill_size(
+    ui: &egui::Ui,
+    text: &str,
+    font: FontId,
+    color: Color32,
+    emoji: bool,
+    height: f32,
+) -> (std::sync::Arc<egui::Galley>, Vec2) {
+    let galley = ui.painter().layout_no_wrap(text.to_string(), font, color);
+    let emoji_width = if emoji { height * 0.6 + 4.0 } else { 0.0 };
+    let width = galley.size().x + emoji_width + 2.0 * height / 2.5;
+    (galley, Vec2::new(width, height))
+}
+
+/// A filled speech bubble: the posts' message count and "Nova postagem".
+fn draw_bubble(painter: &egui::Painter, center: egui::Pos2, radius: f32, color: Color32) {
+    painter.circle_filled(center, radius, color);
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            center + Vec2::new(-radius, 0.0),
+            center + Vec2::new(0.0, radius),
+            center + Vec2::new(-radius, radius),
+        ],
+        color,
+        egui::Stroke::NONE,
+    ));
+}
+
+/// A clipboard with a check: the post guidelines button.
+fn draw_guidelines_icon(painter: &egui::Painter, center: egui::Pos2, color: Color32) {
+    let stroke = egui::Stroke::new(1.5, color);
+    let board = egui::Rect::from_center_size(center, Vec2::new(13.0, 15.0));
+    painter.rect_stroke(board, 2.0, stroke, egui::StrokeKind::Middle);
+    painter.add(egui::Shape::line(
+        vec![
+            center + Vec2::new(-3.5, 0.0),
+            center + Vec2::new(-1.0, 2.5),
+            center + Vec2::new(3.5, -2.5),
+        ],
+        stroke,
+    ));
+}
+
+fn chip_fill(ui: &egui::Ui, response: &egui::Response, selected: bool) -> Color32 {
+    if selected {
+        theme::BLURPLE.gamma_multiply(0.6)
+    } else {
+        fade(
+            ui,
+            response.id,
+            response.hovered(),
+            theme::HOVER,
+            theme::SELECTED,
+        )
+    }
+}
+
+/// A forum channel, as Discord lays it out: search-or-create bar, post
+/// guidelines, sort and tag chips, then the posts as cards.
+pub(crate) fn paint_forum(app: &mut VesktopApp, ui: &mut egui::Ui, forum_id: &str) {
     let Some(forum) = app.find_channel(forum_id).cloned() else {
         return;
     };
+    let view_id = egui::Id::new(("forum_view", forum_id));
+    let mut view: ForumView = ui
+        .ctx()
+        .data_mut(|data| data.get_temp(view_id).unwrap_or_default());
+    let guidelines_id = egui::Id::new(("forum_guidelines", forum_id));
+    let mut guidelines_open = ui
+        .ctx()
+        .data_mut(|data| *data.get_persisted_mut_or(guidelines_id, true));
+    let topic = forum.topic.clone().filter(|topic| !topic.trim().is_empty());
+
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing = Vec2::ZERO;
         ui.add_space(16.0);
+        let (icon, _) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::hover());
+        draw_threads_icon(ui.painter(), icon.center(), theme::MUTED);
+        ui.add_space(8.0);
         ui.label(
-            RichText::new(format!("# {}", forum.display_name()))
+            RichText::new(forum.display_name())
                 .family(theme::bold())
                 .size(16.0)
                 .color(theme::TEXT),
         );
-        if let Some(topic) = forum.topic.as_deref().filter(|topic| !topic.is_empty()) {
-            ui.add_space(10.0);
-            ui.label(RichText::new(topic).small().color(theme::MUTED));
-        }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_space(14.0);
-            if ui.button("Nova postagem").clicked() {
-                start_draft(ui.ctx(), ThreadDraft::standalone(&forum));
-            }
+            crate::ui::members::toggle(ui);
         });
     });
     ui.separator();
-    if let Some(error) = &app.compose_error {
-        ui.label(RichText::new(error).small().color(theme::RED));
-    }
+    crate::ui::members::panel(app, ui, forum_id);
+
+    let sort = app
+        .forums
+        .pages
+        .get(forum_id)
+        .map_or(ForumSort::Activity, |paging| paging.sort);
+    let mut new_sort = None;
     let mut clicked = None;
-    egui::Frame::NONE
-        .inner_margin(egui::Margin::symmetric(16, 8))
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let output = egui::ScrollArea::vertical()
+        .id_salt(("forum", forum_id))
+        .auto_shrink([false, false])
         .show(ui, |ui| {
-            clicked = thread_list(app, ui, forum_id, f32::INFINITY);
+            egui::Frame::NONE
+                .inner_margin(egui::Margin::symmetric(20, 12))
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 12.0;
+                    search_bar(ui, &forum, &mut view, topic.is_some(), &mut guidelines_open);
+                    if let Some(error) = &app.compose_error {
+                        ui.label(RichText::new(error).small().color(theme::RED));
+                    }
+                    if let Some(topic) = &topic {
+                        guidelines(ui, topic, &mut guidelines_open);
+                    }
+                    new_sort = filter_chips(app, ui, &forum, sort, &mut view);
+                    clicked = post_cards(app, ui, &forum, sort, &view, now_ms);
+                });
         });
+    let near_bottom =
+        output.state.offset.y + output.inner_rect.height() > output.content_size.y - 400.0;
+
+    if let Some(sort) = new_sort {
+        app.forums
+            .pages
+            .insert(forum_id.to_string(), ForumPaging::new(sort));
+    }
+    // The first page, then one more whenever the list nears its end.
+    let first_page = app
+        .forums
+        .pages
+        .get(forum_id)
+        .is_none_or(|paging| paging.offset == 0);
+    if first_page || near_bottom {
+        app.load_forum_page(forum_id);
+    }
     if let Some(id) = clicked {
         app.select_channel(id);
     }
+    ui.ctx().data_mut(|data| {
+        data.insert_temp(view_id, view);
+        data.insert_persisted(guidelines_id, guidelines_open);
+    });
+}
+
+/// "Buscar ou criar postagem...", the guidelines toggle and "Nova postagem"
+/// (titled with what was typed).
+fn search_bar(
+    ui: &mut egui::Ui,
+    forum: &Channel,
+    view: &mut ForumView,
+    has_guidelines: bool,
+    guidelines_open: &mut bool,
+) {
+    egui::Frame::new()
+        .fill(theme::SIDEBAR)
+        .stroke(egui::Stroke::new(1.0, theme::DIVIDER))
+        .corner_radius(theme::RADIUS_SM)
+        .inner_margin(egui::Margin::symmetric(12, 8))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let (icon, _) = ui.allocate_exact_size(Vec2::splat(24.0), Sense::hover());
+                crate::ui::channel_sidebar::draw_search_icon(
+                    ui.painter(),
+                    icon.center(),
+                    theme::MUTED,
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let text = ui.painter().layout_no_wrap(
+                        "Nova postagem".to_string(),
+                        FontId::new(14.0, theme::bold()),
+                        theme::WHITE,
+                    );
+                    let size = Vec2::new(text.size().x + 44.0, 34.0);
+                    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+                    let fill = fade(
+                        ui,
+                        response.id,
+                        response.hovered(),
+                        theme::BLURPLE,
+                        Color32::from_rgb(0x47, 0x52, 0xc4),
+                    );
+                    ui.painter().rect_filled(rect, theme::RADIUS_SM, fill);
+                    draw_bubble(
+                        ui.painter(),
+                        pos2(rect.left() + 20.0, rect.center().y),
+                        6.5,
+                        theme::WHITE,
+                    );
+                    let y = rect.center().y - text.size().y / 2.0;
+                    ui.painter()
+                        .galley(pos2(rect.left() + 32.0, y), text, theme::WHITE);
+                    if response
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        let name = view.query.trim().chars().take(NAME_MAX).collect();
+                        start_draft(
+                            ui.ctx(),
+                            ThreadDraft {
+                                name,
+                                ..ThreadDraft::standalone(forum)
+                            },
+                        );
+                    }
+                    if has_guidelines {
+                        ui.add_space(8.0);
+                        let (rect, response) =
+                            ui.allocate_exact_size(Vec2::splat(34.0), Sense::click());
+                        ui.painter().rect_filled(
+                            rect,
+                            theme::RADIUS_SM,
+                            crate::ui::control_bg(ui, &response, *guidelines_open),
+                        );
+                        draw_guidelines_icon(ui.painter(), rect.center(), theme::TEXT);
+                        if response.on_hover_text("Diretrizes da postagem").clicked() {
+                            *guidelines_open = !*guidelines_open;
+                        }
+                    }
+                    ui.add_space(8.0);
+                    ui.add(
+                        egui::TextEdit::singleline(&mut view.query)
+                            .hint_text("Buscar ou criar postagem...")
+                            .font(FontId::proportional(16.0))
+                            .frame(egui::Frame::NONE)
+                            .desired_width(ui.available_width()),
+                    );
+                });
+            });
+        });
+}
+
+/// "Diretrizes da postagem": the forum's topic, collapsed or expanded by
+/// its header (or the search bar's button).
+fn guidelines(ui: &mut egui::Ui, topic: &str, open: &mut bool) {
+    let frame = egui::Frame::new()
+        .fill(theme::SIDEBAR)
+        .corner_radius(theme::RADIUS_SM)
+        .inner_margin(egui::Margin::symmetric(14, 10))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                draw_guidelines_icon(
+                    ui.painter(),
+                    ui.cursor().min + Vec2::new(8.0, 9.0),
+                    theme::MUTED,
+                );
+                ui.add_space(22.0);
+                ui.label(
+                    RichText::new("Diretrizes da postagem")
+                        .family(theme::bold())
+                        .color(theme::TEXT),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new(if *open { "▾" } else { "▸" }).color(theme::MUTED));
+                });
+            });
+            if *open {
+                ui.add_space(4.0);
+                ui.label(RichText::new(topic).color(theme::TEXT));
+            }
+        });
+    // The header row toggles; the text below stays selectable.
+    let header = egui::Rect::from_min_max(
+        frame.response.rect.min,
+        pos2(
+            frame.response.rect.right(),
+            frame.response.rect.top() + 38.0,
+        ),
+    );
+    let response = ui
+        .interact(header, ui.id().with("forum_guidelines"), Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    if response.clicked() {
+        *open = !*open;
+    }
+}
+
+/// "Ordenar e ver", a divider, then the tags that fit as filter chips and
+/// "Todos" with every tag. Returns a newly picked sort.
+fn filter_chips(
+    app: &mut VesktopApp,
+    ui: &mut egui::Ui,
+    forum: &Channel,
+    sort: ForumSort,
+    view: &mut ForumView,
+) -> Option<ForumSort> {
+    const CHIP: f32 = 32.0;
+    let font = FontId::new(14.0, theme::bold());
+    let mut new_sort = None;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        let response = pill(
+            app,
+            ui,
+            "Ordenar e ver ▾",
+            font.clone(),
+            theme::MUTED,
+            None,
+            CHIP,
+            |ui, response| chip_fill(ui, response, false),
+        );
+        egui::Popup::menu(&response)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .width(220.0)
+            .show(|ui| {
+                ui.label(RichText::new("Ordenar por").small().color(theme::MUTED));
+                for option in [ForumSort::Activity, ForumSort::Creation] {
+                    if ui
+                        .selectable_label(sort == option, option.label())
+                        .clicked()
+                    {
+                        if sort != option {
+                            new_sort = Some(option);
+                        }
+                        ui.close();
+                    }
+                }
+                ui.separator();
+                ui.label(RichText::new("Ver como").small().color(theme::MUTED));
+                let _ = ui.selectable_label(true, "Lista");
+            });
+        if forum.available_tags.is_empty() {
+            return;
+        }
+        let (divider, _) = ui.allocate_exact_size(Vec2::new(1.0, CHIP - 8.0), Sense::hover());
+        ui.painter().rect_filled(divider, 0.0, theme::DIVIDER);
+
+        // Tags in order while they fit, leaving room for "Todos".
+        let (_, todos) = pill_size(ui, "Todos ▾", font.clone(), theme::MUTED, false, CHIP);
+        let mut room = ui.available_width() - todos.x - 8.0;
+        for tag in &forum.available_tags {
+            let text = tag_text(tag);
+            let emoji = tag.emoji_id.as_deref();
+            let (_, size) = pill_size(ui, &text, font.clone(), theme::TEXT, emoji.is_some(), CHIP);
+            room -= size.x + 8.0;
+            if room < 0.0 {
+                break;
+            }
+            let on = view.tags.contains(&tag.id);
+            let response = pill(
+                app,
+                ui,
+                &text,
+                font.clone(),
+                theme::TEXT,
+                emoji,
+                CHIP,
+                |ui, response| chip_fill(ui, response, on),
+            );
+            if response
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked()
+            {
+                toggle_tag(&mut view.tags, &tag.id);
+            }
+        }
+        let response = pill(
+            app,
+            ui,
+            "Todos ▾",
+            font.clone(),
+            theme::MUTED,
+            None,
+            CHIP,
+            |ui, response| chip_fill(ui, response, false),
+        );
+        egui::Popup::menu(&response)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .width(220.0)
+            .show(|ui| {
+                for tag in &forum.available_tags {
+                    let mut on = view.tags.contains(&tag.id);
+                    if ui.checkbox(&mut on, tag_text(tag)).changed() {
+                        toggle_tag(&mut view.tags, &tag.id);
+                    }
+                }
+                if !view.tags.is_empty() {
+                    ui.separator();
+                    if ui.button("Limpar filtros").clicked() {
+                        view.tags.clear();
+                    }
+                }
+            });
+    });
+    new_sort
+}
+
+fn toggle_tag(tags: &mut Vec<String>, id: &str) {
+    match tags.iter().position(|tag| tag == id) {
+        Some(index) => {
+            tags.remove(index);
+        }
+        None => tags.push(id.to_string()),
+    }
+}
+
+/// The forum's posts that pass the filters, as cards; returns the clicked
+/// one. Also asks for the first messages active posts lack.
+fn post_cards(
+    app: &mut VesktopApp,
+    ui: &mut egui::Ui,
+    forum: &Channel,
+    sort: ForumSort,
+    view: &ForumView,
+    now_ms: i64,
+) -> Option<String> {
+    let Some(ChannelRef::Guild(guild_id)) = app.channel_index.get(&forum.id) else {
+        return None;
+    };
+    let mut posts: Vec<Channel> = app
+        .guild_channels
+        .get(guild_id)
+        .into_iter()
+        .flatten()
+        .filter(|channel| {
+            channel.is_thread() && channel.parent_id.as_deref() == Some(forum.id.as_str())
+        })
+        .cloned()
+        .collect();
+    match sort {
+        ForumSort::Activity => posts.sort_by(|a, b| by_activity(&a, &b)),
+        ForumSort::Creation => {
+            posts.sort_by_key(|post| std::cmp::Reverse((post.id.len(), post.id.clone())))
+        }
+    }
+
+    let missing: Vec<String> = posts
+        .iter()
+        .filter(|post| {
+            !app.forums.first_messages.contains_key(&post.id)
+                && !app.forums.requested.contains(&post.id)
+        })
+        .map(|post| post.id.clone())
+        .collect();
+    // ponytail: 25 per request, Discord's search page size; the endpoint's
+    // own cap is undocumented.
+    for chunk in missing.chunks(25) {
+        app.forums.requested.extend(chunk.iter().cloned());
+        app.send(Command::LoadForumPostData {
+            forum_id: forum.id.clone(),
+            thread_ids: chunk.to_vec(),
+        });
+    }
+
+    let shown: Vec<&Channel> = posts
+        .iter()
+        .filter(|post| post_matches(post, &view.query, &view.tags))
+        .collect();
+    let loading = app
+        .forums
+        .pages
+        .get(&forum.id)
+        .is_none_or(|paging| paging.loading);
+    if shown.is_empty() && !loading {
+        let empty = if posts.is_empty() {
+            "Nenhuma postagem ainda."
+        } else {
+            "Nenhuma postagem encontrada."
+        };
+        ui.label(RichText::new(empty).color(theme::MUTED));
+    }
+    let mut clicked = None;
+    for post in shown {
+        let opened = app.messages.contains_key(&post.id) || app.last_seen.contains_key(&post.id);
+        let new = is_new(post, opened, now_ms);
+        if post_card(app, ui, post, &forum.available_tags, new, now_ms) {
+            clicked = Some(post.id.clone());
+        }
+    }
+    if loading {
+        ui.vertical_centered(|ui| ui.spinner());
+    }
+    clicked
+}
+
+/// One post: tags, title (+ "NOVO"), "Autor: prévia", reactions, message
+/// count and age, with the first image as a thumbnail on the right.
+fn post_card(
+    app: &mut VesktopApp,
+    ui: &mut egui::Ui,
+    post: &Channel,
+    tags: &[ForumTag],
+    new: bool,
+    now_ms: i64,
+) -> bool {
+    const PAD: f32 = 16.0;
+    const THUMB: f32 = 94.0;
+    // The first message arrives with the post's page, or is the open
+    // thread's oldest cached message.
+    let first = app
+        .forums
+        .first_messages
+        .get(&post.id)
+        .cloned()
+        .or_else(|| {
+            app.messages
+                .get(&post.id)
+                .and_then(|messages| messages.first())
+                .filter(|message| message.id == post.id)
+                .cloned()
+        });
+    let thumbnail = first.as_ref().and_then(first_image);
+    let width = ui.available_width();
+    let top = ui.cursor().min;
+    let background = ui.painter().add(egui::Shape::Noop);
+    let text_width = width
+        - 2.0 * PAD
+        - if thumbnail.is_some() {
+            THUMB + PAD
+        } else {
+            0.0
+        };
+    let mut content = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(egui::Rect::from_min_size(
+                top + Vec2::new(PAD, 12.0),
+                Vec2::new(text_width, f32::INFINITY),
+            ))
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
+    content.spacing_mut().item_spacing.y = 6.0;
+
+    let applied: Vec<&ForumTag> = tags
+        .iter()
+        .filter(|tag| post.applied_tags.contains(&tag.id))
+        .collect();
+    if !applied.is_empty() {
+        content.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            for tag in applied {
+                pill(
+                    app,
+                    ui,
+                    &tag_text(tag),
+                    FontId::new(12.5, theme::bold()),
+                    theme::TEXT,
+                    tag.emoji_id.as_deref(),
+                    24.0,
+                    |_, _| theme::SIDEBAR,
+                );
+            }
+        });
+    }
+    content.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        ui.scope(|ui| {
+            ui.set_max_width(text_width - if new { 60.0 } else { 0.0 });
+            ui.add(
+                egui::Label::new(
+                    RichText::new(post.display_name())
+                        .family(theme::bold())
+                        .size(19.0)
+                        .color(theme::TEXT),
+                )
+                .truncate()
+                .selectable(false),
+            );
+        });
+        if new {
+            pill(
+                app,
+                ui,
+                "NOVO",
+                FontId::new(11.0, theme::bold()),
+                theme::WHITE,
+                None,
+                18.0,
+                |_, _| theme::BLURPLE,
+            );
+        }
+    });
+    if let Some(first) = &first {
+        let author = first.author.display_name();
+        let mut job = egui::text::LayoutJob::default();
+        job.append(
+            author,
+            0.0,
+            egui::TextFormat::simple(
+                FontId::new(14.0, theme::bold()),
+                crate::util::name_color(author),
+            ),
+        );
+        job.append(
+            &format!(": {}", preview_text(app, first)),
+            0.0,
+            egui::TextFormat::simple(FontId::proportional(14.0), theme::MUTED),
+        );
+        content.add(egui::Label::new(job).truncate().selectable(false));
+    }
+    content.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        if let Some(reaction) = first.as_ref().and_then(|first| first.reactions.first()) {
+            let emoji = reaction.emoji.id.as_deref();
+            let name = if emoji.is_some() {
+                String::new()
+            } else {
+                reaction.emoji.name.clone().unwrap_or_default()
+            };
+            pill(
+                app,
+                ui,
+                &format!("{name} {}", reaction.count),
+                FontId::proportional(14.0),
+                theme::TEXT,
+                emoji,
+                26.0,
+                |_, _| theme::SIDEBAR,
+            );
+            ui.add_space(4.0);
+        }
+        let (icon, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+        draw_bubble(ui.painter(), icon.center(), 6.0, theme::TEXT);
+        ui.label(
+            RichText::new(post.message_count.unwrap_or(0).to_string())
+                .size(14.0)
+                .color(theme::TEXT),
+        );
+        let last = post.last_message_id.as_deref().unwrap_or(&post.id);
+        if let Some(ms) = crate::util::snowflake_ms(last) {
+            ui.label(
+                RichText::new(format!("·  {}", ago(ms, now_ms)))
+                    .size(14.0)
+                    .color(theme::MUTED),
+            );
+        }
+    });
+
+    let content_height = content.min_rect().bottom() + 12.0 - top.y;
+    let thumb_height = if thumbnail.is_some() {
+        THUMB + 2.0 * PAD
+    } else {
+        0.0
+    };
+    let rect = egui::Rect::from_min_size(top, Vec2::new(width, content_height.max(thumb_height)));
+    let response = ui
+        .allocate_rect(rect, Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    let fill = fade(
+        ui,
+        response.id,
+        response.hovered(),
+        theme::CHAT.lerp_to_gamma(theme::HOVER, 0.5),
+        theme::HOVER,
+    );
+    ui.painter().set(
+        background,
+        egui::epaint::RectShape::new(
+            rect,
+            theme::RADIUS_SM,
+            fill,
+            egui::Stroke::new(1.0, theme::DIVIDER),
+            egui::StrokeKind::Inside,
+        ),
+    );
+    if let Some(url) = thumbnail
+        && let Some(texture) = app.images.get(ui.ctx(), &app.handle, &url)
+    {
+        // Center-cropped to a square, like Discord's.
+        let size = texture.size_vec2();
+        let side = size.x.min(size.y);
+        let crop = Vec2::new(side / size.x, side / size.y);
+        let uv = egui::Rect::from_center_size(pos2(0.5, 0.5), crop);
+        let thumb = egui::Rect::from_center_size(
+            pos2(rect.right() - PAD - THUMB / 2.0, rect.center().y),
+            Vec2::splat(THUMB),
+        );
+        egui::Image::from_texture(&texture)
+            .uv(uv)
+            .corner_radius(theme::RADIUS_SM)
+            .paint_at(ui, thumb);
+    }
+    response.clicked()
 }
 
 /// Right-click on a message: open the thread it started, or start one.
@@ -875,5 +1735,51 @@ mod tests {
         let threads = list.into_threads();
         assert!(threads[0].member.is_none());
         assert!(threads[1].member.is_some());
+    }
+
+    #[test]
+    fn forum_search_page_parses_and_filters_by_title_and_tags() {
+        let page: crate::model::ThreadSearch = serde_json::from_value(serde_json::json!({
+            "threads": [
+                { "id": "10", "type": 11, "parent_id": "1", "name": "Erro TikTok",
+                  "applied_tags": ["7"] },
+                { "id": "11", "type": 11, "parent_id": "1", "name": "Frete Amazon" }
+            ],
+            "members": [{ "id": "11", "user_id": "9", "flags": 1 }],
+            "first_messages": [{
+                "id": "10", "channel_id": "10", "content": "oi",
+                "author": { "id": "9", "username": "gael" },
+                "reactions": [{ "count": 2, "emoji": { "id": null, "name": "👍" } }]
+            }],
+            "has_more": true,
+            "total_results": 40
+        }))
+        .unwrap();
+        assert!(page.has_more);
+        assert_eq!(page.first_messages[0].reactions[0].count, 2);
+        let posts = page.list.into_threads();
+        assert!(posts[1].member.is_some());
+        assert!(post_matches(&posts[0], " tiktok", &[]));
+        assert!(!post_matches(&posts[1], "tiktok", &[]));
+        let tag = ["7".to_string()];
+        assert!(post_matches(&posts[0], "", &tag));
+        assert!(!post_matches(&posts[1], "", &tag));
+    }
+
+    #[test]
+    fn age_labels_and_new_badge() {
+        let now = 1_800_000_000_000;
+        assert_eq!(ago(now - 30_000, now), "Agora");
+        assert_eq!(ago(now - 5 * MINUTE_MS, now), "Há 5 min");
+        assert_eq!(ago(now - 3 * 60 * MINUTE_MS, now), "Há 3h");
+        assert_eq!(ago(now - DAY_MS, now), "Há 1d");
+        assert_eq!(ago(now - 65 * DAY_MS, now), "Há 2 meses");
+        // A snowflake made a day before `now`.
+        let id = (((now - DAY_MS - 1_420_070_400_000) as u64) << 22).to_string();
+        let post = thread(&id, "1", None, false, false);
+        assert!(is_new(&post, false, now));
+        assert!(!is_new(&post, true, now));
+        assert!(!is_new(&post, false, now + 3 * DAY_MS));
+        assert!(!is_new(&thread(&id, "1", None, true, false), false, now));
     }
 }

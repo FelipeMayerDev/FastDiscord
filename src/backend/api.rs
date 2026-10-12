@@ -5,7 +5,9 @@
 use serde::de::DeserializeOwned;
 
 use crate::backend::soundboard::SoundboardSound;
-use crate::model::{Channel, Gif, Guild, Member, Message, Profile, Relationship, ThreadList, User};
+use crate::model::{
+    Channel, Gif, Guild, Member, Message, Profile, Relationship, ThreadList, ThreadSearch, User,
+};
 
 pub const REST_BASE: &str = "https://discord.com/api/v10";
 pub const USER_AGENT: &str = concat!(
@@ -338,6 +340,61 @@ impl Api {
             )
             .await?
             .into_threads())
+    }
+
+    /// A page of a forum's archived posts, as Discord's forum view asks for
+    /// it (`sort_by` is `last_message_time` or `creation_time`).
+    pub async fn search_forum_posts(
+        &self,
+        forum_id: &str,
+        sort_by: &str,
+        offset: usize,
+    ) -> ApiResult<ThreadSearch> {
+        // A forum not indexed yet answers 202 with no `threads`: an empty,
+        // final page.
+        self.get_json(
+            &format!("/channels/{forum_id}/threads/search"),
+            &[
+                ("archived", "true".to_string()),
+                ("sort_by", sort_by.to_string()),
+                ("sort_order", "desc".to_string()),
+                ("limit", "25".to_string()),
+                ("tag_setting", "match_some".to_string()),
+                ("offset", offset.to_string()),
+            ],
+        )
+        .await
+    }
+
+    /// First messages of forum posts (`POST /channels/{forum}/post-data`),
+    /// for the active ones the gateway delivers without them.
+    pub async fn forum_post_data(
+        &self,
+        forum_id: &str,
+        thread_ids: &[String],
+    ) -> ApiResult<Vec<Message>> {
+        #[derive(serde::Deserialize)]
+        struct PostData {
+            #[serde(default)]
+            first_message: Option<Message>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Posts {
+            threads: std::collections::HashMap<String, PostData>,
+        }
+        let resp = self
+            .http
+            .post(format!("{REST_BASE}/channels/{forum_id}/post-data"))
+            .header(reqwest::header::AUTHORIZATION, &self.token)
+            .json(&serde_json::json!({ "thread_ids": thread_ids }))
+            .send()
+            .await?;
+        let posts: Posts = Self::check_status(resp).await?.json().await?;
+        Ok(posts
+            .threads
+            .into_values()
+            .filter_map(|post| post.first_message)
+            .collect())
     }
 
     /// Starts a thread from `message_id`, or a standalone thread / forum

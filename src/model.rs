@@ -117,6 +117,23 @@ pub struct Channel {
     /// Threads only: set when the current user joined the thread.
     #[serde(default)]
     pub member: Option<ThreadMember>,
+    /// Forums only: the tags posts can carry.
+    #[serde(default)]
+    pub available_tags: Vec<ForumTag>,
+    /// Forum posts only: ids of their tags, from the parent's `available_tags`.
+    #[serde(default)]
+    pub applied_tags: Vec<String>,
+}
+
+/// A forum tag; at most one of the emoji fields is set.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ForumTag {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub emoji_id: Option<String>,
+    #[serde(default)]
+    pub emoji_name: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -159,6 +176,18 @@ impl ThreadList {
         }
         threads
     }
+}
+
+/// `GET /channels/{forum}/threads/search`: a page of posts with their first
+/// messages (whose ids are the posts' ids).
+#[derive(Debug, Default, Deserialize)]
+pub struct ThreadSearch {
+    #[serde(flatten)]
+    pub list: ThreadList,
+    #[serde(default)]
+    pub first_messages: Vec<Message>,
+    #[serde(default)]
+    pub has_more: bool,
 }
 
 impl Channel {
@@ -246,6 +275,24 @@ pub struct Message {
     /// The thread this message started, when it started one.
     #[serde(default)]
     pub thread: Option<Box<Channel>>,
+    #[serde(default)]
+    pub reactions: Vec<Reaction>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Reaction {
+    #[serde(default)]
+    pub count: u64,
+    pub emoji: ReactionEmoji,
+}
+
+/// A reaction's emoji: custom ones have an `id`, Unicode ones only a `name`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReactionEmoji {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 /// `message_reference`: which message a reply points at.
