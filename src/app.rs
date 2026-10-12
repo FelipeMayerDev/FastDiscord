@@ -2427,22 +2427,28 @@ impl eframe::App for VesktopApp {
         }
         self.poll_events(ctx);
         self.poll_fockytv();
-        let dj_room = match &self.voice {
-            VoiceConn::Connected {
-                guild_id,
-                channel_id,
-            } => Some(format!("{guild_id}:{channel_id}")),
-            _ => None,
+        let (dj_room, dj_members) = match (&self.voice, &self.me) {
+            (
+                VoiceConn::Connected {
+                    guild_id,
+                    channel_id,
+                },
+                Some(me),
+            ) => (
+                Some((format!("{guild_id}:{channel_id}"), me.id.clone())),
+                self.voice_states
+                    .get(guild_id)
+                    .into_iter()
+                    .flat_map(|roster| roster.values())
+                    .filter(|state| state.channel_id.as_ref() == Some(channel_id))
+                    .map(|state| state.user_id.clone())
+                    .collect(),
+            ),
+            _ => (None, Vec::new()),
         };
-        if !self.settings_open || dj_room.is_none() {
-            self.extras.dj.configure(
-                &self.handle,
-                ctx,
-                dj_room,
-                &self.settings.dj_url,
-                &self.settings.dj_key,
-            );
-        }
+        self.extras
+            .dj
+            .configure(&self.handle, ctx, dj_room, dj_members);
         self.extras.dj.music.set_volume(if self.voice_deaf {
             0
         } else {

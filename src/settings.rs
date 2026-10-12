@@ -93,9 +93,6 @@ pub struct Settings {
     /// Webcam, by the label `backend::camera::devices` gives it (`None` =
     /// the first camera).
     pub camera_device: Option<String>,
-    /// Shared DJ relay; the key belongs to the relay, never to Discord.
-    pub dj_url: String,
-    pub dj_key: String,
     pub dj_volume: u8,
 }
 
@@ -132,9 +129,6 @@ impl Default for Settings {
             fockytv_fps: 60,
             fockytv_max_height: 0,
             camera_device: None,
-            dj_url: "wss://dj.felipemayer.com.br".into(),
-            // Baked in at build time so the key stays out of the public repo.
-            dj_key: option_env!("FASTDISCORD_DJ_KEY").unwrap_or_default().into(),
             dj_volume: 50,
         }
     }

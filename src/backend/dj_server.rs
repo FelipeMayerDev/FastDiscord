@@ -1,4 +1,5 @@
-//! In-memory DJ relay: rooms disappear when their last connection leaves.
+//! The DJ room, hosted in-process by whichever client leads (docs/DJ.md).
+//! Peers reach it over an iroh stream; the leader's own client over a duplex.
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -6,57 +7,36 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use futures_util::{SinkExt, StreamExt};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Semaphore, broadcast};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::broadcast;
 use tokio_tungstenite::tungstenite::Message;
 
 use super::dj::{ClientMessage, ServerMessage, Session, VERSION, now_ms, websocket_config};
 
-struct Room {
+pub struct Room {
     prepared_epoch: u64,
     ready: HashSet<u64>,
     failed: HashSet<u64>,
     session: Session,
     updates: broadcast::Sender<ServerMessage>,
 }
-type Rooms = Arc<Mutex<HashMap<String, Room>>>;
+impl Room {
+    pub fn new(session: Session) -> Self {
+        Self {
+            prepared_epoch: session.epoch,
+            ready: HashSet::new(),
+            failed: HashSet::new(),
+            session,
+            updates: broadcast::channel(64).0,
+        }
+    }
+    pub fn session(&self) -> &Session {
+        &self.session
+    }
+}
+/// Empty while this client is not leading; clearing it disconnects every peer.
+pub type Rooms = Arc<Mutex<HashMap<String, Room>>>;
 
-pub async fn serve(listener: TcpListener, key: String) -> Result<()> {
-    if !(16..=256).contains(&key.len()) {
-        bail!("FASTDISCORD_DJ_KEY must contain 16–256 characters");
-    }
-    let rooms: Rooms = Arc::default();
-    let capacity = Arc::new(Semaphore::new(256));
-    loop {
-        let (stream, _) = listener.accept().await.context("accept DJ connection")?;
-        let Ok(permit) = capacity.clone().try_acquire_owned() else {
-            continue;
-        };
-        let rooms = rooms.clone();
-        let key = key.clone();
-        tokio::spawn(async move {
-            let _permit = permit;
-            // Protocol/authentication errors are deliberately not logged with client input.
-            let _ = peer(stream, &key, rooms).await;
-        });
-    }
-}
-fn valid_room(room: &str) -> bool {
-    let Some((guild, channel)) = room.split_once(':') else {
-        return false;
-    };
-    [guild, channel]
-        .iter()
-        .all(|id| !id.is_empty() && id.len() <= 20 && id.bytes().all(|c| c.is_ascii_digit()))
-}
-fn key_matches(a: &str, b: &str) -> bool {
-    // Compare all bytes without leaking the first differing character.
-    let mut difference = a.len() ^ b.len();
-    for (i, byte) in b.bytes().enumerate() {
-        difference |= usize::from(byte ^ a.as_bytes().get(i).copied().unwrap_or(0));
-    }
-    difference == 0
-}
 fn snapshot(room: &Room) -> ServerMessage {
     ServerMessage::State {
         session: room.session.clone(),
@@ -102,12 +82,16 @@ struct Membership {
     rooms: Rooms,
     room: String,
     peer_id: u64,
+    user: String,
 }
 impl Drop for Membership {
     fn drop(&mut self) {
         let mut rooms = self.rooms.lock().unwrap();
         if let Some(room) = rooms.get_mut(&self.room) {
             room.session.participants -= 1;
+            if let Some(i) = room.session.peers.iter().position(|u| *u == self.user) {
+                room.session.peers.remove(i);
+            }
             room.ready.remove(&self.peer_id);
             room.failed.remove(&self.peer_id);
             if room.session.participants == 0 {
@@ -119,8 +103,12 @@ impl Drop for Membership {
         }
     }
 }
-async fn peer(stream: TcpStream, key: &str, rooms: Rooms) -> Result<()> {
-    stream.set_nodelay(true)?;
+/// Serves one participant; `user` is the Discord id its endpoint proved.
+pub async fn peer<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: S,
+    rooms: Rooms,
+    user: String,
+) -> Result<()> {
     let mut ws = tokio::time::timeout(
         Duration::from_secs(5),
         tokio_tungstenite::accept_async_with_config(stream, Some(websocket_config())),
@@ -131,45 +119,29 @@ async fn peer(stream: TcpStream, key: &str, rooms: Rooms) -> Result<()> {
         .context("missing join")??;
     let join: ClientMessage = serde_json::from_str(first.to_text()?)?;
     let room_id = match join {
+        ClientMessage::Join { version, room }
+            if version == VERSION && rooms.lock().unwrap().contains_key(&room) =>
+        {
+            room
+        }
         ClientMessage::Join { version, .. } if version != VERSION => {
             ws.send(Message::text(serde_json::to_string(
                 &ServerMessage::Error {
-                    message:
-                        "Versão incompatível do DJ; atualize o app e o relay para 0.2.0 ou superior"
-                            .into(),
+                    message: "Versão incompatível do DJ; todos precisam atualizar o app".into(),
                 },
             )?))
             .await?;
             ws.close(None).await?;
             return Ok(());
         }
-        ClientMessage::Join {
-            version,
-            room,
-            key: supplied,
-        } if version == VERSION && valid_room(&room) && key_matches(&supplied, key) => room,
-        _ => {
-            ws.send(Message::text(serde_json::to_string(
-                &ServerMessage::Error {
-                    message: "Chave, sala ou versão do DJ inválida".into(),
-                },
-            )?))
-            .await?;
-            ws.close(None).await?;
-            return Ok(());
-        }
+        _ => bail!("not leading this room"),
     };
     let peer_id = NEXT_PEER.fetch_add(1, Ordering::Relaxed);
     let mut updates = {
         let mut rooms = rooms.lock().unwrap();
-        let room = rooms.entry(room_id.clone()).or_insert_with(|| Room {
-            prepared_epoch: 0,
-            ready: HashSet::new(),
-            failed: HashSet::new(),
-            session: Session::default(),
-            updates: broadcast::channel(64).0,
-        });
+        let room = rooms.get_mut(&room_id).context("stopped leading")?;
         room.session.participants += 1;
+        room.session.peers.push(user.clone());
         if room.session.current().is_some()
             && !room.session.preparing
             && !room.session.paused
@@ -187,6 +159,7 @@ async fn peer(stream: TcpStream, key: &str, rooms: Rooms) -> Result<()> {
         rooms: rooms.clone(),
         room: room_id.clone(),
         peer_id,
+        user,
     };
     let mut ticker = tokio::time::interval(Duration::from_millis(100));
     let mut last_message = Instant::now();
@@ -250,15 +223,19 @@ async fn peer(stream: TcpStream, key: &str, rooms: Rooms) -> Result<()> {
 mod tests {
     use super::*;
     use crate::backend::dj::{Action, Track};
-    use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
-    type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
-    async fn join(url: &str, room: &str, key: &str) -> Socket {
-        let (mut ws, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+    use tokio::io::DuplexStream;
+    use tokio_tungstenite::WebSocketStream;
+    type Socket = WebSocketStream<DuplexStream>;
+    async fn join(rooms: &Rooms, room: &str, user: &str) -> Socket {
+        let (client, server) = tokio::io::duplex(MAX);
+        tokio::spawn(peer(server, rooms.clone(), user.into()));
+        let (mut ws, _) = tokio_tungstenite::client_async("ws://dj/", client)
+            .await
+            .unwrap();
         ws.send(Message::text(
             serde_json::to_string(&ClientMessage::Join {
                 version: VERSION,
                 room: room.into(),
-                key: key.into(),
             })
             .unwrap(),
         ))
@@ -266,6 +243,7 @@ mod tests {
         .unwrap();
         ws
     }
+    const MAX: usize = 64 * 1024;
     async fn state(ws: &mut Socket, count: usize, revision: u64) -> Session {
         loop {
             let msg = tokio::time::timeout(Duration::from_secs(2), ws.next())
@@ -290,12 +268,13 @@ mod tests {
         .unwrap();
     }
     #[tokio::test]
-    async fn two_clients_share_controls_late_join_and_isolated_rooms() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("ws://{}", listener.local_addr().unwrap());
-        let key = "test-relay-key-1234";
-        let server = tokio::spawn(serve(listener, key.into()));
-        let mut a = join(&url, "1:2", key).await;
+    async fn peers_share_controls_late_join_and_leader_handover() {
+        let rooms = Rooms::default();
+        rooms
+            .lock()
+            .unwrap()
+            .insert("1:2".into(), Room::new(Session::default()));
+        let mut a = join(&rooms, "1:2", "10").await;
         state(&mut a, 1, 0).await;
         action(
             &mut a,
@@ -307,35 +286,34 @@ mod tests {
         )
         .await;
         let first = state(&mut a, 1, 1).await;
-        let mut b = join(&url, "1:2", key).await;
+        let mut b = join(&rooms, "1:2", "20").await;
         let joined = state(&mut b, 2, 1).await;
         assert_eq!(joined.epoch, first.epoch);
         assert_eq!(joined.start_at_ms, first.start_at_ms);
+        assert_eq!(joined.peers, ["10", "20"]);
         action(&mut b, Action::Pause).await;
         assert!(state(&mut a, 2, 2).await.paused);
-        let mut other = join(&url, "1:3", key).await;
-        assert!(state(&mut other, 1, 0).await.tracks.is_empty());
-        action(&mut a, Action::Stop).await;
-        assert!(state(&mut b, 2, 3).await.current().is_none());
+        // Only the room this client leads is served.
+        let mut other = join(&rooms, "1:3", "30").await;
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), other.next())
+                .await
+                .unwrap()
+                .is_none_or(|m| m.is_err())
+        );
         b.close(None).await.unwrap();
-        assert_eq!(state(&mut a, 1, 3).await.participants, 1);
-        let mut wrong = join(&url, "1:2", "incorrect-key-1234").await;
-        let msg = wrong.next().await.unwrap().unwrap();
-        assert!(matches!(
-            serde_json::from_str::<ServerMessage>(msg.to_text().unwrap()).unwrap(),
-            ServerMessage::Error { .. }
-        ));
-        server.abort();
+        assert_eq!(state(&mut a, 1, 2).await.peers, ["10"]);
+        // Stepping down disconnects everyone so they elect the new leader.
+        rooms.lock().unwrap().clear();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(Ok(_)) = a.next().await {}
+        })
+        .await
+        .unwrap();
     }
     #[test]
     fn playback_waits_for_downloads_and_handles_failure_and_departure() {
-        let mut room = Room {
-            prepared_epoch: 0,
-            ready: HashSet::new(),
-            failed: HashSet::new(),
-            session: Session::default(),
-            updates: broadcast::channel(64).0,
-        };
+        let mut room = Room::new(Session::default());
         room.session.participants = 2;
         room.session
             .apply(
@@ -368,14 +346,5 @@ mod tests {
         room.failed.insert(1);
         readiness(&mut room, 25_002);
         assert!(room.session.current().is_none());
-    }
-    #[test]
-    fn room_and_key_validation() {
-        assert!(valid_room("123:456"));
-        assert!(!valid_room("1:2:3"));
-        assert!(!valid_room("../room:1"));
-        assert!(key_matches("secret", "secret"));
-        assert!(!key_matches("secret1", "secret"));
-        assert!(!key_matches("xecret", "secret"));
     }
 }

@@ -15,10 +15,6 @@ on:
 permissions:
   contents: write
 
-env:
-  # Default DJ relay key compiled into the release (src/settings.rs).
-  FASTDISCORD_DJ_KEY: ${{ secrets.FASTDISCORD_DJ_KEY }}
-
 jobs:
   appimage:
     runs-on: ubuntu-latest
@@ -36,20 +32,6 @@ jobs:
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - run: packaging/appimage.sh
-      - name: DJ relay bundle
-        run: |
-          mkdir -p dist/FastDiscord-DJ
-          cp packaging/dj/Dockerfile packaging/dj/compose.yaml packaging/dj/README.md \
-            packaging/dj/.dockerignore packaging/dj/.env.example dist/FastDiscord-DJ/
-          cp target/release/fastdiscord-dj-server dist/FastDiscord-DJ/
-          cp docs/DJ.md dist/FastDiscord-DJ/DJ.md
-          sed -i 's|(../../docs/DJ.md)|(DJ.md)|' dist/FastDiscord-DJ/README.md
-          tar -czf dist/FastDiscord-DJ-linux-x86_64.tar.gz -C dist/FastDiscord-DJ .
-      - uses: actions/upload-artifact@v4
-        with:
-          name: FastDiscord-DJ-linux-x86_64.tar.gz
-          path: dist/FastDiscord-DJ-linux-x86_64.tar.gz
-          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
           name: FastDiscord-x86_64.AppImage

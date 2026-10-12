@@ -331,15 +331,7 @@ fn music_window(app: &mut VesktopApp, ctx: &egui::Context) {
             if let Some(error) = app.extras.dj.music.state.lock().unwrap().error.clone() {
                 ui.label(RichText::new(error).color(theme::RED));
             }
-            if app.settings.dj_url.is_empty() {
-                if ui.button("Configurar servidor DJ").clicked() {
-                    app.extras.music_open = false;
-                    crate::ui::settings_window::open_at(
-                        app,
-                        crate::ui::settings_window::SettingsTab::Voice,
-                    );
-                }
-            } else if !connected {
+            if !connected {
                 ui.label("Conectando ao DJ…");
             }
             ui.separator();

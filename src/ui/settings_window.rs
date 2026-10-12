@@ -321,35 +321,6 @@ fn voice_settings(app: &mut VesktopApp, ui: &mut egui::Ui) {
     if changed {
         apply_voice_change(app);
     }
-    ui.separator();
-    ui.heading("DJ compartilhado");
-    ui.label("Todos na sala devem usar o mesmo servidor e chave do DJ.");
-    ui.label(
-        RichText::new("A conexão será atualizada ao fechar as configurações.")
-            .small()
-            .color(theme::MUTED),
-    );
-    ui.label("Servidor (wss://):");
-    let url = ui.add(
-        egui::TextEdit::singleline(&mut app.settings.dj_url)
-            .hint_text("wss://dj.seudominio.com")
-            .desired_width(f32::INFINITY),
-    );
-    ui.label("Chave do servidor DJ (não é o token do Discord):");
-    let key = ui.add(
-        egui::TextEdit::singleline(&mut app.settings.dj_key)
-            .password(true)
-            .desired_width(f32::INFINITY),
-    );
-    if url.changed() || key.changed() {
-        app.settings.save();
-    }
-    if !app.settings.dj_url.is_empty()
-        && let Err(error) =
-            crate::backend::dj::validate_endpoint(&app.settings.dj_url, &app.settings.dj_key)
-    {
-        ui.label(RichText::new(error).small().color(theme::RED));
-    }
 }
 
 /// The body of the user panel's chevron popups (docs/UI.md §5): device
