@@ -65,7 +65,17 @@ tela abre um modal para escolher a fonte, a resolução e a taxa de quadros
 - Quem toca um som do soundboard fica com o anel verde enquanto o som toca.
 - Tópicos: os seguidos aparecem sob o canal pai; botão **Tópicos** no
   cabeçalho (ativos e arquivados públicos), "Criar tópico" no menu de
-  contexto da mensagem, resumo "N mensagens" e fóruns listando postagens.
+  contexto da mensagem e resumo "N mensagens".
+- Fóruns no layout do Discord: barra "Buscar ou criar postagem..." (filtra
+  pelo título; **Nova postagem** abre a criação com o texto digitado como
+  título), diretrizes da postagem (o tópico do canal) recolhíveis e
+  lembradas por canal, "Ordenar e ver" (atividade recente ou criação),
+  tags como filtros (as que não cabem ficam em **Todos**) e cartões com
+  tags, título, selo NOVO, "Autor: prévia", primeira reação, mensagens,
+  idade e miniatura da primeira imagem. As arquivadas vêm de
+  `threads/search` paginado na rolagem; as ativas, do gateway, com a
+  primeira mensagem via `post-data`. NOVO aproxima a regra do Discord (sem
+  read states): nunca aberta nem seguida e criada nos últimos 3 dias.
 - Canal de voz ativo verde, tempo conectado, soundboard e DJ.
 - Clicar nas barras de sinal de Voz conectada abre a qualidade da conexão:
   gráfico de ping dos últimos 5 minutos, ping atual/médio, perda de pacotes
@@ -76,7 +86,8 @@ tela abre um modal para escolher a fonte, a resolução e a taxa de quadros
 ## Pendências de paridade
 
 Pastas e ordem de servidores dependem do settings protobuf do Discord.
-Reações, pins, tags de fórum e renderização completa de emojis personalizados
+Reações, pins, escolha de tags ao criar postagem, galeria de fórum e
+renderização completa de emojis personalizados
 continuam no roteiro de [PORT.md](PORT.md). Os nomes e capacidades dos
 controles devem acompanhar recursos realmente implementados.
 

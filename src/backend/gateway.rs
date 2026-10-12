@@ -864,6 +864,37 @@ async fn handle_command(api: &Api, command: Command, event_tx: &EventTx, write: 
             Ok(threads) => event_tx.send(UiEvent::ThreadsUpserted { threads }),
             Err(err) => report(api, err, event_tx, "carregar tópicos").await,
         },
+        Command::SearchForumPosts {
+            forum_id,
+            sort_by,
+            offset,
+        } => match api.search_forum_posts(&forum_id, sort_by, offset).await {
+            Ok(page) => event_tx.send(UiEvent::ForumPosts {
+                forum_id,
+                sort_by,
+                threads: page.list.into_threads(),
+                first_messages: page.first_messages,
+                has_more: page.has_more,
+            }),
+            Err(err) => {
+                // Unblocks the forum's paging, then says why.
+                event_tx.send(UiEvent::ForumPosts {
+                    forum_id,
+                    sort_by,
+                    threads: Vec::new(),
+                    first_messages: Vec::new(),
+                    has_more: false,
+                });
+                report(api, err, event_tx, "carregar postagens").await
+            }
+        },
+        Command::LoadForumPostData {
+            forum_id,
+            thread_ids,
+        } => match api.forum_post_data(&forum_id, &thread_ids).await {
+            Ok(messages) => event_tx.send(UiEvent::ForumFirstMessages { messages }),
+            Err(err) => log::warn!("falha ao carregar prévias do fórum {forum_id}: {err}"),
+        },
         Command::CreateThread {
             channel_id,
             message_id,

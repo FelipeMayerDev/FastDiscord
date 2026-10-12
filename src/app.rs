@@ -267,6 +267,8 @@ pub struct VesktopApp {
     pub(crate) extras: ui::voice_extras::VoiceExtras,
     /// Settings → Perfil draft and requests (ui/profile_settings.rs).
     pub(crate) profile: ui::profile_settings::ProfileEditor,
+    /// Forum posts' first messages and paging (ui/threads.rs).
+    pub(crate) forums: ui::threads::Forums,
     /// Filled once a newer release is on disk (updater.rs).
     update: crate::updater::Slot,
 }
@@ -365,6 +367,7 @@ impl VesktopApp {
             applied_theme: None,
             extras: Default::default(),
             profile: Default::default(),
+            forums: Default::default(),
             update: if settings.check_for_updates {
                 crate::updater::spawn(&handle, _cc.egui_ctx.clone())
             } else {
@@ -638,6 +641,7 @@ impl VesktopApp {
         self.guild_channels.clear();
         self.channel_index.clear();
         self.pending_threads.clear();
+        self.forums = Default::default();
         self.messages.clear();
         self.has_more.clear();
         self.stale_channels.clear();
@@ -2386,7 +2390,9 @@ impl VesktopApp {
             | UiEvent::ThreadsUpserted { .. }
             | UiEvent::ThreadCreated { .. }
             | UiEvent::ThreadDeleted { .. }
-            | UiEvent::ThreadMembers { .. }) => self.handle_thread_event(event),
+            | UiEvent::ThreadMembers { .. }
+            | UiEvent::ForumPosts { .. }
+            | UiEvent::ForumFirstMessages { .. }) => self.handle_thread_event(event),
         }
     }
 }

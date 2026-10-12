@@ -126,6 +126,17 @@ pub enum Command {
     LoadThreads {
         channel_id: String,
     },
+    /// A page of a forum's archived posts, from `offset`.
+    SearchForumPosts {
+        forum_id: String,
+        sort_by: &'static str,
+        offset: usize,
+    },
+    /// First messages of a forum's active posts.
+    LoadForumPostData {
+        forum_id: String,
+        thread_ids: Vec<String>,
+    },
     /// Start a thread in `channel_id`: from `message_id` when set, else a
     /// standalone one (`kind` 10/11) or, in a forum, a post whose first
     /// message is `content`. Outside forums `content` follows as the
@@ -351,6 +362,19 @@ pub enum UiEvent {
     /// THREAD_CREATE/THREAD_UPDATE, or a fetched archive page.
     ThreadsUpserted {
         threads: Vec<Channel>,
+    },
+    /// A page of forum posts (`SearchForumPosts`) for `sort_by`; empty and
+    /// final when the fetch failed.
+    ForumPosts {
+        forum_id: String,
+        sort_by: &'static str,
+        threads: Vec<Channel>,
+        first_messages: Vec<Message>,
+        has_more: bool,
+    },
+    /// First messages of forum posts (`LoadForumPostData`).
+    ForumFirstMessages {
+        messages: Vec<Message>,
     },
     /// A thread we created: registered and opened.
     ThreadCreated {
