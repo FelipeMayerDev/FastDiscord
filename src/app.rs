@@ -1940,10 +1940,16 @@ impl VesktopApp {
                 channel_id,
                 message_id,
                 content,
+                embeds,
             } => {
-                if let Some(list) = self.messages.get_mut(&channel_id) {
-                    if let Some(message) = list.iter_mut().find(|m| m.id == message_id) {
+                if let Some(list) = self.messages.get_mut(&channel_id)
+                    && let Some(message) = list.iter_mut().find(|m| m.id == message_id)
+                {
+                    if let Some(content) = content {
                         message.content = content;
+                    }
+                    if let Some(embeds) = embeds {
+                        message.embeds = embeds;
                     }
                 }
             }
@@ -2102,19 +2108,29 @@ impl VesktopApp {
                 let volume = if self.voice_deaf { 0.0 } else { volume };
                 let events = self.event_tx.clone();
                 self.handle.spawn(async move {
-                    let Some(duration) = crate::backend::soundboard::play(sound_id, volume).await
+                    let Some(duration) =
+                        crate::backend::soundboard::play(sound_id.clone(), volume).await
                     else {
                         return;
                     };
-                    events.send(UiEvent::SoundboardPlaying { user_id, duration });
+                    events.send(UiEvent::SoundboardPlaying {
+                        user_id,
+                        sound_id,
+                        duration,
+                    });
                     // Repaint once it ends so the ring goes off.
                     tokio::time::sleep(duration).await;
                     events.repaint();
                 });
             }
-            UiEvent::SoundboardPlaying { user_id, duration } => {
-                self.sound_speaking
-                    .insert(user_id, Instant::now() + duration);
+            UiEvent::SoundboardPlaying {
+                user_id,
+                sound_id,
+                duration,
+            } => {
+                let now = Instant::now();
+                self.sound_speaking.insert(user_id, now + duration);
+                self.extras.sound_playing(sound_id, now, duration);
             }
             UiEvent::GifsLoaded { query, result } => self.gifs = Some((query, result)),
             UiEvent::GuildEmojis { guild_id, emojis } => {
@@ -2550,19 +2566,29 @@ impl eframe::App for VesktopApp {
             });
         }
 
-        egui::Panel::left("server_rail")
+        // The user card floats over the bottom of both left columns, as in
+        // Discord; each column stops above it.
+        let card_margin = ui::channel_sidebar::CARD_MARGIN;
+        let card_h = ui::channel_sidebar::card_height(self, 72.0 + 240.0 - 2.0 * card_margin);
+        let reserved = card_h + 2.0 * card_margin;
+        let rail = egui::Panel::left("server_rail")
             .exact_size(72.0)
             .resizable(false)
             .show(root, |ui| {
-                ui::server_rail::paint(self, ui);
+                ui::server_rail::paint(self, &mut above_card(ui, reserved));
             });
-
-        egui::Panel::left("channel_sidebar")
+        let sidebar = egui::Panel::left("channel_sidebar")
             .exact_size(240.0)
             .resizable(false)
             .show(root, |ui| {
-                ui::channel_sidebar::paint(self, ui);
+                ui::channel_sidebar::paint(self, &mut above_card(ui, reserved));
             });
+        let bottom = sidebar.response.rect.bottom() - card_margin;
+        let card = egui::Rect::from_min_max(
+            egui::pos2(rail.response.rect.left() + card_margin, bottom - card_h),
+            egui::pos2(sidebar.response.rect.right() - card_margin, bottom),
+        );
+        ui::channel_sidebar::paint_card(self, root, card);
 
         egui::CentralPanel::default().show(root, |ui| {
             if self.watch_docked() {
@@ -2594,6 +2620,19 @@ impl eframe::App for VesktopApp {
             ctx.request_repaint_after(Duration::from_millis(400));
         }
     }
+}
+
+/// A left column's content area, ending `reserved` px above the column's
+/// bottom so nothing scrolls under the floating user card.
+fn above_card(ui: &mut egui::Ui, reserved: f32) -> egui::Ui {
+    ui.painter().rect_filled(ui.max_rect(), 0.0, theme::RAIL);
+    let mut rect = ui.max_rect();
+    rect.max.y -= reserved;
+    ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    )
 }
 
 fn should_notify_message(

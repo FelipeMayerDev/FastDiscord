@@ -1,7 +1,7 @@
 //! URL → egui texture cache. Avatars and guild icons are fetched off the UI
 //! thread on a tokio worker and decoded with the `image` crate; the UI only
-//! ever polls a plain channel. Animated GIFs keep every frame and `get`
-//! hands out the one due now.
+//! ever polls a plain channel. Animated GIFs and WebPs keep every frame and
+//! `get` hands out the one due now.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -138,18 +138,33 @@ async fn fetch(http: &reqwest::Client, url: &str, max_side: u32) -> Option<Frame
     decode(&bytes, max_side)
 }
 
-/// Every frame of a GIF, or the single frame of anything else, scaled to
-/// fit `max_side`.
+/// Every frame of an animated GIF or WebP, or the single frame of anything
+/// else, shrunk to fit `max_side` (never enlarged: `thumbnail` upscales, and
+/// a 300-frame GIF blown up to 800 px is hundreds of MB).
 fn decode(bytes: &[u8], max_side: u32) -> Option<Frames> {
     let to_color = |img: image::DynamicImage| {
-        let img = img.thumbnail(max_side, max_side).into_rgba8();
+        let img = if img.width().max(img.height()) > max_side {
+            img.thumbnail(max_side, max_side)
+        } else {
+            img
+        }
+        .into_rgba8();
         let (width, height) = img.dimensions();
         egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &img.into_raw())
     };
-    if image::guess_format(bytes).ok() == Some(image::ImageFormat::Gif) {
-        let decoder = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes)).ok()?;
-        let frames: Frames = decoder
-            .into_frames()
+    let cursor = std::io::Cursor::new(bytes);
+    let animation = match image::guess_format(bytes).ok() {
+        Some(image::ImageFormat::Gif) => image::codecs::gif::GifDecoder::new(cursor)
+            .ok()
+            .map(AnimationDecoder::into_frames),
+        Some(image::ImageFormat::WebP) => image::codecs::webp::WebPDecoder::new(cursor)
+            .ok()
+            .filter(|decoder| decoder.has_animation())
+            .map(AnimationDecoder::into_frames),
+        _ => None,
+    };
+    if let Some(animation) = animation {
+        let frames: Frames = animation
             .take(MAX_FRAMES)
             .map_while(Result::ok)
             .map(|frame| {
@@ -235,5 +250,14 @@ mod tests {
             frame_at(&delays, Duration::from_millis(110)),
             (0, Duration::from_millis(40))
         );
+    }
+
+    #[test]
+    fn animated_webp_keeps_frames_and_is_never_enlarged() {
+        let bytes = include_bytes!("../static/splash.webp"); // 128×128
+        let frames = decode(bytes, 800).unwrap();
+        assert!(frames.len() > 1);
+        assert_eq!(frames[0].0.size, [128, 128]);
+        assert_eq!(decode(bytes, 64).unwrap()[0].0.size, [64, 64]);
     }
 }

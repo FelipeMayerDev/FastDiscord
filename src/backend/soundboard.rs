@@ -19,6 +19,9 @@ pub struct SoundboardSound {
     pub volume: f32,
     #[serde(default)]
     pub emoji_name: Option<String>,
+    /// A custom emoji instead of `emoji_name`'s Unicode one.
+    #[serde(default)]
+    pub emoji_id: Option<String>,
     /// Set on guild sounds (the `source_guild_id` to send them with).
     #[serde(default)]
     pub guild_id: Option<String>,

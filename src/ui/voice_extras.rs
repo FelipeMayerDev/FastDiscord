@@ -1,8 +1,9 @@
 //! The voice action row's soundboard picker (#12) and the DJ window (#15).
 
 use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
-use egui::RichText;
+use egui::{Color32, RichText};
 
 use crate::app::{VesktopApp, VoiceConn};
 use crate::backend::Command;
@@ -20,6 +21,9 @@ pub struct VoiceExtras {
     pub soundboard_loading: HashSet<String>,
     pub soundboard_errors: HashMap<String, String>,
     pub soundboard_error: Option<String>,
+    pub soundboard_query: String,
+    /// When each sound started and stops playing in our channel.
+    pub sounds_playing: HashMap<String, (Instant, Instant)>,
     pub dj: DjClient,
     pub dj_collapsed: bool,
     pub music_open: bool,
@@ -31,6 +35,11 @@ impl VoiceExtras {
         !self.sounds.contains_key(guild_id)
             && !self.soundboard_errors.contains_key(guild_id)
             && self.soundboard_loading.insert(guild_id.to_string())
+    }
+
+    pub fn sound_playing(&mut self, sound_id: String, now: Instant, duration: Duration) {
+        self.sounds_playing.retain(|_, (_, end)| *end > now);
+        self.sounds_playing.insert(sound_id, (now, now + duration));
     }
 }
 
@@ -44,7 +53,8 @@ pub fn show(app: &mut VesktopApp, ctx: &egui::Context) {
 }
 
 /// The soundboard popover, anchored above its button in the voice panel
-/// like the chat's emoji and GIF pickers.
+/// like the chat's emoji and GIF pickers: a search field and the sounds as
+/// a grid of mini cards, the server's own first, then Discord's defaults.
 pub fn soundboard(app: &mut VesktopApp, button: &egui::Response) {
     let VoiceConn::Connected {
         guild_id,
@@ -71,8 +81,13 @@ pub fn soundboard(app: &mut VesktopApp, button: &egui::Response) {
         .align(egui::RectAlign::TOP_START)
         .gap(8.0)
         .show(|ui| {
-            ui.set_width(320.0);
+            ui.set_width(440.0);
             ui.label(RichText::new("Soundboard").strong());
+            ui.add(
+                egui::TextEdit::singleline(&mut app.extras.soundboard_query)
+                    .hint_text("Buscar sons")
+                    .desired_width(f32::INFINITY),
+            );
             if let Some(error) = &app.extras.soundboard_error {
                 ui.label(RichText::new(error).small().color(theme::RED));
             }
@@ -91,29 +106,68 @@ pub fn soundboard(app: &mut VesktopApp, button: &egui::Response) {
                 ui.label(RichText::new("Carregando sons…").color(theme::MUTED));
                 return;
             }
-            let Some(sounds) = app.extras.sounds.get(guild_id) else {
+            let Some(sounds) = app.extras.sounds.get(guild_id).cloned() else {
                 return;
             };
-            if !sounds.iter().any(|sound| sound.available) {
-                ui.label(
-                    RichText::new("Nenhum som disponível neste servidor.").color(theme::MUTED),
-                );
+            let query = app.extras.soundboard_query.clone();
+            let groups = sound_groups(&sounds, &query);
+            if groups.iter().all(Vec::is_empty) {
+                let empty = if query.trim().is_empty() {
+                    "Nenhum som disponível neste servidor."
+                } else {
+                    "Nenhum som encontrado."
+                };
+                ui.label(RichText::new(empty).color(theme::MUTED));
                 return;
             }
+            // Discord refuses sounds from a deafened user too.
+            let blocked = app
+                .voice_deaf
+                .then_some("Não dá pra usar o soundboard com o áudio desativado.");
+            let guild = app.guilds.iter().find(|g| g.id == guild_id).cloned();
             egui::ScrollArea::vertical()
-                .max_height(320.0)
+                .max_height(420.0)
                 .show(ui, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        for sound in sounds.iter().filter(|sound| sound.available) {
-                            let label = match &sound.emoji_name {
-                                Some(emoji) => format!("{emoji} {}", sound.name),
-                                None => sound.name.clone(),
-                            };
-                            if ui.button(label).clicked() {
-                                play = Some(sound.clone());
-                            }
+                    ui.spacing_mut().item_spacing = egui::vec2(CARD_GAP, CARD_GAP);
+                    for (group, own) in groups.iter().zip([true, false]) {
+                        if group.is_empty() {
+                            continue;
                         }
-                    });
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| match guild.as_ref().filter(|_| own) {
+                            Some(guild) => {
+                                let texture = crate::util::guild_icon_url(guild)
+                                    .and_then(|url| app.images.get(ui.ctx(), &app.handle, &url));
+                                crate::ui::round_avatar(
+                                    ui,
+                                    texture.as_ref(),
+                                    16.0,
+                                    &guild.name,
+                                    theme::BLURPLE,
+                                );
+                                let name = RichText::new(&guild.name).small().strong();
+                                crate::ui::emoji::label(app, ui, name.color(theme::MUTED), true);
+                            }
+                            None => {
+                                let name = if own { "Servidor" } else { "Padrão" };
+                                ui.label(RichText::new(name).small().strong().color(theme::MUTED));
+                            }
+                        });
+                        let width = ui.available_width();
+                        let columns = ((width + CARD_GAP) / (CARD_MIN_WIDTH + CARD_GAP))
+                            .floor()
+                            .max(1.0);
+                        let card_width = (width - CARD_GAP * (columns - 1.0)) / columns;
+                        for row in group.chunks(columns as usize) {
+                            ui.horizontal(|ui| {
+                                for &sound in row {
+                                    if sound_card(app, ui, sound, card_width, blocked) {
+                                        play = Some(sound.clone());
+                                    }
+                                }
+                            });
+                        }
+                    }
                 });
         });
     app.extras.soundboard_open = open;
@@ -125,6 +179,113 @@ pub fn soundboard(app: &mut VesktopApp, button: &egui::Response) {
             source_guild_id: sound.guild_id,
         });
     }
+}
+
+const CARD_MIN_WIDTH: f32 = 96.0;
+const CARD_HEIGHT: f32 = 44.0;
+const CARD_GAP: f32 = 6.0;
+
+/// The server's own sounds, then Discord's defaults, whose names contain
+/// `query` (ignoring case).
+fn sound_groups<'a>(sounds: &'a [SoundboardSound], query: &str) -> [Vec<&'a SoundboardSound>; 2] {
+    let query = query.trim().to_lowercase();
+    let (own, defaults) = sounds
+        .iter()
+        .filter(|sound| sound.name.to_lowercase().contains(&query))
+        .partition(|sound| sound.guild_id.is_some());
+    [own, defaults]
+}
+
+/// One mini card: emoji and elided name, a green outline and progress fill
+/// while the sound plays in our channel. Whether it was clicked.
+fn sound_card(
+    app: &mut VesktopApp,
+    ui: &mut egui::Ui,
+    sound: &SoundboardSound,
+    width: f32,
+    blocked: Option<&str>,
+) -> bool {
+    let enabled = sound.available && blocked.is_none();
+    let sense = if enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, CARD_HEIGHT), sense);
+    let radius = theme::RADIUS_SM;
+    let fill = crate::ui::fade(
+        ui,
+        response.id,
+        enabled && response.hovered(),
+        theme::SIDEBAR,
+        theme::HOVER,
+    );
+    ui.painter().rect_filled(rect, radius, fill);
+    let now = Instant::now();
+    if let Some(&(start, end)) = app.extras.sounds_playing.get(&sound.sound_id)
+        && now < end
+    {
+        let done = (now - start).as_secs_f32() / (end - start).as_secs_f32().max(0.01);
+        let mut progress = rect;
+        progress.set_right(rect.left() + rect.width() * done);
+        ui.painter_at(progress)
+            .rect_filled(rect, radius, theme::GREEN.gamma_multiply(0.3));
+        ui.painter().rect_stroke(
+            rect,
+            radius,
+            egui::Stroke::new(2.0, theme::GREEN),
+            egui::StrokeKind::Inside,
+        );
+        ui.ctx().request_repaint();
+    }
+    let text = if enabled {
+        theme::TEXT
+    } else {
+        theme::TEXT.gamma_multiply(0.4)
+    };
+    let mut text_left = rect.left() + 10.0;
+    if sound.emoji_id.is_some() || sound.emoji_name.is_some() {
+        let emoji = egui::Rect::from_center_size(
+            egui::pos2(rect.left() + 20.0, rect.center().y),
+            egui::Vec2::splat(20.0),
+        );
+        let url = match (&sound.emoji_id, &sound.emoji_name) {
+            (Some(id), _) => Some(crate::ui::emoji::custom_url(id, false)),
+            (None, Some(name)) => emojis::get(name).map(crate::ui::emoji::twemoji_url),
+            (None, None) => None,
+        };
+        match url.and_then(|url| app.images.get(ui.ctx(), &app.handle, &url)) {
+            Some(texture) => {
+                let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                let tint = Color32::WHITE.gamma_multiply(if enabled { 1.0 } else { 0.4 });
+                ui.painter().image(texture.id(), emoji, uv, tint);
+            }
+            None => {
+                ui.painter().text(
+                    emoji.center(),
+                    egui::Align2::CENTER_CENTER,
+                    sound.emoji_name.as_deref().unwrap_or("🔊"),
+                    egui::FontId::proportional(16.0),
+                    text,
+                );
+            }
+        }
+        text_left = emoji.right() + 8.0;
+    }
+    let mut job = egui::text::LayoutJob::single_section(
+        sound.name.clone(),
+        egui::TextFormat::simple(egui::FontId::proportional(13.0), text),
+    );
+    job.wrap = egui::text::TextWrapping::truncate_at_width(rect.right() - 8.0 - text_left);
+    let galley = ui.painter().layout_job(job);
+    let pos = egui::pos2(text_left, rect.center().y - galley.size().y / 2.0);
+    ui.painter().galley(pos, galley, text);
+    let response = match (enabled, blocked) {
+        (true, _) => response.on_hover_text(&sound.name),
+        (false, Some(reason)) => response.on_hover_text(reason),
+        (false, None) => response.on_hover_text("Este som não está disponível."),
+    };
+    response.clicked()
 }
 
 /// Fixed heights keep the voice/user controls anchored at the bottom.
@@ -485,6 +646,30 @@ mod tests {
         extras.sounds.insert("a".into(), Vec::new());
         assert!(!extras.begin_soundboard_load("a"));
         assert!(extras.begin_soundboard_load("b"));
+    }
+
+    #[test]
+    fn sounds_group_guild_first_and_filter_by_name() {
+        let sounds: Vec<SoundboardSound> = serde_json::from_str(
+            r#"[{"name":"Quack","sound_id":1},
+                {"name":"Airhorn","sound_id":"5","guild_id":"9"},
+                {"name":"quack alto","sound_id":"6","guild_id":"9"}]"#,
+        )
+        .unwrap();
+        let ids = |group: &[&SoundboardSound]| -> Vec<String> {
+            group.iter().map(|s| s.sound_id.clone()).collect()
+        };
+        let [own, defaults] = sound_groups(&sounds, "");
+        assert_eq!(
+            (ids(&own), ids(&defaults)),
+            (vec!["5".into(), "6".into()], vec!["1".into()])
+        );
+        let [own, defaults] = sound_groups(&sounds, " QUACK ");
+        assert_eq!(
+            (ids(&own), ids(&defaults)),
+            (vec!["6".into()], vec!["1".into()])
+        );
+        assert!(sound_groups(&sounds, "nada").iter().all(Vec::is_empty));
     }
 
     #[test]
