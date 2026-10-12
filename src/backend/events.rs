@@ -277,4 +277,19 @@ pub enum UiEvent {
     QrFailed {
         reason: String,
     },
+    Profile(ProfileEvent),
+}
+
+/// Settings → Perfil (ui/profile_settings.rs), wrapped in [`UiEvent::Profile`].
+#[derive(Debug)]
+pub enum ProfileEvent {
+    Loaded(Result<crate::model::Profile, String>),
+    /// The avatar file, cropped: its data URI and preview; `Ok(None)` = cancelled.
+    AvatarPicked(Result<Option<(String, egui::ColorImage)>, String>),
+    /// `user` is set once PATCH /users/@me went through, even if a later
+    /// request failed.
+    Saved {
+        user: Option<User>,
+        error: Option<String>,
+    },
 }

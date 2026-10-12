@@ -5,7 +5,7 @@
 use serde::de::DeserializeOwned;
 
 use crate::backend::soundboard::SoundboardSound;
-use crate::model::{Channel, Guild, Member, Message, Relationship, User};
+use crate::model::{Channel, Guild, Member, Message, Profile, Relationship, User};
 
 pub const REST_BASE: &str = "https://discord.com/api/v10";
 pub const USER_AGENT: &str = concat!(
@@ -73,6 +73,7 @@ impl Api {
             return Err(ApiError::RateLimited(retry_after.ceil() as u64));
         }
         let body = resp.text().await.unwrap_or_default();
+        let body = form_error(&body).unwrap_or(body);
         Err(ApiError::Other(anyhow::anyhow!(
             "Discord API retornou {status}: {body}"
         )))
@@ -287,9 +288,102 @@ impl Api {
         self.get_json(&format!("/guilds/{guild_id}/members/{user_id}"), &[])
             .await
     }
+
+    async fn patch(&self, path: &str, body: &serde_json::Value) -> ApiResult<reqwest::Response> {
+        let resp = self
+            .http
+            .patch(format!("{REST_BASE}{path}"))
+            .header(reqwest::header::AUTHORIZATION, &self.token)
+            .json(body)
+            .send()
+            .await?;
+        Self::check_status(resp).await
+    }
+
+    /// Our display name, pronouns, bio and, with `guild_id`, that guild's
+    /// nick: GET /users/{id}/profile (`user_profile` + `guild_member`).
+    pub async fn own_profile(&self, user_id: &str, guild_id: Option<&str>) -> ApiResult<Profile> {
+        #[derive(serde::Deserialize)]
+        struct Response {
+            user: User,
+            #[serde(default)]
+            user_profile: Option<Meta>,
+            #[serde(default)]
+            guild_member: Option<Nick>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Meta {
+            #[serde(default)]
+            bio: Option<String>,
+            #[serde(default)]
+            pronouns: Option<String>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Nick {
+            #[serde(default)]
+            nick: Option<String>,
+        }
+        let mut query = vec![("with_mutual_guilds", "false".to_string())];
+        if let Some(guild_id) = guild_id {
+            query.push(("guild_id", guild_id.to_string()));
+        }
+        let response: Response = self
+            .get_json(&format!("/users/{user_id}/profile"), &query)
+            .await?;
+        let meta = response.user_profile;
+        Ok(Profile {
+            global_name: response.user.global_name.unwrap_or_default(),
+            pronouns: meta
+                .as_ref()
+                .and_then(|meta| meta.pronouns.clone())
+                .unwrap_or_default(),
+            bio: meta.and_then(|meta| meta.bio).unwrap_or_default(),
+            nick: response
+                .guild_member
+                .and_then(|member| member.nick)
+                .unwrap_or_default(),
+        })
+    }
+
+    /// PATCH /users/@me with `global_name` and/or `avatar` (a data URI);
+    /// neither needs the password.
+    pub async fn modify_me(&self, body: &serde_json::Value) -> ApiResult<User> {
+        Ok(self.patch("/users/@me", body).await?.json().await?)
+    }
+
+    pub async fn modify_profile(&self, pronouns: &str, bio: &str) -> ApiResult<()> {
+        let body = serde_json::json!({ "pronouns": pronouns, "bio": bio });
+        self.patch("/users/@me/profile", &body).await?;
+        Ok(())
+    }
+
+    /// Our nick in a guild; empty resets it to the display name.
+    pub async fn modify_nick(&self, guild_id: &str, nick: &str) -> ApiResult<()> {
+        let body = serde_json::json!({ "nick": (!nick.is_empty()).then_some(nick) });
+        self.patch(&format!("/guilds/{guild_id}/members/@me"), &body)
+            .await?;
+        Ok(())
+    }
 }
 
-fn read_attachment(path: &std::path::Path) -> anyhow::Result<(String, Vec<u8>)> {
+/// The first field error of a 400 "Invalid Form Body", e.g.
+/// `{"errors": {"avatar": {"_errors": [{"code": "AVATAR_RATE_LIMIT", …}]}}}`.
+fn form_error(body: &str) -> Option<String> {
+    fn first(value: &serde_json::Value) -> Option<&serde_json::Value> {
+        if let Some(error) = value.get("_errors").and_then(|errors| errors.get(0)) {
+            return Some(error);
+        }
+        value.as_object()?.values().find_map(first)
+    }
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let error = first(value.get("errors")?)?;
+    if error.get("code").and_then(serde_json::Value::as_str) == Some("AVATAR_RATE_LIMIT") {
+        return Some("você trocou de avatar vezes demais; tente mais tarde".into());
+    }
+    error.get("message")?.as_str().map(str::to_owned)
+}
+
+pub(crate) fn read_attachment(path: &std::path::Path) -> anyhow::Result<(String, Vec<u8>)> {
     use std::io::Read;
     const LIMIT: u64 = 10 * 1024 * 1024;
     let metadata = std::fs::metadata(path)?;
@@ -336,5 +430,13 @@ mod attachment_tests {
             .unwrap();
         assert!(read_attachment(&path).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn form_error_picks_the_nested_field_message() {
+        let body = r#"{"code": 50035, "message": "Invalid Form Body", "errors": {"bio": {"_errors": [{"code": "BASE_TYPE_MAX_LENGTH", "message": "Must be 190 or fewer in length."}]}}}"#;
+        assert_eq!(form_error(body).unwrap(), "Must be 190 or fewer in length.");
+        assert!(form_error(r#"{"message": "Unknown"}"#).is_none());
+        assert!(form_error("not json").is_none());
     }
 }

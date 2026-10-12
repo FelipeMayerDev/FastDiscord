@@ -229,3 +229,13 @@ pub struct Member {
     #[serde(default)]
     pub nick: Option<String>,
 }
+
+/// The editable bits of our own profile (settings → Perfil). Empty strings
+/// mean unset; `nick` is for the guild selected when it was loaded.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Profile {
+    pub global_name: String,
+    pub pronouns: String,
+    pub bio: String,
+    pub nick: String,
+}

@@ -15,6 +15,7 @@ use crate::theme;
 pub enum SettingsTab {
     #[default]
     Account,
+    Profile,
     Appearance,
     Voice,
     ScreenShare,
@@ -25,6 +26,7 @@ impl SettingsTab {
     fn label(self) -> &'static str {
         match self {
             Self::Account => "Minha conta",
+            Self::Profile => "Perfil",
             Self::Appearance => "Aparência",
             Self::Voice => "Voz e áudio",
             Self::ScreenShare => "Tela e transmissão",
@@ -69,6 +71,7 @@ pub fn show(app: &mut VesktopApp, ctx: &egui::Context) {
                 ui.horizontal_wrapped(|ui| {
                     for tab in [
                         SettingsTab::Account,
+                        SettingsTab::Profile,
                         SettingsTab::Appearance,
                         SettingsTab::Voice,
                         SettingsTab::ScreenShare,
@@ -113,6 +116,9 @@ pub fn show(app: &mut VesktopApp, ctx: &egui::Context) {
                                 ui.set_width(ui.available_width());
                                 match app.settings_tab {
                                     SettingsTab::Account => logged_out = account_settings(app, ui),
+                                    SettingsTab::Profile => {
+                                        crate::ui::profile_settings::profile_settings(app, ui)
+                                    }
                                     SettingsTab::Appearance => appearance_settings(app, ui),
                                     SettingsTab::Voice => {
                                         ui.label(RichText::new("Dispositivos e volumes").strong());
@@ -152,7 +158,10 @@ pub fn show(app: &mut VesktopApp, ctx: &egui::Context) {
 
 fn nav(app: &mut VesktopApp, ui: &mut egui::Ui) {
     let groups: [(&str, &[SettingsTab]); 2] = [
-        ("CONFIGURAÇÕES DE USUÁRIO", &[SettingsTab::Account]),
+        (
+            "CONFIGURAÇÕES DE USUÁRIO",
+            &[SettingsTab::Account, SettingsTab::Profile],
+        ),
         (
             "CONFIGURAÇÕES DO APLICATIVO",
             &[

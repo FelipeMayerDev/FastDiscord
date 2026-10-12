@@ -41,6 +41,9 @@ não deve haver um espaço reservado para uma quarta ação.
 - Configurações em modal centralizado, com fundo escurecido, navegação por
   seção, conteúdo rolável e abas no topo em janelas estreitas. Fecha por
   botão, Escape ou clique fora; atalhos de canais ficam bloqueados.
+- Aba Perfil: avatar (recorte central, PNG de até 512 px), nome exibido,
+  apelido no servidor selecionado, pronomes e "Sobre mim", com prévia do
+  cartão de perfil.
 - Separadores de datas, agrupamento de mensagens, respostas, indicador de
   novas mensagens, digitação, caixa multilinha e links clicáveis.
 - Avatares e status, convites com cartão, GIFs e visualizador de imagens.

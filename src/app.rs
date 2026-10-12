@@ -133,7 +133,7 @@ impl Drop for GoLive {
 pub struct VesktopApp {
     pub(crate) settings: Settings,
     pub(crate) handle: tokio::runtime::Handle,
-    event_tx: backend::EventTx,
+    pub(crate) event_tx: backend::EventTx,
     pub(crate) event_rx: UnboundedReceiver<UiEvent>,
     pub(crate) cmd_tx: UnboundedSender<Command>,
     backend: Option<JoinHandle<()>>,
@@ -236,6 +236,8 @@ pub struct VesktopApp {
     pub(crate) applied_theme: Option<Theme>,
     /// Soundboard picker and DJ (ui/voice_extras.rs).
     pub(crate) extras: ui::voice_extras::VoiceExtras,
+    /// Settings → Perfil draft and requests (ui/profile_settings.rs).
+    pub(crate) profile: ui::profile_settings::ProfileEditor,
     /// Filled once a newer release is on disk (updater.rs).
     update: crate::updater::Slot,
 }
@@ -320,6 +322,7 @@ impl VesktopApp {
             // The first update() applies the theme through the live context.
             applied_theme: None,
             extras: Default::default(),
+            profile: Default::default(),
             update: if settings.check_for_updates {
                 crate::updater::spawn(&handle, _cc.egui_ctx.clone())
             } else {
@@ -616,6 +619,7 @@ impl VesktopApp {
         self.compose.clear();
         self.compose_error = None;
         self.settings_open = false;
+        self.profile = Default::default();
         self.login_token.clear();
         self.stop_qr();
         self.conn = ConnState::Disconnected("sessão encerrada".into(), None);
@@ -2059,6 +2063,7 @@ impl VesktopApp {
                 self.qr_task = None;
                 self.qr = QrState::Failed(reason);
             }
+            UiEvent::Profile(event) => ui::profile_settings::handle_event(self, event),
         }
     }
 }
