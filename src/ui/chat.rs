@@ -85,6 +85,7 @@ pub fn paint(app: &mut VesktopApp, ui: &mut egui::Ui) {
         return;
     };
     crate::ui::threads::draft_window(app, ui.ctx());
+    crate::ui::threads::message_action_window(app, ui.ctx());
     if app
         .find_channel(&channel_id)
         .is_some_and(crate::model::Channel::is_forum)
