@@ -2544,19 +2544,29 @@ impl eframe::App for VesktopApp {
             });
         }
 
-        egui::Panel::left("server_rail")
+        // The user card floats over the bottom of both left columns, as in
+        // Discord; each column stops above it.
+        let card_margin = ui::channel_sidebar::CARD_MARGIN;
+        let card_h = ui::channel_sidebar::card_height(self, 72.0 + 240.0 - 2.0 * card_margin);
+        let reserved = card_h + 2.0 * card_margin;
+        let rail = egui::Panel::left("server_rail")
             .exact_size(72.0)
             .resizable(false)
             .show(root, |ui| {
-                ui::server_rail::paint(self, ui);
+                ui::server_rail::paint(self, &mut above_card(ui, reserved));
             });
-
-        egui::Panel::left("channel_sidebar")
+        let sidebar = egui::Panel::left("channel_sidebar")
             .exact_size(240.0)
             .resizable(false)
             .show(root, |ui| {
-                ui::channel_sidebar::paint(self, ui);
+                ui::channel_sidebar::paint(self, &mut above_card(ui, reserved));
             });
+        let bottom = sidebar.response.rect.bottom() - card_margin;
+        let card = egui::Rect::from_min_max(
+            egui::pos2(rail.response.rect.left() + card_margin, bottom - card_h),
+            egui::pos2(sidebar.response.rect.right() - card_margin, bottom),
+        );
+        ui::channel_sidebar::paint_card(self, root, card);
 
         egui::CentralPanel::default().show(root, |ui| {
             if self.watch_docked() {
@@ -2588,6 +2598,19 @@ impl eframe::App for VesktopApp {
             ctx.request_repaint_after(Duration::from_millis(400));
         }
     }
+}
+
+/// A left column's content area, ending `reserved` px above the column's
+/// bottom so nothing scrolls under the floating user card.
+fn above_card(ui: &mut egui::Ui, reserved: f32) -> egui::Ui {
+    ui.painter().rect_filled(ui.max_rect(), 0.0, theme::RAIL);
+    let mut rect = ui.max_rect();
+    rect.max.y -= reserved;
+    ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    )
 }
 
 fn should_notify_message(

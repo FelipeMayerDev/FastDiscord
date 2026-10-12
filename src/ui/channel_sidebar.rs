@@ -12,76 +12,79 @@ use crate::util;
 
 /// Height of the user panel row, pinned so the bottom block never clips.
 const USER_PANEL_H: f32 = 52.0;
-const VOICE_STATUS_H: f32 = 40.0;
+const VOICE_STATUS_H: f32 = 44.0;
 const VOICE_ACTIONS_H: f32 = 34.0;
+/// User panel button widths: mic, headset and gear, and their chevrons.
+const ICON_BUTTON_W: f32 = 32.0;
+const CHEVRON_W: f32 = 16.0;
+/// Gap between the floating user card and the window/column edges.
+pub const CARD_MARGIN: f32 = 8.0;
+/// Inner top/bottom padding of the user card.
+const CARD_PAD: f32 = 4.0;
 
+/// Channel list: title plus scroll area. The bottom-left user card is
+/// painted separately over both columns by [`paint_card`].
 pub fn paint(app: &mut VesktopApp, ui: &mut egui::Ui) {
     ui.painter().rect_filled(ui.max_rect(), 0.0, theme::RAIL);
-
-    // The bottom block (voice status + actions + user panel) is laid out
-    // manually instead of through `Panel::bottom`: egui panels reuse their
-    // persisted size across runs, which clipped the growing content. Both
-    // regions get explicit rects — an `allocate_rect` here would push the
-    // layout cursor past the panel's bottom and empty everything above.
-    let in_voice = matches!(
-        app.voice,
-        VoiceConn::Connecting { .. } | VoiceConn::Connected { .. }
-    );
-    let voice_failed = matches!(app.voice, VoiceConn::Failed { .. });
-    let voice_h = if in_voice {
-        VOICE_STATUS_H + 2.0 + VOICE_ACTIONS_H + 4.0
-    } else if voice_failed {
-        VOICE_STATUS_H + 4.0
-    } else {
-        0.0
-    };
-    let available = ui.available_rect_before_wrap();
-    let preview_h = crate::ui::screen_share::height(app, available.width());
-    let dj_h = crate::ui::voice_extras::music_height(app);
-    let total = preview_h + dj_h + voice_h + USER_PANEL_H;
-    let block = egui::Rect::from_min_max(
-        pos2(available.left(), available.bottom() - total),
-        pos2(available.right(), available.bottom()),
-    );
-    let content_rect =
-        egui::Rect::from_min_max(available.min, pos2(available.right(), block.top()));
-
-    // Channel list: title plus scroll area, above the bottom block.
-    let mut content = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(content_rect)
-            .layout(egui::Layout::top_down(egui::Align::Min)),
-    );
     if app.selected_guild.is_none() {
-        dm_sidebar_top(app, &mut content);
+        dm_sidebar_top(app, ui);
     } else {
-        guild_sidebar_top(app, &mut content);
+        guild_sidebar_top(app, ui);
     }
     egui::ScrollArea::vertical()
         .auto_shrink(false)
-        .show(&mut content, |ui| {
+        .show(ui, |ui| {
             if app.selected_guild.is_none() {
                 paint_dm_list(app, ui);
             } else {
                 paint_guild_channels(app, ui);
             }
         });
+}
 
-    // Bottom block: screen share preview, voice status row, action row,
-    // user panel.
-    ui.painter().rect_filled(block, 0.0, theme::RAIL);
-    let mut bottom = ui.new_child(
+/// Height of the user card at `width`: screen share preview, DJ accordion,
+/// voice status and action rows, user panel, plus padding. Laid out
+/// manually instead of through `Panel::bottom`: egui panels reuse their
+/// persisted size across runs, which clipped the growing content.
+pub fn card_height(app: &VesktopApp, width: f32) -> f32 {
+    let voice_h = match app.voice {
+        VoiceConn::Connecting { .. } | VoiceConn::Connected { .. } => {
+            VOICE_STATUS_H + 2.0 + VOICE_ACTIONS_H + 4.0
+        }
+        VoiceConn::Failed { .. } => VOICE_STATUS_H + 4.0,
+        VoiceConn::Disconnected => 0.0,
+    };
+    crate::ui::screen_share::height(app, width)
+        + crate::ui::voice_extras::music_height(app)
+        + voice_h
+        + USER_PANEL_H
+        + 2.0 * CARD_PAD
+}
+
+/// Discord's floating bottom-left card spanning the server rail and the
+/// channel sidebar; `rect` comes from [`card_height`] and both columns
+/// leave that much room free at their bottom.
+pub fn paint_card(app: &mut VesktopApp, ui: &mut egui::Ui, rect: egui::Rect) {
+    ui.painter().rect(
+        rect,
+        theme::RADIUS_SM,
+        theme::SIDEBAR,
+        egui::Stroke::new(1.0, theme::DIVIDER),
+        egui::StrokeKind::Inside,
+    );
+    let mut card = ui.new_child(
         egui::UiBuilder::new()
-            .max_rect(block)
+            .id_salt("user_card")
+            .max_rect(rect.shrink2(Vec2::new(0.0, CARD_PAD)))
             .layout(egui::Layout::top_down(egui::Align::Min)),
     );
     // Explicit add_space calls do the gaps; the default 8px item spacing
     // would overflow the reserved height and get clipped.
-    bottom.spacing_mut().item_spacing = Vec2::ZERO;
-    crate::ui::screen_share::paint(app, &mut bottom);
-    crate::ui::voice_extras::music_panel(app, &mut bottom);
-    voice_panel(app, &mut bottom);
-    user_panel(app, &mut bottom);
+    card.spacing_mut().item_spacing = Vec2::ZERO;
+    crate::ui::screen_share::paint(app, &mut card);
+    crate::ui::voice_extras::music_panel(app, &mut card);
+    voice_panel(app, &mut card);
+    user_panel(app, &mut card);
 }
 
 /// Sidebar top on the Home view, Discord-style: the conversation search
@@ -246,11 +249,11 @@ fn user_panel(app: &mut VesktopApp, ui: &mut egui::Ui) {
             // Every gap below is an explicit add_space; the default 8px item
             // spacing is what pushed the gear off the panel edge.
             ui.spacing_mut().item_spacing = Vec2::ZERO;
-            // Control cluster: [mic ⌄] [headset ⌄] [gear] — 20px icons, 12px
-            // chevrons, 2px inside a pair and 4px between pairs, plus 8px of
-            // right padding.
-            let buttons_width = 5.0 * 2.0 + 3.0 * 20.0 + 2.0 * 12.0 + 8.0;
-            let name_width = (width - 8.0 - 32.0 - 8.0 - buttons_width).max(40.0);
+            // Control cluster: [mic ⌄] [headset ⌄] [gear] — 32px icons, 16px
+            // chevrons, 4px between groups, 8px of right padding; the name
+            // gets what is left minus an 8px gap, so it elides before them.
+            let buttons_width = 3.0 * ICON_BUTTON_W + 2.0 * CHEVRON_W + 2.0 * 4.0 + 8.0;
+            let name_width = (width - 8.0 - 32.0 - 8.0 - 8.0 - buttons_width).max(40.0);
             // Avatar and name together open the status menu, as in Discord.
             let panel = ui.max_rect();
             let profile_rect = egui::Rect::from_min_max(
@@ -297,17 +300,17 @@ fn user_panel(app: &mut VesktopApp, ui: &mut egui::Ui) {
                         .circle_filled(avatar_rect.center(), 16.0, util::name_color(&name));
                 }
             }
-            crate::ui::presence_dot(ui, avatar_rect, Some(&app.settings.status), theme::RAIL);
+            crate::ui::presence_dot(ui, avatar_rect, Some(&app.settings.status), theme::SIDEBAR);
             ui.add_space(8.0);
 
-            // Name over the status line: "● Em voz" while connected, else the
+            // Name over the status line: "Em voz" while connected, else the
             // gateway state. Truncated so the buttons never overlap it.
             let in_voice = matches!(
                 app.voice,
                 VoiceConn::Connecting { .. } | VoiceConn::Connected { .. }
             );
             let (line, color) = if in_voice {
-                ("● Em voz".to_string(), theme::GREEN)
+                ("Em voz".to_string(), theme::GREEN)
             } else {
                 match &app.conn {
                     ConnState::Disconnected(..) => ("Reconectando…".to_string(), theme::YELLOW),
@@ -341,15 +344,20 @@ fn user_panel(app: &mut VesktopApp, ui: &mut egui::Ui) {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing = Vec2::ZERO;
                 ui.add_space(8.0);
-                if compact_button(ui, "Configurações", |painter, center, color| {
-                    crate::ui::icons::draw(
-                        painter,
-                        crate::ui::icons::Icon::Settings,
-                        center,
-                        color,
-                        0.0,
-                    );
-                })
+                if compact_button(
+                    ui,
+                    ICON_BUTTON_W,
+                    "Configurações",
+                    |painter, center, color| {
+                        crate::ui::icons::draw(
+                            painter,
+                            crate::ui::icons::Icon::Settings,
+                            center,
+                            color,
+                            0.0,
+                        );
+                    },
+                )
                 .clicked()
                 {
                     app.settings_open = !app.settings_open;
@@ -359,10 +367,11 @@ fn user_panel(app: &mut VesktopApp, ui: &mut egui::Ui) {
                 // the previous one, so a chevron is added *before* its icon
                 // to render on the icon's right, Discord-style.
                 let deaf = app.voice_deaf;
-                let chevron = compact_button(ui, "Dispositivos de áudio", draw_chevron);
+                let chevron = compact_button(ui, CHEVRON_W, "Dispositivos de áudio", draw_chevron);
                 devices_popup(app, &chevron, true);
                 if compact_button(
                     ui,
+                    ICON_BUTTON_W,
                     if deaf {
                         "Ativar áudio"
                     } else {
@@ -370,7 +379,7 @@ fn user_panel(app: &mut VesktopApp, ui: &mut egui::Ui) {
                     },
                     |painter, center, color| {
                         let color = if deaf { theme::RED } else { color };
-                        draw_headset(painter, center, color, deaf.then_some(theme::RAIL), 1.0)
+                        draw_headset(painter, center, color, deaf.then_some(theme::SIDEBAR), 1.0)
                     },
                 )
                 .clicked()
@@ -378,10 +387,12 @@ fn user_panel(app: &mut VesktopApp, ui: &mut egui::Ui) {
                     app.set_voice_deaf(!deaf);
                 }
                 let muted = app.voice_muted;
-                let chevron = compact_button(ui, "Dispositivos de voz", draw_chevron);
+                ui.add_space(4.0);
+                let chevron = compact_button(ui, CHEVRON_W, "Dispositivos de voz", draw_chevron);
                 devices_popup(app, &chevron, false);
                 if compact_button(
                     ui,
+                    ICON_BUTTON_W,
                     if muted {
                         "Ativar microfone"
                     } else {
@@ -389,7 +400,7 @@ fn user_panel(app: &mut VesktopApp, ui: &mut egui::Ui) {
                     },
                     |painter, center, color| {
                         let color = if muted { theme::RED } else { color };
-                        draw_mic(painter, center, color, muted.then_some(theme::RAIL), 1.0)
+                        draw_mic(painter, center, color, muted.then_some(theme::SIDEBAR), 1.0)
                     },
                 )
                 .clicked()
@@ -517,10 +528,11 @@ fn status_popup(app: &mut VesktopApp, anchor: &egui::Response) {
 /// half these symbols and render tofu boxes.
 fn compact_button(
     ui: &mut egui::Ui,
+    width: f32,
     tooltip: &str,
     draw: impl FnOnce(&egui::Painter, egui::Pos2, egui::Color32),
 ) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(20.0, 26.0), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 32.0), Sense::click());
     let hovered = response.hovered();
     ui.painter()
         .rect_filled(rect, 4.0, crate::ui::control_bg(ui, &response, false));
@@ -770,10 +782,9 @@ fn voice_panel(app: &mut VesktopApp, ui: &mut egui::Ui) {
 
     // Status row.
     let width = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 40.0), Sense::hover());
-    ui.painter().rect_filled(rect, 0.0, theme::RAIL);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, VOICE_STATUS_H), Sense::hover());
     let connected = matches!(app.voice, VoiceConn::Connected { .. });
-    let signal_center = pos2(rect.left() + 12.0, rect.center().y);
+    let signal_center = pos2(rect.left() + 16.0, rect.center().y);
     let signal_color = if connected {
         quality_color(app.voice_stats.back().copied())
     } else {
@@ -790,32 +801,45 @@ fn voice_panel(app: &mut VesktopApp, ui: &mut egui::Ui) {
             .on_hover_cursor(egui::CursorIcon::PointingHand);
         quality_popup(app, &signal);
     }
-    ui.painter().text(
-        pos2(rect.left() + 34.0, rect.center().y - 8.0),
-        egui::Align2::LEFT_CENTER,
-        &title,
-        egui::FontId::proportional(13.5),
-        accent,
+    // Title and subtitle stop 8px before the disconnect button and elide
+    // with "…" (full text on hover) instead of running under it.
+    let text_rect = egui::Rect::from_min_max(
+        pos2(rect.left() + 38.0, rect.top() + 5.0),
+        pos2(rect.right() - 8.0 - 32.0 - 8.0, rect.bottom()),
+    );
+    let mut text = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(text_rect)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
+    text.spacing_mut().item_spacing = Vec2::new(0.0, 1.0);
+    text.add(
+        egui::Label::new(
+            RichText::new(&title)
+                .size(13.5)
+                .family(theme::bold())
+                .color(accent),
+        )
+        .truncate()
+        .selectable(false),
     );
     if !subtitle.is_empty() {
-        ui.painter().text(
-            pos2(rect.left() + 34.0, rect.center().y + 9.0),
-            egui::Align2::LEFT_CENTER,
-            &subtitle,
-            egui::FontId::proportional(11.5),
-            theme::MUTED,
+        text.add(
+            egui::Label::new(RichText::new(&subtitle).size(11.5).color(theme::MUTED))
+                .truncate()
+                .selectable(false),
         );
     }
     let mut leave = false;
     let disconnect = egui::Rect::from_center_size(
-        pos2(rect.right() - 22.0, rect.center().y),
-        Vec2::splat(28.0),
+        pos2(rect.right() - 8.0 - 16.0, rect.center().y),
+        Vec2::splat(32.0),
     );
     let mut disconnect_ui = ui.new_child(egui::UiBuilder::new().max_rect(disconnect));
     if crate::ui::icons::button(
         &mut disconnect_ui,
         crate::ui::icons::Icon::Disconnect,
-        Vec2::splat(28.0),
+        Vec2::splat(32.0),
         false,
         "Desconectar da voz",
     )
