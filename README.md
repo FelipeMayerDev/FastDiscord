@@ -37,6 +37,8 @@ e o Discord é falado nativamente — REST + Gateway sobre tokio.
   rapidamente, com atualização em segundo plano.
 - Configurações persistentes e bandeja no Linux e Windows: fechar mantém
   o app e as chamadas em execução; o menu permite abrir a janela ou sair.
+- Atualização automática do AppImage e do `.exe` pelos releases do GitHub:
+  baixa em segundo plano e aplica ao reiniciar.
 
 As notificações no Linux usam `notify-send`, `paplay` e o tema de sons
 freedesktop. O upload básico de anexos aceita arquivos de até 10 MB. A busca

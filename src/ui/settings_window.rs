@@ -281,7 +281,7 @@ fn behavior_settings(app: &mut VesktopApp, ui: &mut egui::Ui) {
     if ui
         .add(egui::Checkbox::new(
             &mut updates,
-            "Procurar atualizações automaticamente (em breve)",
+            "Atualizar automaticamente (vale ao reiniciar)",
         ))
         .changed()
     {

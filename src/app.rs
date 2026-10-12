@@ -236,6 +236,8 @@ pub struct VesktopApp {
     pub(crate) applied_theme: Option<Theme>,
     /// Soundboard picker and DJ (ui/voice_extras.rs).
     pub(crate) extras: ui::voice_extras::VoiceExtras,
+    /// Filled once a newer release is on disk (updater.rs).
+    update: crate::updater::Slot,
 }
 
 impl VesktopApp {
@@ -318,6 +320,11 @@ impl VesktopApp {
             // The first update() applies the theme through the live context.
             applied_theme: None,
             extras: Default::default(),
+            update: if settings.check_for_updates {
+                crate::updater::spawn(&handle, _cc.egui_ctx.clone())
+            } else {
+                Default::default()
+            },
             settings,
             handle,
             event_tx,
@@ -2171,6 +2178,20 @@ impl eframe::App for VesktopApp {
             } else if ctx.input(|input| input.key_pressed(egui::Key::ArrowUp)) {
                 self.switch_channel(-1);
             }
+        }
+
+        let update = self.update.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some(update) = update {
+            egui::Panel::top("update_banner").show(root, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(format!("FastDiscord {} foi baixado.", update.version));
+                    if ui.button("Reiniciar para atualizar").clicked() {
+                        crate::updater::restart(&update);
+                        self.quitting = true;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                });
+            });
         }
 
         egui::Panel::left("server_rail")

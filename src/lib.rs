@@ -17,5 +17,6 @@ pub mod theme;
 #[cfg(feature = "tray")]
 pub mod tray;
 pub mod ui;
+pub mod updater;
 pub mod util;
 pub mod window;
