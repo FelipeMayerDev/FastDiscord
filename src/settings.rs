@@ -97,8 +97,9 @@ impl Default for Settings {
             fockytv_url: "https://tv.huestavo.com".into(),
             fockytv_nick: None,
             fockytv_fps: 60,
-            dj_url: String::new(),
-            dj_key: String::new(),
+            dj_url: "wss://dj.felipemayer.com.br".into(),
+            // Baked in at build time so the key stays out of the public repo.
+            dj_key: option_env!("FASTDISCORD_DJ_KEY").unwrap_or_default().into(),
             dj_volume: 50,
         }
     }

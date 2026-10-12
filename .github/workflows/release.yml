@@ -15,6 +15,10 @@ on:
 permissions:
   contents: write
 
+env:
+  # Default DJ relay key compiled into the release (src/settings.rs).
+  FASTDISCORD_DJ_KEY: ${{ secrets.FASTDISCORD_DJ_KEY }}
+
 jobs:
   appimage:
     runs-on: ubuntu-latest
