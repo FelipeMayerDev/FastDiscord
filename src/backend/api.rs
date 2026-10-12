@@ -216,6 +216,24 @@ impl Api {
         Ok(messages)
     }
 
+    /// Up to a page of history centered on `message_id` (included unless
+    /// it was deleted), in chronological order.
+    pub async fn messages_around(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+    ) -> ApiResult<Vec<Message>> {
+        let query = [
+            ("limit", MESSAGES_PER_PAGE.to_string()),
+            ("around", message_id.to_string()),
+        ];
+        let mut messages: Vec<Message> = self
+            .get_json(&format!("/channels/{channel_id}/messages"), &query)
+            .await?;
+        messages.sort_by(|a, b| (a.id.len(), &a.id).cmp(&(b.id.len(), &b.id)));
+        Ok(messages)
+    }
+
     pub async fn send_message(&self, channel_id: &str, content: &str) -> ApiResult<Message> {
         let resp = self
             .http

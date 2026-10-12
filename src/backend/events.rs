@@ -111,6 +111,17 @@ pub enum Command {
         guild_id: String,
         user_id: String,
     },
+    /// Op 37: rows `0..ranges * 100` of a channel's member list.
+    SubscribeMemberList {
+        guild_id: String,
+        channel_id: String,
+        ranges: usize,
+    },
+    /// The history page around a replied-to message that isn't loaded.
+    LoadMessagesAround {
+        channel_id: String,
+        message_id: String,
+    },
 }
 
 /// Updates from the backend task to the UI thread.
@@ -276,5 +287,19 @@ pub enum UiEvent {
     QrExpired,
     QrFailed {
         reason: String,
+    },
+    /// A guild's roles, from READY or GUILD_CREATE (member list groups).
+    GuildRoles {
+        guild_id: String,
+        roles: Vec<crate::member_list::Role>,
+    },
+    MemberListUpdate {
+        update: crate::member_list::MemberListUpdate,
+    },
+    /// The page around `message_id`; empty when the fetch failed.
+    MessagesAround {
+        channel_id: String,
+        message_id: String,
+        messages: Vec<Message>,
     },
 }

@@ -9,6 +9,7 @@ pub mod app;
 pub mod backend;
 pub mod image_cache;
 pub mod markup;
+pub mod member_list;
 pub mod model;
 pub mod notifications;
 pub mod paths;

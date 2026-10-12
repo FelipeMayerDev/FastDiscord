@@ -44,6 +44,10 @@ não deve haver um espaço reservado para uma quarta ação.
 - Separadores de datas, agrupamento de mensagens, respostas, indicador de
   novas mensagens, digitação, caixa multilinha e links clicáveis.
 - Avatares e status, convites com cartão, GIFs e visualizador de imagens.
+- Lista de membros à direita, alternada pelo botão de pessoas do cabeçalho:
+  grupos por cargo exibido separadamente e online/offline, vinda da lista
+  preguiçosa do gateway (op 37); nas DMs, os participantes. Clicar numa
+  resposta rola até a mensagem original e a destaca.
 - Amigos e solicitações, busca no histórico em cache, arquivos, emoji básico
   e envio de GIF por URL.
 - Canal de voz ativo verde, tempo conectado, soundboard e DJ.

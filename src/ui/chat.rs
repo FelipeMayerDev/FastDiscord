@@ -30,6 +30,7 @@ const REPLY_AVATAR_X: f32 = LEFT + AVATAR - 8.0;
 /// Inline images never grow beyond this.
 const INLINE_MAX: f32 = 420.0;
 const GROUPING_MINUTES: i64 = 7;
+const JUMP_HIGHLIGHT_SECS: f32 = 2.0;
 
 #[derive(Clone, Default)]
 struct ChatTools {
@@ -179,9 +180,12 @@ pub fn paint(app: &mut VesktopApp, ui: &mut egui::Ui) {
             if response.on_hover_text("Buscar nesta conversa").clicked() {
                 tools.search_open = !tools.search_open;
             }
+            ui.add_space(8.0);
+            crate::ui::members::toggle(ui);
         });
     });
     ui.separator();
+    crate::ui::members::panel(app, ui, &channel_id);
 
     if tools.search_open {
         ui.horizontal(|ui| {
@@ -496,7 +500,8 @@ pub fn paint(app: &mut VesktopApp, ui: &mut egui::Ui) {
 
     let at_bottom =
         (scroll.state.offset.y + scroll.inner_rect.height()) >= scroll.content_size.y - 1.0;
-    if at_bottom && active_search(&tools).is_empty() {
+    let detached = app.detached.contains(&channel_id);
+    if at_bottom && !detached && active_search(&tools).is_empty() {
         if let Some(last) = app
             .messages
             .get(&channel_id)
@@ -507,8 +512,13 @@ pub fn paint(app: &mut VesktopApp, ui: &mut egui::Ui) {
         }
     } else if active_search(&tools).is_empty() {
         // "Ir para o presente", pinned above the compose box.
+        let members = if crate::ui::members::shown(ui.ctx()) {
+            crate::ui::members::WIDTH
+        } else {
+            0.0
+        };
         egui::Area::new(egui::Id::new("jump_to_present"))
-            .anchor(Align2::RIGHT_BOTTOM, [-24.0, -96.0])
+            .anchor(Align2::RIGHT_BOTTOM, [-24.0 - members, -96.0])
             .order(egui::Order::Foreground)
             .show(ui.ctx(), |ui| {
                 if ui
@@ -516,7 +526,7 @@ pub fn paint(app: &mut VesktopApp, ui: &mut egui::Ui) {
                     .on_hover_text("Pular para as mensagens mais recentes")
                     .clicked()
                 {
-                    app.jump_to_present = true;
+                    app.return_to_present(&channel_id);
                 }
             });
     }
@@ -661,11 +671,25 @@ fn paint_message(
         Color32::TRANSPARENT,
         theme::ROW_HOVER,
     );
-    let base = if mentions_me {
+    let mut base = if mentions_me {
         theme::MENTIONED_BG
     } else {
         Color32::TRANSPARENT
     };
+    if let Some((_, jumped)) = app.reply_jump.as_mut().filter(|(id, _)| *id == message.id) {
+        let at = *jumped.get_or_insert_with(|| {
+            ui.scroll_to_rect(row, Some(Align::Center));
+            std::time::Instant::now()
+        });
+        // The jumped-to message flashes, then fades back over 2 s.
+        let left = 1.0 - at.elapsed().as_secs_f32() / JUMP_HIGHLIGHT_SECS;
+        if left > 0.0 {
+            base = theme::BLURPLE.gamma_multiply(0.25 * left);
+            ui.ctx().request_repaint();
+        } else {
+            app.reply_jump = None;
+        }
+    }
     ui.painter()
         .set(background, Shape::rect_filled(row, 0.0, base.blend(hover)));
     if mentions_me {
@@ -710,7 +734,7 @@ fn paint_message(
 
 fn reply_excerpt(app: &mut VesktopApp, ui: &mut egui::Ui, message: &Message) {
     let original = message.referenced_message.as_deref();
-    ui.horizontal(|ui| {
+    let excerpt = ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
         ui.add_space(REPLY_AVATAR_X);
         let (name, texture, color) = match original {
@@ -738,6 +762,27 @@ fn reply_excerpt(app: &mut VesktopApp, ui: &mut egui::Ui, message: &Message) {
             ui.label(RichText::new(excerpt).small().color(theme::MUTED));
         }
     });
+    // Like Discord, a click jumps to the original (same channel only).
+    let reference = message.message_reference.as_ref();
+    let target = reference
+        .filter(|r| {
+            r.channel_id
+                .as_ref()
+                .is_none_or(|id| *id == message.channel_id)
+        })
+        .and_then(|r| r.message_id.clone());
+    if let Some(target) = target {
+        let response = ui
+            .interact(
+                excerpt.response.rect,
+                egui::Id::new(("reply_jump", message.id.as_str())),
+                Sense::click(),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        if response.clicked() {
+            app.jump_to_message(&message.channel_id, target);
+        }
+    }
 }
 
 /// One-line, single-line excerpt of the replied-to message.

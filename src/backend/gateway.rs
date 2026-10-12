@@ -246,6 +246,7 @@ fn dispatch(value: Value, event_tx: &EventTx, voice_tx: &UnboundedSender<Wire>, 
                     let Some(id) = guild.get("id").and_then(Value::as_str) else {
                         continue;
                     };
+                    send_roles(id, guild, event_tx);
                     let states = guild
                         .get("voice_states")
                         .cloned()
@@ -269,6 +270,7 @@ fn dispatch(value: Value, event_tx: &EventTx, voice_tx: &UnboundedSender<Wire>, 
             let Some(id) = data.get("id").and_then(Value::as_str) else {
                 return;
             };
+            send_roles(id, &data, event_tx);
             let states = data
                 .get("voice_states")
                 .cloned()
@@ -333,6 +335,12 @@ fn dispatch(value: Value, event_tx: &EventTx, voice_tx: &UnboundedSender<Wire>, 
             seed_presences(&data["presences"], event_tx);
         }
         "PRESENCE_UPDATE" => seed_presences(&data, event_tx),
+        "GUILD_MEMBER_LIST_UPDATE" => {
+            match serde_json::from_value::<crate::member_list::MemberListUpdate>(data) {
+                Ok(update) => event_tx.send(UiEvent::MemberListUpdate { update }),
+                Err(err) => log::warn!("GUILD_MEMBER_LIST_UPDATE não parseou: {err}"),
+            }
+        }
         "VOICE_STATE_UPDATE" => match serde_json::from_value::<VoiceStatePayload>(data) {
             Ok(payload) => {
                 log::info!(
@@ -435,6 +443,17 @@ fn dispatch(value: Value, event_tx: &EventTx, voice_tx: &UnboundedSender<Wire>, 
             }
         }
         _ => {}
+    }
+}
+
+/// Full guild objects (READY, GUILD_CREATE) carry the roles the member
+/// list names its groups and colors names with.
+fn send_roles(guild_id: &str, guild: &Value, event_tx: &EventTx) {
+    if let Ok(roles) = serde_json::from_value(guild["roles"].clone()) {
+        event_tx.send(UiEvent::GuildRoles {
+            guild_id: guild_id.to_string(),
+            roles,
+        });
     }
 }
 
@@ -693,6 +712,33 @@ async fn handle_command(api: &Api, command: Command, event_tx: &EventTx, write: 
                 }
                 Err(err) => log::warn!("falha ao carregar membro {user_id}: {err}"),
             }
+        }
+        Command::SubscribeMemberList {
+            guild_id,
+            channel_id,
+            ranges,
+        } => {
+            let payload = crate::member_list::subscribe_payload(&guild_id, &channel_id, ranges);
+            if let Err(err) = write.send(WsMessage::text(payload)).await {
+                log::warn!("falha ao assinar a lista de membros de {channel_id}: {err}");
+            }
+        }
+        Command::LoadMessagesAround {
+            channel_id,
+            message_id,
+        } => {
+            let messages = match api.messages_around(&channel_id, &message_id).await {
+                Ok(messages) => messages,
+                Err(err) => {
+                    log::warn!("falha ao buscar a mensagem {message_id}: {err}");
+                    Vec::new()
+                }
+            };
+            event_tx.send(UiEvent::MessagesAround {
+                channel_id,
+                message_id,
+                messages,
+            });
         }
         Command::LoadSoundboard { guild_id } => match api.soundboard_sounds(&guild_id).await {
             Ok(sounds) => event_tx.send(UiEvent::SoundboardLoaded { guild_id, sounds }),
