@@ -275,6 +275,7 @@ pub enum UiEvent {
     /// speaking for `duration`.
     SoundboardPlaying {
         user_id: String,
+        sound_id: String,
         duration: std::time::Duration,
     },
     GifsLoaded {

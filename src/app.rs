@@ -2102,19 +2102,29 @@ impl VesktopApp {
                 let volume = if self.voice_deaf { 0.0 } else { volume };
                 let events = self.event_tx.clone();
                 self.handle.spawn(async move {
-                    let Some(duration) = crate::backend::soundboard::play(sound_id, volume).await
+                    let Some(duration) =
+                        crate::backend::soundboard::play(sound_id.clone(), volume).await
                     else {
                         return;
                     };
-                    events.send(UiEvent::SoundboardPlaying { user_id, duration });
+                    events.send(UiEvent::SoundboardPlaying {
+                        user_id,
+                        sound_id,
+                        duration,
+                    });
                     // Repaint once it ends so the ring goes off.
                     tokio::time::sleep(duration).await;
                     events.repaint();
                 });
             }
-            UiEvent::SoundboardPlaying { user_id, duration } => {
-                self.sound_speaking
-                    .insert(user_id, Instant::now() + duration);
+            UiEvent::SoundboardPlaying {
+                user_id,
+                sound_id,
+                duration,
+            } => {
+                let now = Instant::now();
+                self.sound_speaking.insert(user_id, now + duration);
+                self.extras.sound_playing(sound_id, now, duration);
             }
             UiEvent::GifsLoaded { query, result } => self.gifs = Some((query, result)),
             UiEvent::GuildEmojis { guild_id, emojis } => {
