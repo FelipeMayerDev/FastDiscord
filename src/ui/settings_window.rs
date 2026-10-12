@@ -529,18 +529,22 @@ fn bypass_settings(app: &mut VesktopApp, ui: &mut egui::Ui) {
         )
         .clicked()
     {
-        let result = std::env::current_exe().and_then(|exe| {
-            std::process::Command::new(exe)
-                .arg("--wireguard")
-                .arg(bypass.path.trim())
-                .spawn()
+        let result = crate::backend::bypass::check_dependencies().and_then(|()| {
+            std::env::current_exe()
+                .and_then(|exe| {
+                    std::process::Command::new(exe)
+                        .arg("--wireguard")
+                        .arg(bypass.path.trim())
+                        .spawn()
+                })
+                .map_err(|error| error.to_string())
         });
         match result {
             Ok(child) => {
                 bypass.child = Some(child);
                 bypass.error = None;
             }
-            Err(error) => bypass.error = Some(error.to_string()),
+            Err(error) => bypass.error = Some(error),
         }
     }
     if let Some(error) = &bypass.error {

@@ -3,6 +3,8 @@
 
 pub mod api;
 pub mod audio;
+#[cfg(target_os = "linux")]
+pub mod bypass;
 pub mod camera;
 pub mod capture;
 pub mod dj;

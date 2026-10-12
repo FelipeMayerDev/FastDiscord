@@ -45,15 +45,7 @@ fn main() -> anyhow::Result<()> {
         #[cfg(target_os = "linux")]
         {
             let profile = profile.canonicalize()?;
-            for tool in ["ip", "wg", "wg-quick", "runuser", "pkexec"] {
-                let found = std::process::Command::new("/bin/bash")
-                    .args(["-c", "command -v \"$1\" >/dev/null", "fastdiscord", tool])
-                    .status()?;
-                anyhow::ensure!(
-                    found.success(),
-                    "dependência ausente: {tool}; instale wireguard-tools, iproute2 e polkit"
-                );
-            }
+            fastdiscord::backend::bypass::check_dependencies().map_err(anyhow::Error::msg)?;
             let checked = std::process::Command::new("/bin/bash")
                 .args([
                     "-c",
