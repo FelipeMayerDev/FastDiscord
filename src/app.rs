@@ -224,6 +224,14 @@ pub struct VesktopApp {
     pub(crate) last_typing_sent: Option<std::time::Instant>,
     /// Set by "Ir para o presente", consumed inside the timeline's scroll.
     pub(crate) jump_to_present: bool,
+    /// Clicked reply target: scrolled to once painted (`None` = pending),
+    /// then highlighted for a moment from that instant.
+    pub(crate) reply_jump: Option<(String, Option<Instant>)>,
+    /// Channels whose cache is an older slice fetched around a reply
+    /// target, cut off from the present until "Ir para o presente".
+    pub(crate) detached: HashSet<String>,
+    /// Member sidebar (member_list.rs).
+    pub(crate) members: crate::member_list::Members,
     pub(crate) settings_open: bool,
     /// Page the settings window shows (left nav).
     pub(crate) settings_tab: ui::settings_window::SettingsTab,
@@ -313,6 +321,9 @@ impl VesktopApp {
             last_compose: String::new(),
             last_typing_sent: None,
             jump_to_present: false,
+            reply_jump: None,
+            detached: HashSet::new(),
+            members: Default::default(),
             settings_open: false,
             settings_tab: Default::default(),
             login_token: String::new(),
@@ -794,6 +805,33 @@ impl VesktopApp {
             before: Some(oldest),
             after: None,
         });
+    }
+
+    /// Scrolls to a replied-to message, fetching the history around it
+    /// first when it isn't loaded.
+    pub(crate) fn jump_to_message(&mut self, channel_id: &str, message_id: String) {
+        let loaded = self
+            .messages
+            .get(channel_id)
+            .is_some_and(|list| list.iter().any(|message| message.id == message_id));
+        self.reply_jump = Some((message_id.clone(), None));
+        if !loaded {
+            self.send(Command::LoadMessagesAround {
+                channel_id: channel_id.to_string(),
+                message_id,
+            });
+        }
+    }
+
+    /// "Ir para o presente": a slice around an old reply is swapped for the
+    /// latest page.
+    pub(crate) fn return_to_present(&mut self, channel_id: &str) {
+        if self.detached.remove(channel_id) {
+            self.messages.remove(channel_id);
+            self.stale_channels.remove(channel_id);
+            self.fetch_channel_if_needed(channel_id.to_string());
+        }
+        self.jump_to_present = true;
     }
 
     /// A message that should light up the red badge: @everyone or the user.
@@ -1475,6 +1513,11 @@ impl VesktopApp {
                 self.conn = ConnState::Connected;
             }
             UiEvent::Ready { user } => {
+                // Slices around old replies would catch up page by page:
+                // drop them, reopening loads the present.
+                self.messages.retain(|id, _| !self.detached.contains(id));
+                self.detached.clear();
+                self.members = Default::default();
                 // A fresh session after a drop: cached channels may have
                 // missed messages in between.
                 for (channel_id, list) in &self.messages {
@@ -1734,8 +1777,10 @@ impl VesktopApp {
                 }
                 self.user_cache
                     .insert(message.author.id.clone(), message.author.clone());
+                let detached = self.detached.contains(&message.channel_id);
                 if let Some(list) = self.messages.get_mut(&message.channel_id) {
-                    if !list.iter().any(|m| m.id == message.id) {
+                    // A slice around an old reply doesn't reach the present.
+                    if !detached && !list.iter().any(|m| m.id == message.id) {
                         // The red divider appears when the message lands while
                         // the timeline is behind the present moment.
                         let was_at_present =
@@ -2084,6 +2129,66 @@ impl VesktopApp {
                 self.voice = VoiceConn::Disconnected;
                 self.voice_connected_at = None;
                 self.speaking.clear();
+            }
+            UiEvent::GuildRoles { guild_id, roles } => {
+                let roles = roles.into_iter().map(|role| (role.id.clone(), role));
+                self.members.roles.insert(guild_id, roles.collect());
+            }
+            UiEvent::MemberListUpdate { update } => {
+                for member in update.members() {
+                    let status = member.presence.as_ref().map(|p| p.status.clone());
+                    self.presence.insert(
+                        member.user.id.clone(),
+                        status.unwrap_or_else(|| "offline".into()),
+                    );
+                    self.user_cache
+                        .insert(member.user.id.clone(), member.user.clone());
+                }
+                let guild_id = update.guild_id.clone();
+                self.members
+                    .lists
+                    .entry(guild_id)
+                    .or_default()
+                    .apply(update);
+            }
+            UiEvent::MessagesAround {
+                channel_id,
+                message_id,
+                messages,
+            } => {
+                let wanted = self
+                    .reply_jump
+                    .as_ref()
+                    .is_some_and(|(id, _)| *id == message_id);
+                if !wanted {
+                    return;
+                }
+                // Deleted (or the fetch failed): nothing to jump to.
+                if !messages.iter().any(|message| message.id == message_id) {
+                    self.reply_jump = None;
+                    return;
+                }
+                let entry = self.messages.entry(channel_id.clone()).or_default();
+                let overlaps = match (
+                    entry.first(),
+                    entry.last(),
+                    messages.first(),
+                    messages.last(),
+                ) {
+                    (Some(first), Some(last), Some(page_first), Some(page_last)) => {
+                        snowflake_cmp(&page_last.id, &first.id).is_ge()
+                            && snowflake_cmp(&page_first.id, &last.id).is_le()
+                    }
+                    _ => false,
+                };
+                if overlaps {
+                    merge_messages(entry, messages);
+                } else {
+                    *entry = messages;
+                    self.has_more.insert(channel_id.clone(), true);
+                    self.first_unread.remove(&channel_id);
+                    self.detached.insert(channel_id);
+                }
             }
             UiEvent::QrReady { url } => self.qr = QrState::Code(url),
             UiEvent::QrScanned {
@@ -2793,5 +2898,49 @@ mod tests {
                 "1000000000000000002"
             ]
         );
+    }
+
+    #[test]
+    fn reply_jump_fetches_around_detaches_old_slices_and_ignores_deleted() {
+        let (_rt, mut app, mut commands, _) = test_app();
+        app.messages
+            .insert("channel".into(), (100..=105).map(sample_message).collect());
+        app.jump_to_message("channel", "103".into());
+        assert!(commands.try_recv().is_err());
+
+        app.jump_to_message("channel", "20".into());
+        assert!(
+            matches!(commands.try_recv().unwrap(), Command::LoadMessagesAround { message_id, .. } if message_id == "20")
+        );
+        let around = |ids: std::ops::RangeInclusive<u64>| UiEvent::MessagesAround {
+            channel_id: "channel".into(),
+            message_id: "20".into(),
+            messages: ids.map(sample_message).collect(),
+        };
+        // Deleted: the page around it lacks it, nothing changes.
+        app.handle_event(around(21..=30), true);
+        assert!(app.reply_jump.is_none());
+        assert_eq!(app.messages["channel"].len(), 6);
+
+        // Far older: the slice replaces the cache, cut off from live messages.
+        app.jump_to_message("channel", "20".into());
+        assert!(commands.try_recv().is_ok());
+        app.handle_event(around(10..=30), true);
+        assert!(app.detached.contains("channel"));
+        assert_eq!(app.messages["channel"].first().unwrap().id, "10");
+        app.handle_event(
+            UiEvent::MessageCreated {
+                message: sample_message(200),
+            },
+            true,
+        );
+        assert_eq!(app.messages["channel"].last().unwrap().id, "30");
+
+        app.return_to_present("channel");
+        assert!(!app.detached.contains("channel") && !app.messages.contains_key("channel"));
+        assert!(matches!(
+            commands.try_recv().unwrap(),
+            Command::LoadMessages { before: None, after: None, .. }
+        ));
     }
 }

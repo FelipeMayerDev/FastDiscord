@@ -6,6 +6,7 @@ pub mod friends;
 pub mod icons;
 pub mod image_viewer;
 pub mod login;
+pub mod members;
 pub mod profile_settings;
 pub mod screen_share;
 pub mod server_rail;

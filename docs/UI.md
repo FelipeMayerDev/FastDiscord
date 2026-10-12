@@ -51,6 +51,10 @@ não deve haver um espaço reservado para uma quarta ação.
 - Mute/surdo na lista da sala de voz com os ícones do Discord: vermelhos
   quando o próprio membro ativa, em selo vermelho quando é o servidor.
 - Avatares e status, convites com cartão, GIFs e visualizador de imagens.
+- Lista de membros à direita, alternada pelo botão de pessoas do cabeçalho:
+  grupos por cargo exibido separadamente e online/offline, vinda da lista
+  preguiçosa do gateway (op 37); nas DMs, os participantes. Clicar numa
+  resposta rola até a mensagem original e a destaca.
 - Amigos e solicitações, busca no histórico em cache, arquivos, emoji básico
   e envio de GIF por URL.
 - Tópicos: os seguidos aparecem sob o canal pai; botão **Tópicos** no
