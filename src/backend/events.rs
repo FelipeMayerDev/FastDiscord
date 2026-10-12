@@ -1,6 +1,6 @@
 //! Typed messages between the UI thread and the backend task.
 
-use crate::model::{Channel, Gif, Guild, GuildEmoji, Message, User, VoiceState};
+use crate::model::{Channel, Embed, Gif, Guild, GuildEmoji, Message, User, VoiceState};
 
 /// Sends [`UiEvent`]s to the UI thread and wakes egui's loop right after.
 /// The loop only redraws on input otherwise, so background events (guild
@@ -226,10 +226,13 @@ pub enum UiEvent {
     MessageCreated {
         message: Message,
     },
+    /// An edit, or Discord unfurling links: embeds (a Tenor link's GIF)
+    /// arrive in a MESSAGE_UPDATE after the message itself.
     MessageUpdated {
         channel_id: String,
         message_id: String,
-        content: String,
+        content: Option<String>,
+        embeds: Option<Vec<Embed>>,
     },
     MessageDeleted {
         channel_id: String,
