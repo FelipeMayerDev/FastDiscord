@@ -424,6 +424,23 @@ pub fn poll_watch(app: &mut VesktopApp, ctx: &egui::Context) {
     let Some(frame) = watch.frames.lock().unwrap().take() else {
         return;
     };
+    ctx.data_mut(|data| {
+        let id = egui::Id::new(("watch_fps", &watch.key, watch.started));
+        let (mut since, mut shown) = data
+            .get_temp::<(std::time::Instant, u64)>(id)
+            .unwrap_or((std::time::Instant::now(), 0));
+        shown += 1;
+        if since.elapsed() >= Duration::from_secs(5) {
+            log::info!(
+                "transmissão: interface {:.1} fps, sequência={}",
+                shown as f64 / since.elapsed().as_secs_f64(),
+                frame.seq
+            );
+            since = std::time::Instant::now();
+            shown = 0;
+        }
+        data.insert_temp(id, (since, shown));
+    });
     // Decoded frames are already RGBA; only captures need swizzling.
     let image = if frame.bgr {
         let (size, rgba) = frame.preview_rgba(frame.width);

@@ -430,7 +430,7 @@ async fn connect(info: &StreamInfo, role: &Role) -> Result<(), String> {
                         };
                         match plain {
                             Ok(plain) => {
-                                let _ = decoder.as_ref().map(|tx| tx.send(plain));
+                                let _ = decoder.as_ref().map(|tx| tx.send((plain, std::time::Instant::now())));
                                 false
                             }
                             Err(err) => {
@@ -522,9 +522,9 @@ async fn connect(info: &StreamInfo, role: &Role) -> Result<(), String> {
 fn spawn_decoder(
     frames: Arc<Mutex<Option<Frame>>>,
     events: EventTx,
-) -> Result<std::sync::mpsc::Sender<Vec<u8>>, String> {
+) -> Result<std::sync::mpsc::Sender<(Vec<u8>, std::time::Instant)>, String> {
     use openh264::formats::YUVSource;
-    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    let (tx, rx) = std::sync::mpsc::channel::<(Vec<u8>, std::time::Instant)>();
     std::thread::Builder::new()
         .name("fastdiscord-h264".into())
         .spawn(move || {
@@ -533,19 +533,33 @@ fn spawn_decoder(
                 Err(err) => return log::warn!("transmissão: decoder H264: {err}"),
             };
             let mut seq = 0;
-            for frame in rx {
+            let mut reported = std::time::Instant::now();
+            let (mut received, mut decoded, mut failed, mut empty) = (0, 0, 0, 0);
+            let mut max_queue = Duration::ZERO;
+            for (frame, queued) in rx {
+                received += 1;
+                max_queue = max_queue.max(queued.elapsed());
+                if reported.elapsed() >= Duration::from_secs(5) {
+                    log::info!("transmissão: decoder em {:.1}s: recebidos={received}, decodificados={decoded}, sem_imagem={empty}, erros={failed}, fila_max_ms={:.1}", reported.elapsed().as_secs_f64(), max_queue.as_secs_f64() * 1000.0);
+                    reported = std::time::Instant::now();
+                    (received, decoded, failed, empty) = (0, 0, 0, 0);
+                    max_queue = Duration::ZERO;
+                }
                 let yuv = match decoder.decode(&frame) {
                     Ok(Some(yuv)) => yuv,
-                    Ok(None) => continue,
+                    Ok(None) => { empty += 1; continue; },
                     Err(err) => {
+                        failed += 1;
                         log::debug!("transmissão: decode falhou: {err}");
                         continue;
                     }
                 };
                 let (width, height) = yuv.dimensions();
+                if seq == 0 { log::info!("transmissão: vídeo decodificado {width}x{height}"); }
                 let mut pixels = vec![0; width * height * 4];
                 yuv.write_rgba8(&mut pixels);
                 seq += 1;
+                decoded += 1;
                 *frames.lock().unwrap() = Some(Frame {
                     width: width as u32,
                     height: height as u32,
@@ -853,6 +867,35 @@ impl Dave {
 #[cfg(test)]
 mod tests {
     use super::parse_discovery;
+
+    #[test]
+    fn watch_decoder_publishes_a_complete_rgba_frame() {
+        let yuv = openh264::formats::YUVBuffer::new(16, 16);
+        let mut encoder = openh264::encoder::Encoder::new().unwrap();
+        let packet = encoder.encode(&yuv).unwrap().to_vec();
+        let frames = std::sync::Arc::default();
+        let (events, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = super::spawn_decoder(
+            std::sync::Arc::clone(&frames),
+            super::EventTx::new(events, egui::Context::default()),
+        )
+        .unwrap();
+        sender.send((packet, std::time::Instant::now())).unwrap();
+        let started = std::time::Instant::now();
+        loop {
+            if let Some(frame) = frames.lock().unwrap().take() {
+                assert_eq!((frame.width, frame.height, frame.seq), (16, 16, 1));
+                assert_eq!(frame.pixels.len(), 16 * 16 * 4);
+                assert!(frame.pixels.chunks_exact(4).all(|pixel| pixel[3] == 255));
+                break;
+            }
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(5),
+                "decoder não publicou o quadro"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
 
     #[test]
     fn discovery_response_yields_address_and_port() {
