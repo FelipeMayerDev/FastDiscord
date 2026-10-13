@@ -285,13 +285,17 @@ async fn connect(info: &StreamInfo, role: &Role) -> Result<(), String> {
 
     // The viewer's video path: depacketize → DAVE → decode thread.
     let mut depacketizer = H264Depacketizer::default();
+    let keyframe = Arc::new(AtomicBool::new(true));
     let decoder = match role {
-        Role::Watch { frames, events, .. } => Some(spawn_decoder(frames.clone(), events.clone())?),
+        Role::Watch { frames, events, .. } => Some(spawn_decoder(
+            frames.clone(),
+            events.clone(),
+            Arc::clone(&keyframe),
+        )?),
         Role::Stream { .. } => None,
     };
     // The streamer's path: encoder thread → DAVE → packetize → seal.
     // Start with an IDR; DAVE becoming ready and viewer PLIs ask for more.
-    let keyframe = Arc::new(AtomicBool::new(true));
     let mut encoded = match role {
         Role::Stream { frames } => Some(encode::spawn(frames.clone(), Arc::clone(&keyframe))?),
         Role::Watch { .. } => None,
@@ -446,12 +450,16 @@ async fn connect(info: &StreamInfo, role: &Role) -> Result<(), String> {
                         true
                     }
                 };
-                // At most one PLI a second (startup, losses, undecryptable).
+                let want_keyframe = want_keyframe || keyframe.load(Ordering::Relaxed);
+                // Decoder reference loss also needs an IDR to recover.
                 if want_keyframe && keyframe_asked.is_none_or(|at| at.elapsed() > Duration::from_secs(1)) {
                     keyframe_asked = Some(std::time::Instant::now());
                     counter = counter.wrapping_add(1);
                     if let Some(packet) = rtp::pli(&cipher, audio_ssrc, rtp.ssrc, counter) {
-                        let _ = udp.send(&packet).await;
+                        if udp.send(&packet).await.is_ok() {
+                            keyframe.store(false, Ordering::Relaxed);
+                            stats.keyframe_requests += 1;
+                        }
                     }
                 }
             }
@@ -522,6 +530,7 @@ async fn connect(info: &StreamInfo, role: &Role) -> Result<(), String> {
 fn spawn_decoder(
     frames: Arc<Mutex<Option<Frame>>>,
     events: EventTx,
+    keyframe: Arc<AtomicBool>,
 ) -> Result<std::sync::mpsc::Sender<(Vec<u8>, std::time::Instant)>, String> {
     use openh264::formats::YUVSource;
     let (tx, rx) = std::sync::mpsc::channel::<(Vec<u8>, std::time::Instant)>();
@@ -550,6 +559,8 @@ fn spawn_decoder(
                     Ok(None) => { empty += 1; continue; },
                     Err(err) => {
                         failed += 1;
+                        keyframe.store(true, Ordering::Relaxed);
+                        if failed == 1 { log::warn!("transmissão: decoder precisa de quadro-chave: {err}"); }
                         log::debug!("transmissão: decode falhou: {err}");
                         continue;
                     }
@@ -869,6 +880,27 @@ mod tests {
     use super::parse_discovery;
 
     #[test]
+    fn watch_decoder_requests_keyframe_after_decode_error() {
+        let keyframe = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (events, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = super::spawn_decoder(
+            std::sync::Arc::default(),
+            super::EventTx::new(events, egui::Context::default()),
+            std::sync::Arc::clone(&keyframe),
+        )
+        .unwrap();
+        // An IDR without SPS/PPS cannot be decoded.
+        sender
+            .send((vec![0, 0, 0, 1, 0x65, 0xff], std::time::Instant::now()))
+            .unwrap();
+        let started = std::time::Instant::now();
+        while !keyframe.load(std::sync::atomic::Ordering::Relaxed) {
+            assert!(started.elapsed() < std::time::Duration::from_secs(5));
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    #[test]
     fn watch_decoder_publishes_a_complete_rgba_frame() {
         let yuv = openh264::formats::YUVBuffer::new(16, 16);
         let mut encoder = openh264::encoder::Encoder::new().unwrap();
@@ -878,6 +910,7 @@ mod tests {
         let sender = super::spawn_decoder(
             std::sync::Arc::clone(&frames),
             super::EventTx::new(events, egui::Context::default()),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         )
         .unwrap();
         sender.send((packet, std::time::Instant::now())).unwrap();
