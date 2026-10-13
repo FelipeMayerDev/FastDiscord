@@ -554,7 +554,8 @@ fn spawn_decoder(
                     (received, decoded, failed, empty) = (0, 0, 0, 0);
                     max_queue = Duration::ZERO;
                 }
-                let yuv = match decoder.decode(&frame) {
+                // A live stream continues; flushing partial frames can discard references.
+                let yuv = match decoder.decode_with_options(&frame, openh264::decoder::DecodeOptions::new().flush_after_decode(openh264::decoder::Flush::NoFlush)) {
                     Ok(Some(yuv)) => yuv,
                     Ok(None) => { empty += 1; continue; },
                     Err(err) => {
@@ -904,7 +905,14 @@ mod tests {
     fn watch_decoder_publishes_a_complete_rgba_frame() {
         let yuv = openh264::formats::YUVBuffer::new(16, 16);
         let mut encoder = openh264::encoder::Encoder::new().unwrap();
-        let packet = encoder.encode(&yuv).unwrap().to_vec();
+        let packets: Vec<_> = (0..12)
+            .map(|_| encoder.encode(&yuv).unwrap().to_vec())
+            .collect();
+        assert!(packets.iter().skip(1).any(|packet| {
+            crate::backend::rtp::split_annex_b(packet)
+                .iter()
+                .any(|nal| nal[0] & 31 == 1)
+        }));
         let frames = std::sync::Arc::default();
         let (events, _rx) = tokio::sync::mpsc::unbounded_channel();
         let sender = super::spawn_decoder(
@@ -913,11 +921,15 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         )
         .unwrap();
-        sender.send((packet, std::time::Instant::now())).unwrap();
+        for packet in packets {
+            sender.send((packet, std::time::Instant::now())).unwrap();
+        }
         let started = std::time::Instant::now();
         loop {
-            if let Some(frame) = frames.lock().unwrap().take() {
-                assert_eq!((frame.width, frame.height, frame.seq), (16, 16, 1));
+            if let Some(frame) = frames.lock().unwrap().take()
+                && frame.seq == 12
+            {
+                assert_eq!((frame.width, frame.height), (16, 16));
                 assert_eq!(frame.pixels.len(), 16 * 16 * 4);
                 assert!(frame.pixels.chunks_exact(4).all(|pixel| pixel[3] == 255));
                 break;
