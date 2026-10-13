@@ -800,11 +800,7 @@ fn paint_content(
     channel_names: &HashMap<String, String>,
 ) {
     // A bare Tenor/Giphy link shows only its GIF, like Discord.
-    let bare_gif = message.embeds.iter().any(|embed| {
-        embed.kind.as_deref() == Some("gifv")
-            && embed.url.as_deref() == Some(message.content.trim())
-    });
-    if !message.content.is_empty() && !bare_gif {
+    if !message.content.is_empty() && !bare_media_link(message) {
         let runs = content_runs(&message.content, &app.user_cache, channel_names);
         paint_runs(app, ui, runs);
     }
@@ -932,6 +928,94 @@ fn paint_content(
         );
     }
     crate::ui::threads::message_thread_summary(app, ui, message);
+}
+
+/// Discord hides the link text when the message is nothing but a GIF/image
+/// URL that produced a gifv/image embed — the picture (or player) replaces
+/// it entirely.
+fn bare_media_link(message: &Message) -> bool {
+    let content = message.content.trim();
+    if content.is_empty() || content.chars().any(char::is_whitespace) {
+        return false;
+    }
+    message.embeds.iter().any(|embed| {
+        matches!(embed.kind.as_deref(), Some("gifv" | "image"))
+            && embed
+                .url
+                .as_deref()
+                .is_some_and(|url| bare_url(content) == bare_url(url))
+    })
+}
+
+/// Normalize a URL for the bare-link comparison: drop any autolink angle
+/// brackets, the query string, the fragment and trailing slashes, so a
+/// pasted `…view/cat?si=1` matches the embed's canonical URL.
+fn bare_url(url: &str) -> &str {
+    let url = url.trim().trim_start_matches('<').trim_end_matches('>');
+    url.split(['?', '#'])
+        .next()
+        .unwrap_or("")
+        .trim_end_matches('/')
+}
+
+#[cfg(test)]
+mod bare_link_tests {
+    use super::bare_media_link;
+
+    fn message(content: &str, embeds: serde_json::Value) -> crate::model::Message {
+        serde_json::from_value(serde_json::json!({
+            "id": "1",
+            "author": { "id": "2", "username": "ana" },
+            "content": content,
+            "embeds": embeds,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn hides_the_link_for_gifv_and_image_embeds() {
+        let gifv = message(
+            "https://tenor.com/view/cat-gif-123?si=1",
+            serde_json::json!([{ "type": "gifv", "url": "https://tenor.com/view/cat-gif-123" }]),
+        );
+        assert!(bare_media_link(&gifv));
+
+        let image = message(
+            "https://cdn.discordapp.com/attachments/1/2/meme.gif",
+            serde_json::json!([{
+                "type": "image",
+                "url": "https://cdn.discordapp.com/attachments/1/2/meme.gif",
+            }]),
+        );
+        assert!(bare_media_link(&image));
+
+        let autolink = message(
+            "<https://tenor.com/view/cat-gif-123>",
+            serde_json::json!([{ "type": "gifv", "url": "https://tenor.com/view/cat-gif-123" }]),
+        );
+        assert!(bare_media_link(&autolink));
+    }
+
+    #[test]
+    fn keeps_text_around_links_and_non_media_embeds() {
+        let with_text = message(
+            "olha isso https://tenor.com/view/cat-gif-123",
+            serde_json::json!([{ "type": "gifv", "url": "https://tenor.com/view/cat-gif-123" }]),
+        );
+        assert!(!bare_media_link(&with_text));
+
+        let rich = message(
+            "https://example.com",
+            serde_json::json!([{ "type": "rich", "url": "https://example.com" }]),
+        );
+        assert!(!bare_media_link(&rich));
+
+        let different_url = message(
+            "https://tenor.com/view/cat-gif-123",
+            serde_json::json!([{ "type": "gifv", "url": "https://tenor.com/view/dog-gif-456" }]),
+        );
+        assert!(!bare_media_link(&different_url));
+    }
 }
 
 #[derive(Clone)]
