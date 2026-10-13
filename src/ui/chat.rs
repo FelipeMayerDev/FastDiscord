@@ -120,12 +120,9 @@ pub fn paint(app: &mut VesktopApp, ui: &mut egui::Ui) {
                 let (avatar_rect, _) = ui.allocate_exact_size(Vec2::splat(24.0), Sense::hover());
                 match texture {
                     Some(texture) => {
-                        ui.painter().image(
-                            texture.id(),
-                            avatar_rect,
-                            egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-                            egui::Color32::WHITE,
-                        );
+                        egui::Image::new((texture.id(), avatar_rect.size()))
+                            .corner_radius(egui::CornerRadius::same(12))
+                            .paint_at(ui, avatar_rect);
                     }
                     None if dm.dm_partner().is_none() => {
                         crate::ui::paint_group_avatar(ui.painter(), avatar_rect)
