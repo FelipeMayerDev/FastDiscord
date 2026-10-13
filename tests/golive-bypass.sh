@@ -13,9 +13,9 @@ PostUp = exit 99
 Endpoint = example.com:51820
 AllowedIPs = 0.0.0.0/0, ::/0
 EOF
-bash packaging/golive-bypass.sh --check "$profile"
+bash src/plugins/golive_bypass/linux.sh --check "$profile"
 reject() {
-    if bash packaging/golive-bypass.sh --check "$profile" 2>/dev/null; then
+    if bash src/plugins/golive_bypass/linux.sh --check "$profile" 2>/dev/null; then
         echo "aceitou perfil inválido: $1" >&2
         exit 1
     fi

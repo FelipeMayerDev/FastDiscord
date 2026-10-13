@@ -58,7 +58,7 @@ pub fn poll(app: &mut VesktopApp, ctx: &egui::Context) {
 
 fn ended(
     capture: &Capture,
-    publisher: Option<&crate::backend::fockytv::Publisher>,
+    publisher: Option<&crate::plugins::fockytv::Publisher>,
 ) -> Option<String> {
     capture
         .ended
@@ -293,15 +293,19 @@ pub fn picker(app: &mut VesktopApp, ctx: &egui::Context) {
                     });
             }
             ui.separator();
-            ui.add_enabled_ui(settings.fockytv_share, |ui| {
+            let fockytv = settings
+                .plugins
+                .backend(crate::plugins::golive_bypass::active())
+                == crate::plugins::ShareBackend::FockyTv;
+            ui.add_enabled_ui(fockytv, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.label("Resolução:");
                     for (height, label) in [(0, "Original"), (1080, "1080p"), (720, "720p")] {
                         if ui
-                            .radio(settings.fockytv_max_height == height, label)
+                            .radio(settings.plugins.fockytv.max_height == height, label)
                             .clicked()
                         {
-                            settings.fockytv_max_height = height;
+                            settings.plugins.fockytv.max_height = height;
                             changed = true;
                         }
                     }
@@ -310,20 +314,24 @@ pub fn picker(app: &mut VesktopApp, ctx: &egui::Context) {
                     ui.label("Taxa de quadros:");
                     for fps in [60, 30, 15] {
                         if ui
-                            .radio(settings.fockytv_fps == fps, format!("{fps} fps"))
+                            .radio(settings.plugins.fockytv.fps == fps, format!("{fps} fps"))
                             .clicked()
                         {
-                            settings.fockytv_fps = fps;
+                            settings.plugins.fockytv.fps = fps;
                             changed = true;
                         }
                     }
                 });
             });
-            if !settings.fockytv_share {
+            if !fockytv {
                 ui.label(
-                    RichText::new("O Go Live do Discord envia 720p a 30 fps.")
-                        .small()
-                        .color(theme::MUTED),
+                    RichText::new(if crate::plugins::golive_bypass::active() {
+                        "Go Live com GoLiveBypass: envio em 720p a 30 fps."
+                    } else {
+                        "O Go Live do Discord envia 720p a 30 fps."
+                    })
+                    .small()
+                    .color(theme::MUTED),
                 );
             }
             ui.add_space(4.0);
@@ -477,7 +485,7 @@ fn paint_video(app: &VesktopApp, ui: &mut egui::Ui, area: Rect) {
                 watch.fockytv.is_none() && watch.started.elapsed() > Duration::from_secs(10)
             });
             let text = if blocked {
-                "Sem vídeo: o Discord suspendeu o Go Live no Brasil.\nUse o FockyTV para assistir."
+                "Sem vídeo recebido. Verifique a conexão ou configure os plugins em Configurações → Plugins."
             } else {
                 ui.ctx().request_repaint_after(Duration::from_secs(1));
                 "Conectando à transmissão…"
@@ -504,7 +512,10 @@ pub fn paint_watch(app: &mut VesktopApp, ui: &mut egui::Ui) {
             Some(nick) => format!("Câmera de {nick} no FockyTV"),
             None => format!("Assistindo {key} no FockyTV"),
         },
-        None => "Assistindo à transmissão".to_string(),
+        None if crate::plugins::golive_bypass::active() => {
+            "Assistindo à transmissão • GoLiveBypass".to_string()
+        }
+        None => "Assistindo à transmissão no Discord".to_string(),
     };
     let mut leave = false;
     ui.horizontal(|ui| {

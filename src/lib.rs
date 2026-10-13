@@ -13,6 +13,7 @@ pub mod member_list;
 pub mod model;
 pub mod notifications;
 pub mod paths;
+pub mod plugins;
 pub mod settings;
 pub mod theme;
 #[cfg(feature = "tray")]

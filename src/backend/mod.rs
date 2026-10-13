@@ -3,8 +3,6 @@
 
 pub mod api;
 pub mod audio;
-#[cfg(target_os = "linux")]
-pub mod bypass;
 pub mod camera;
 pub mod capture;
 pub mod dj;
@@ -12,7 +10,6 @@ pub mod dj_server;
 pub mod encode;
 pub mod events;
 pub mod file_picker;
-pub mod fockytv;
 pub mod gateway;
 pub mod music;
 pub mod remote_auth;

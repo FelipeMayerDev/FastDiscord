@@ -105,7 +105,7 @@ pub(crate) struct GoLive {
     /// Viewer only: the latest decoded frame.
     pub(crate) frames: Arc<Mutex<Option<crate::backend::capture::Frame>>>,
     /// Set when the stream is a FockyTV live watched over WHEP instead.
-    pub(crate) fockytv: Option<crate::backend::fockytv::Viewer>,
+    pub(crate) fockytv: Option<crate::plugins::fockytv::Viewer>,
     /// When watching began: a Go Live that never shows video gets a
     /// notice (blocked in Brazil).
     pub(crate) started: Instant,
@@ -207,7 +207,7 @@ pub struct VesktopApp {
     pub(crate) watch: Option<GoLive>,
     pub(crate) watch_texture: Option<egui::TextureHandle>,
     /// Our WHIP publish when FockyTV is the share backend.
-    pub(crate) fockytv: Option<crate::backend::fockytv::Publisher>,
+    pub(crate) fockytv: Option<crate::plugins::fockytv::Publisher>,
     /// FockyTV lives now: lowercased key (matched to usernames) → key.
     pub(crate) fockytv_live: HashMap<String, String>,
     fockytv_polled: Option<Instant>,
@@ -217,7 +217,7 @@ pub struct VesktopApp {
     /// Our webcam and its FockyTV publish under `camera_key(nick)`.
     pub(crate) camera: Option<crate::backend::capture::Capture>,
     pub(crate) camera_texture: Option<egui::TextureHandle>,
-    pub(crate) camera_publisher: Option<crate::backend::fockytv::Publisher>,
+    pub(crate) camera_publisher: Option<crate::plugins::fockytv::Publisher>,
     pub(crate) voice_deaf: bool,
     /// Voice-state user ids we already asked the API for.
     voice_users_pending: HashSet<String>,
@@ -252,8 +252,7 @@ pub struct VesktopApp {
     pub(crate) settings_open: bool,
     /// Page the settings window shows (left nav).
     pub(crate) settings_tab: ui::settings_window::SettingsTab,
-    #[cfg(target_os = "linux")]
-    pub(crate) bypass: ui::settings_window::Bypass,
+    pub(crate) plugins_ui: ui::plugins::State,
     pub(crate) login_token: String,
     /// "Encontre ou comece uma conversa" filter for the DM list.
     pub(crate) dm_search: String,
@@ -356,8 +355,7 @@ impl VesktopApp {
             members: Default::default(),
             settings_open: false,
             settings_tab: Default::default(),
-            #[cfg(target_os = "linux")]
-            bypass: Default::default(),
+            plugins_ui: Default::default(),
             login_token: String::new(),
             dm_search: String::new(),
             home_page: ui::friends::HomePage::DirectMessages,
@@ -979,10 +977,10 @@ impl VesktopApp {
         if !matches!(self.voice, VoiceConn::Connected { .. }) || self.me.is_none() {
             return;
         }
-        if self.settings.fockytv_share
-            && crate::backend::fockytv::validate_stream_key(&self.fockytv_nick()).is_err()
+        if self.uses_fockytv()
+            && crate::plugins::fockytv::validate_stream_key(&self.fockytv_nick()).is_err()
         {
-            ui::settings_window::open_at(self, ui::settings_window::SettingsTab::ScreenShare);
+            ui::settings_window::open_at(self, ui::settings_window::SettingsTab::Plugins);
             return;
         }
         self.share_picker = Some(ui::screen_share::Picker::new());
@@ -1005,18 +1003,18 @@ impl VesktopApp {
         let Some(me) = &self.me else {
             return;
         };
-        if self.settings.fockytv_share {
+        if self.uses_fockytv() {
             let nick = self.fockytv_nick();
             let ctx = ctx.clone();
             let capture = crate::backend::capture::start(self.handle.clone(), source, move || {
                 ctx.request_repaint()
             });
             play_sound(Sound::StreamStart);
-            self.fockytv = Some(crate::backend::fockytv::publish(
-                &self.settings.fockytv_url,
+            self.fockytv = Some(crate::plugins::fockytv::publish(
+                &self.settings.plugins.fockytv.url,
                 &nick,
-                self.settings.fockytv_fps,
-                self.settings.fockytv_max_height,
+                self.settings.plugins.fockytv.fps,
+                self.settings.plugins.fockytv.max_height,
                 Arc::clone(&capture.frame),
             ));
             self.screen = Some(capture);
@@ -1050,10 +1048,8 @@ impl VesktopApp {
             return;
         }
         let nick = self.fockytv_nick();
-        if !self.settings.fockytv_share
-            || crate::backend::fockytv::validate_stream_key(&nick).is_err()
-        {
-            ui::settings_window::open_at(self, ui::settings_window::SettingsTab::ScreenShare);
+        if !self.uses_fockytv() || crate::plugins::fockytv::validate_stream_key(&nick).is_err() {
+            ui::settings_window::open_at(self, ui::settings_window::SettingsTab::Plugins);
             return;
         }
         let ctx = ctx.clone();
@@ -1061,9 +1057,9 @@ impl VesktopApp {
             crate::backend::camera::start(self.settings.camera_device.clone(), move || {
                 ctx.request_repaint()
             });
-        self.camera_publisher = Some(crate::backend::fockytv::publish(
-            &self.settings.fockytv_url,
-            &crate::backend::fockytv::camera_key(&nick),
+        self.camera_publisher = Some(crate::plugins::fockytv::publish(
+            &self.settings.plugins.fockytv.url,
+            &crate::plugins::fockytv::camera_key(&nick),
             30,
             0,
             Arc::clone(&camera.frame),
@@ -1094,10 +1090,19 @@ impl VesktopApp {
         }
     }
 
+    pub(crate) fn uses_fockytv(&self) -> bool {
+        self.settings
+            .plugins
+            .backend(crate::plugins::golive_bypass::active())
+            == crate::plugins::ShareBackend::FockyTv
+    }
+
     /// Our FockyTV stream key: the configured nick, else the username.
     pub(crate) fn fockytv_nick(&self) -> String {
         self.settings
-            .fockytv_nick
+            .plugins
+            .fockytv
+            .nick
             .clone()
             .filter(|nick| !nick.trim().is_empty())
             .or_else(|| self.me.as_ref().map(|me| me.username.clone()))
@@ -1122,7 +1127,7 @@ impl VesktopApp {
         if discord_stream {
             return true;
         }
-        if !self.settings.fockytv_share {
+        if !self.uses_fockytv() {
             return false;
         }
         if self.me.as_ref().is_some_and(|me| me.id == user_id) {
@@ -1142,12 +1147,12 @@ impl VesktopApp {
     /// `user_id`'s live FockyTV key: their username for the screen,
     /// `camera_key(username)` for the webcam.
     fn fockytv_key(&self, user_id: &str, camera: bool) -> Option<String> {
-        if !self.settings.fockytv_share {
+        if !self.uses_fockytv() {
             return None;
         }
         let username = &self.user_cache.get(user_id)?.username;
         let key = if camera {
-            crate::backend::fockytv::camera_key(username)
+            crate::plugins::fockytv::camera_key(username)
         } else {
             username.clone()
         };
@@ -1171,14 +1176,14 @@ impl VesktopApp {
     }
 
     fn watch_fockytv(&mut self, key: String) {
-        if crate::backend::fockytv::validate_stream_key(&self.fockytv_nick()).is_err() {
-            ui::settings_window::open_at(self, ui::settings_window::SettingsTab::ScreenShare);
+        if crate::plugins::fockytv::validate_stream_key(&self.fockytv_nick()).is_err() {
+            ui::settings_window::open_at(self, ui::settings_window::SettingsTab::Plugins);
             return;
         }
         self.stop_watching();
         let mut watch = GoLive::new(format!("fockytv:{key}"));
-        watch.fockytv = Some(crate::backend::fockytv::watch(
-            &self.settings.fockytv_url,
+        watch.fockytv = Some(crate::plugins::fockytv::watch(
+            &self.settings.plugins.fockytv.url,
             &key,
             &self.fockytv_nick(),
             Arc::clone(&watch.frames),
@@ -1190,7 +1195,7 @@ impl VesktopApp {
 
     /// While in a call, refreshes who's live on FockyTV every 5 s.
     fn poll_fockytv(&mut self) {
-        if !self.settings.fockytv_share || !matches!(self.voice, VoiceConn::Connected { .. }) {
+        if !self.uses_fockytv() || !matches!(self.voice, VoiceConn::Connected { .. }) {
             return;
         }
         if self
@@ -1200,9 +1205,12 @@ impl VesktopApp {
             return;
         }
         self.fockytv_polled = Some(Instant::now());
-        let (server, events) = (self.settings.fockytv_url.clone(), self.event_tx.clone());
+        let (server, events) = (
+            self.settings.plugins.fockytv.url.clone(),
+            self.event_tx.clone(),
+        );
         self.handle.spawn(async move {
-            match crate::backend::fockytv::live_keys(&server).await {
+            match crate::plugins::fockytv::live_keys(&server).await {
                 Ok(keys) => events.send(UiEvent::FockyLive { keys }),
                 Err(err) => log::debug!("fockytv: status falhou: {err}"),
             }
@@ -2419,6 +2427,11 @@ impl VesktopApp {
 
 impl eframe::App for VesktopApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if ui::plugins::poll(self, ctx) {
+            self.quitting = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
         while let Ok(command) = self.tray_rx.try_recv() {
             match command {
                 TrayCommand::Show => {
@@ -2617,7 +2630,7 @@ impl eframe::App for VesktopApp {
         if self.watch.is_some() && !self.watch_docked() {
             ui::screen_share::paint_floating(self, ctx);
         }
-        if self.settings.fockytv_share && matches!(self.voice, VoiceConn::Connected { .. }) {
+        if self.uses_fockytv() && matches!(self.voice, VoiceConn::Connected { .. }) {
             ctx.request_repaint_after(Duration::from_secs(5));
         }
         if matches!(self.conn, ConnState::Connecting) {
@@ -2735,7 +2748,7 @@ mod tests {
                 ui::settings_window::SettingsTab::Account,
                 ui::settings_window::SettingsTab::Appearance,
                 ui::settings_window::SettingsTab::Voice,
-                ui::settings_window::SettingsTab::ScreenShare,
+                ui::settings_window::SettingsTab::Plugins,
                 ui::settings_window::SettingsTab::Behavior,
             ] {
                 app.settings_tab = tab;
@@ -2941,17 +2954,14 @@ mod tests {
             guild_id: "guild".into(),
             channel_id: "channel".into(),
         };
-        app.settings.fockytv_nick = Some("Discord RUST".into());
+        app.settings.plugins.fockytv.nick = Some("Discord RUST".into());
         app.toggle_screen_share();
         assert!(app.screen.is_none());
         assert!(app.fockytv.is_none());
         assert!(app.settings_open);
-        assert_eq!(
-            app.settings_tab,
-            ui::settings_window::SettingsTab::ScreenShare
-        );
+        assert_eq!(app.settings_tab, ui::settings_window::SettingsTab::Plugins);
         assert!(commands.try_recv().is_err());
-        app.settings.fockytv_nick = Some(" Discord-RUST ".into());
+        app.settings.plugins.fockytv.nick = Some(" Discord-RUST ".into());
         assert_eq!(app.fockytv_nick(), "Discord-RUST");
         // A valid nick opens the picker; nothing is captured until it's
         // confirmed.

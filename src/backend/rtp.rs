@@ -177,8 +177,9 @@ pub fn wants_keyframe(rtcp: &[u8]) -> bool {
 
 const START_CODE: [u8; 4] = [0, 0, 0, 1];
 
-/// Largest RTP payload we send (discord-native-voice's MTU).
-const MTU: usize = 1200;
+/// Leave room for RTP extensions, encryption and IP/UDP within the
+/// bypass tunnel's 1280-byte MTU, including IPv6 headers.
+const MTU: usize = 1120;
 /// Bytes of an outgoing video packet left in the clear: fixed header plus
 /// the extension preamble.
 pub const VIDEO_CLEAR: usize = 16;
@@ -462,6 +463,7 @@ mod tests {
             cipher
                 .seal(&mut packet, VIDEO_CLEAR, counter as u32)
                 .unwrap();
+            assert!(packet.len() + 40 + 8 <= 1280);
             let rtp = cipher.open_rtp(&packet).unwrap();
             assert_eq!((rtp.ssrc, rtp.timestamp), (91, 9000));
             out = depacketizer.push(&rtp).unwrap();

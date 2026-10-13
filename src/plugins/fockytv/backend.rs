@@ -1,4 +1,4 @@
-//! FockyTV as the screen share backend (docs/SCREENSHARE.md): instead of
+//! FockyTV plugin transport (docs/SCREENSHARE.md): instead of
 //! Discord's Go Live, our capture is published over WHIP to a FockyTV server
 //! (MediaMTX behind its `live-api`), and "Assistir" plays a member's live
 //! over WHEP in the watch view. The pipeline is fockytv-share's (FockyTV `client/src/pipeline/

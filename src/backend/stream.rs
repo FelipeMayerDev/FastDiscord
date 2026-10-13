@@ -368,7 +368,9 @@ async fn connect(info: &StreamInfo, role: &Role) -> Result<(), String> {
                     sent_octets = sent_octets.wrapping_add((packet.len() - rtp::VIDEO_CLEAR) as u32);
                     counter = counter.wrapping_add(1);
                     if cipher.seal(&mut packet, rtp::VIDEO_CLEAR, counter).is_some() {
-                        let _ = udp.send(&packet).await;
+                        udp.send(&packet).await.map_err(|err| {
+                            format!("Não foi possível enviar o vídeo ({} bytes): {err}", packet.len())
+                        })?;
                     }
                 }
                 sent_frames += 1;

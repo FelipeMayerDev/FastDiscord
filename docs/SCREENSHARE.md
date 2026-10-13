@@ -3,23 +3,31 @@
 Electron Vesktop only owns the picker (`src/main/screenShare.ts`,
 `ScreenSharePicker.tsx`: one portal source on Wayland, resolution/fps,
 venmic audio); Discord's web JS does the rest over WebRTC. Here the whole
-stack is ours, with two backends behind one button, picked in Settings →
-"Tela e transmissão":
+stack is ours, with plugins configured in Settings → **Plugins**.
+Each plugin has an enable switch and a **Configurar** button.
 
-| Setting "Usar backend de compartilhamento do FockyTV" | Share | Watch |
+| Plugins/runtime | Share | Watch |
 |---|---|---|
-| **on** (default) | WHIP publish to FockyTV | WHEP from FockyTV, in place of the chat |
-| off | Discord Go Live (op 18 + own stream connection) | Discord Go Live (op 20) |
+| GoLiveBypass tunnel active (takes priority) | Discord Go Live through WireGuard | Discord Go Live through WireGuard |
+| FockyTV enabled, bypass inactive | WHIP publish to configured URL | WHEP from configured URL |
+| FockyTV disabled, bypass inactive | Discord Go Live | Discord Go Live |
 
-The FockyTV path works end to end. The Go Live path stays in the code for
-later: it works up to the SFU receiving our video, which it does not yet
-forward to viewers (see below).
+FockyTV's existing URL, nickname, resolution and FPS migrate automatically
+to `plugins.fockytv`. GoLiveBypass owns profile import and tunnel lifecycle;
+see [GOLIVE-BYPASS.md](GOLIVE-BYPASS.md). Both plugins live in `src/plugins/`,
+own their configuration UIs and expose their transport operations to the app.
+`src/plugins/mod.rs` defines the built-in catalog and backend precedence;
+these are compiled native plugins, with no external script loader.
+
+Native Go Live watching was exercised through the bypass. Publishing still
+needs an end-to-end retest with spectators after the earlier SFU-forwarding
+limitation documented below.
 
 | File | Role |
 |---|---|
 | `src/backend/capture.rs` | Shared latest-frame slot; Linux ScreenCast portal + PipeWire, Windows `d3d11screencapturesrc` and its source list |
 | `src/backend/camera.rs` | Webcam: device list and capture into the same kind of slot |
-| `src/backend/fockytv.rs` | WHIP publish, WHEP watch, `/api/status` polling (GStreamer) |
+| `src/plugins/fockytv/backend.rs` | WHIP publish, WHEP watch, `/api/status` polling (GStreamer) |
 | `src/backend/stream.rs` | Go Live stream connection: handshake, DAVE, send and receive |
 | `src/backend/encode.rs` | Go Live encoder thread (openh264) |
 | `src/backend/rtp.rs` | rtpsize AES-GCM, H.264 (de)packetizer, RTCP (PLI, RR, SR) |
@@ -74,12 +82,12 @@ it can offer differs per platform:
   portal's dialog is the picker, so the app only shows the options. X11
   could enumerate (`ximagesrc xid=`), but the target desktop is Wayland
   and the portal works on both, so it isn't done.
-- **Resolução** (Original / 1080p / 720p, `fockytv_max_height`) adds
+- **Resolução** (Original / 1080p / 720p, `plugins.fockytv.max_height`) adds
   `videoscale` to a fixed even size with the source's aspect; a later
   size change (a resized window) is letterboxed, not stretched. The
   bitrate follows the output size (a 6 Mbps tier up to ~720p sits below
   fockytv-share's 12/20/32). **Taxa de quadros** is the same
-  `fockytv_fps` as the settings page. Both apply to FockyTV only; the
+  `plugins.fockytv.fps` as the settings page. Both apply to FockyTV only; the
   Go Live encoder stays at 720p30 and the picker says so.
 
 ## FockyTV backend
@@ -212,7 +220,7 @@ DeviceMonitor "Video/Source" → device.create_element()
   the Go Live stream connection carries a screen stream, not the voice
   connection's camera. Out of scope.
 
-## Discord Go Live backend (setting off)
+## Discord Go Live backend (FockyTV disabled or bypass active)
 
 Songbird can't carry video (fixed `Identify`, no `codecs` in select
 protocol, audio-only UDP), so the stream gets its own voice-WS + UDP
@@ -241,8 +249,10 @@ client, following
   session as streamer and viewer.
 - **Sending**: capture → openh264 (fit 1280×720, 30 fps, 2.5 Mbps, IDR
   every 2 s and on PLI / DAVE ready) → `davey.encrypt` on the Annex-B frame
-  → single-NAL/FU-A packets ≤ 1200 bytes → sealed → UDP. The SFU's receiver
-  reports confirm reception with no loss.
+  → single-NAL/FU-A payloads ≤ 1120 bytes → sealed → UDP. This reserves
+  space for RTP extensions, authentication and IP/UDP headers within the
+  bypass tunnel's 1280-byte MTU. UDP send failures terminate the stream
+  with an error rather than silently dropping its packets.
 - **Viewer side**: op 12 `{video_ssrc: 0, streams: []}`, op 15 naming the
   streamer's ssrcs, RTP open → depacketize → `davey.decrypt` → openh264 on
   its own thread. Video is told apart by op 12's ssrcs, not payload
@@ -262,11 +272,11 @@ client, following
   a second instance with its own profile starts at the login screen:
   `XDG_CONFIG_HOME=/tmp/acct2/config XDG_DATA_HOME=/tmp/acct2/data
   ./target/debug/fastdiscord`.
-- **Logs**: `RUST_LOG=info,fastdiscord::backend::fockytv=debug` (or
+- **Logs**: `RUST_LOG=info,fastdiscord::plugins::fockytv=debug` (or
   `…::stream=debug` for Go Live; it logs per-5 s packet counters and
   decoded RTCP reports).
 - **WHEP without the UI**: a throwaway `tests/*.rs` calling
-  `fastdiscord::backend::fockytv::watch` against a live key with an
+  `fastdiscord::plugins::fockytv::watch` against a live key with an
   `EventTx` on `egui::Context::default()` reproduces the viewer headless;
   `GST_DEBUG=3` shows the GStreamer side, `whepsrc:7` the SDP offer.
 - **Server side**: `docker logs fockytv-mtx` (sessions, codec matching,

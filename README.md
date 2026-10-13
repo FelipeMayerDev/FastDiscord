@@ -31,7 +31,8 @@ e o Discord é falado nativamente — REST + Gateway sobre tokio.
   um relay configurado em Voz e áudio; o pacote Windows inclui
   `yt-dlp`, `ffmpeg`, `ffprobe` e Deno. No Linux/build local, instale as ferramentas
   do DJ no sistema (Deno dá suporte completo ao YouTube no `yt-dlp` atual).
-- Compartilhamento de tela pelo FockyTV, sons do Discord, notificações de DMs e
+- Plugins configuráveis: FockyTV para tela/câmera e [GoLiveBypass](docs/GOLIVE-BYPASS.md) para Go Live via WireGuard.
+- Sons do Discord, notificações de DMs e
   menções, configurações em abas e animações de hover, seleção e clique.
 - Cache persistente de servidores, canais, DMs e amigos para abrir a navegação
   rapidamente, com atualização em segundo plano.

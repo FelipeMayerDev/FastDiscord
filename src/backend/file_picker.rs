@@ -5,7 +5,7 @@ use std::path::PathBuf;
 pub async fn pick_file() -> Result<Option<PathBuf>, String> {
     use ashpd::desktop::{ResponseError, file_chooser::SelectedFiles};
     let request = SelectedFiles::open_file()
-        .title("Enviar arquivo")
+        .title("Selecionar arquivo")
         .accept_label("Selecionar")
         .modal(true)
         .multiple(false)

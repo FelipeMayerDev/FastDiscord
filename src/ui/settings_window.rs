@@ -18,7 +18,7 @@ pub enum SettingsTab {
     Profile,
     Appearance,
     Voice,
-    ScreenShare,
+    Plugins,
     Behavior,
 }
 
@@ -29,7 +29,7 @@ impl SettingsTab {
             Self::Profile => "Perfil",
             Self::Appearance => "Aparência",
             Self::Voice => "Voz e áudio",
-            Self::ScreenShare => "Tela e transmissão",
+            Self::Plugins => "Plugins",
             Self::Behavior => "Comportamento",
         }
     }
@@ -74,7 +74,7 @@ pub fn show(app: &mut VesktopApp, ctx: &egui::Context) {
                         SettingsTab::Profile,
                         SettingsTab::Appearance,
                         SettingsTab::Voice,
-                        SettingsTab::ScreenShare,
+                        SettingsTab::Plugins,
                         SettingsTab::Behavior,
                     ] {
                         if ui
@@ -131,7 +131,7 @@ pub fn show(app: &mut VesktopApp, ctx: &egui::Context) {
                                             app, ui,
                                         );
                                     }
-                                    SettingsTab::ScreenShare => screen_share_settings(app, ui),
+                                    SettingsTab::Plugins => crate::ui::plugins::show(app, ui),
                                     SettingsTab::Behavior => behavior_settings(app, ui),
                                 }
                             });
@@ -167,7 +167,7 @@ fn nav(app: &mut VesktopApp, ui: &mut egui::Ui) {
             &[
                 SettingsTab::Appearance,
                 SettingsTab::Voice,
-                SettingsTab::ScreenShare,
+                SettingsTab::Plugins,
                 SettingsTab::Behavior,
             ],
         ),
@@ -478,141 +478,4 @@ fn camera_combo(app: &mut VesktopApp, ui: &mut egui::Ui) {
 fn apply_voice_change(app: &mut VesktopApp) {
     app.settings.save();
     app.push_voice_audio_config();
-}
-
-#[cfg(target_os = "linux")]
-#[derive(Default)]
-pub(crate) struct Bypass {
-    path: String,
-    child: Option<std::process::Child>,
-    error: Option<String>,
-}
-
-#[cfg(target_os = "linux")]
-fn bypass_settings(app: &mut VesktopApp, ui: &mut egui::Ui) {
-    ui.label("Bypass Go Live (experimental)");
-    if std::env::var_os("FASTDISCORD_WIREGUARD").is_some() {
-        ui.label(
-            "Esta sessão foi iniciada pelo túnel WireGuard. Use Sair na bandeja para encerrar.",
-        );
-        return;
-    }
-    ui.label("Perfil WireGuard com servidor fora do Brasil. Requer wireguard-tools e autenticação administrativa.");
-    let bypass = &mut app.bypass;
-    if let Some(child) = &mut bypass.child {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                bypass.child = None;
-                if !status.success() {
-                    bypass.error = Some("Não foi possível iniciar o bypass. Confira o perfil, as dependências e a autorização administrativa; detalhes no log do aplicativo.".into());
-                }
-            }
-            Ok(None) => {
-                ui.label("Sessão de teste aberta ou aguardando autorização. Feche esta sessão original após abrir a nova janela.");
-                ui.ctx()
-                    .request_repaint_after(std::time::Duration::from_secs(1));
-            }
-            Err(error) => {
-                bypass.error = Some(error.to_string());
-                bypass.child = None;
-            }
-        }
-    }
-    ui.horizontal(|ui| {
-        ui.label("Perfil .conf:");
-        ui.text_edit_singleline(&mut bypass.path);
-    });
-    if ui
-        .add_enabled(
-            bypass.child.is_none() && !bypass.path.trim().is_empty(),
-            egui::Button::new("Abrir sessão com bypass"),
-        )
-        .clicked()
-    {
-        let result = crate::backend::bypass::check_dependencies().and_then(|()| {
-            std::env::current_exe()
-                .and_then(|exe| {
-                    std::process::Command::new(exe)
-                        .arg("--wireguard")
-                        .arg(bypass.path.trim())
-                        .spawn()
-                })
-                .map_err(|error| error.to_string())
-        });
-        match result {
-            Ok(child) => {
-                bypass.child = Some(child);
-                bypass.error = None;
-            }
-            Err(error) => bypass.error = Some(error),
-        }
-    }
-    if let Some(error) = &bypass.error {
-        ui.colored_label(theme::RED, error);
-    }
-}
-
-/// FockyTV as the share backend; off falls back to Discord's Go Live.
-fn screen_share_settings(app: &mut VesktopApp, ui: &mut egui::Ui) {
-    #[cfg(target_os = "linux")]
-    {
-        bypass_settings(app, ui);
-        ui.separator();
-    }
-    let mut changed = ui
-        .checkbox(
-            &mut app.settings.fockytv_share,
-            "Usar backend de compartilhamento do FockyTV",
-        )
-        .on_hover_text("Desligado: Go Live do Discord (experimental)")
-        .changed();
-    ui.add_enabled_ui(app.settings.fockytv_share, |ui| {
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Servidor:");
-            changed |= ui
-                .text_edit_singleline(&mut app.settings.fockytv_url)
-                .changed();
-        });
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Taxa de quadros:");
-            for fps in [60, 30, 15] {
-                if ui
-                    .radio(app.settings.fockytv_fps == fps, format!("{fps} fps"))
-                    .clicked()
-                {
-                    app.settings.fockytv_fps = fps;
-                    changed = true;
-                }
-            }
-        })
-        .response
-        .on_hover_text("Vale para a próxima transmissão");
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Nick:");
-            let username = app
-                .me
-                .as_ref()
-                .map(|me| me.username.clone())
-                .unwrap_or_default();
-            let mut nick = app.settings.fockytv_nick.clone().unwrap_or_default();
-            if ui
-                .add(egui::TextEdit::singleline(&mut nick).hint_text(username))
-                .on_hover_text("A chave da transmissão no FockyTV; vazio = seu usuário do Discord")
-                .changed()
-            {
-                app.settings.fockytv_nick = Some(nick).filter(|nick| !nick.trim().is_empty());
-                changed = true;
-            }
-        });
-        ui.label(
-            RichText::new("Nick: até 32 letras sem acentos, números, _, - ou .; sem espaços.")
-                .color(theme::MUTED),
-        );
-        if let Err(error) = crate::backend::fockytv::validate_stream_key(&app.fockytv_nick()) {
-            ui.label(RichText::new(error).color(theme::RED));
-        }
-    });
-    if changed {
-        app.settings.save();
-    }
 }

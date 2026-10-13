@@ -15,6 +15,11 @@ struct Args {
     /// Linux: launch through an isolated WireGuard tunnel using this .conf.
     #[arg(long, value_name = "FILE", conflicts_with = "token")]
     wireguard: Option<std::path::PathBuf>,
+    /// Start without the saved bypass plugin, for recovery or comparison.
+    #[arg(long, conflicts_with = "wireguard")]
+    no_bypass: bool,
+    #[arg(long, hide = true)]
+    ready_file: Option<std::path::PathBuf>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -41,70 +46,33 @@ fn main() -> anyhow::Result<()> {
         .init();
     let args = Args::parse();
 
-    if let Some(profile) = args.wireguard {
-        #[cfg(target_os = "linux")]
-        {
-            let profile = profile.canonicalize()?;
-            fastdiscord::backend::bypass::check_dependencies().map_err(anyhow::Error::msg)?;
-            let checked = std::process::Command::new("/bin/bash")
-                .args([
-                    "-c",
-                    include_str!("../packaging/golive-bypass.sh"),
-                    "fastdiscord-bypass",
-                    "--check",
-                ])
-                .arg(&profile)
-                .status()?;
-            anyhow::ensure!(checked.success(), "perfil WireGuard inválido");
-            let user = std::process::Command::new("id").arg("-un").output()?;
-            anyhow::ensure!(
-                user.status.success(),
-                "não foi possível identificar o usuário"
-            );
-            let user = String::from_utf8(user.stdout)?;
-            let mut command = std::process::Command::new("pkexec");
-            command
-                .args([
-                    "/bin/bash",
-                    "-c",
-                    include_str!("../packaging/golive-bypass.sh"),
-                    "fastdiscord-bypass",
-                ])
-                .arg(profile)
-                .arg(std::env::current_exe()?)
-                .arg(user.trim());
-            for name in [
-                "DISPLAY",
-                "WAYLAND_DISPLAY",
-                "XDG_RUNTIME_DIR",
-                "DBUS_SESSION_BUS_ADDRESS",
-                "XAUTHORITY",
-            ] {
-                if let Some(value) = std::env::var_os(name) {
-                    command.arg(format!("{name}={}", value.to_string_lossy()));
-                }
-            }
-            let status = command.status()?;
-            anyhow::ensure!(
-                status.success(),
-                "bypass não iniciado ou encerrado com erro: {status}"
-            );
-            return Ok(());
-        }
-        #[cfg(not(target_os = "linux"))]
-        anyhow::bail!(
-            "--wireguard está disponível apenas no Linux: {}",
-            profile.display()
-        );
-    }
-
     let mut settings = fastdiscord::settings::Settings::load().unwrap_or_default();
+    let ready = args
+        .ready_file
+        .or_else(|| std::env::var_os("FASTDISCORD_READY_FILE").map(std::path::PathBuf::from));
+    if args.no_bypass {
+        settings.plugins.golive_bypass.enabled = false;
+    }
     if let Some(token) = args.token {
         settings.token = Some(token);
         settings.save();
     }
-    if args.go_live {
-        settings.fockytv_share = false;
+    if let Some(profile) = args.wireguard {
+        let imported = fastdiscord::plugins::golive_bypass::import_profile(&profile)
+            .map_err(anyhow::Error::msg)?;
+        settings.plugins.golive_bypass.profile = Some(imported);
+        settings.plugins.golive_bypass.enabled = true;
+        settings.save();
+    }
+    if settings.plugins.golive_bypass.enabled && !fastdiscord::plugins::golive_bypass::active() {
+        if let Some(profile) = &settings.plugins.golive_bypass.profile {
+            fastdiscord::plugins::golive_bypass::launch(profile, ready.as_deref())
+                .map_err(anyhow::Error::msg)?;
+            return Ok(());
+        }
+    }
+    if args.go_live && !fastdiscord::plugins::golive_bypass::active() {
+        settings.plugins.fockytv.enabled = false;
         log::info!("Go Live experimental selecionado");
     }
 
@@ -154,6 +122,12 @@ fn main() -> anyhow::Result<()> {
         options,
         Box::new(move |cc| {
             let app = fastdiscord::app::VesktopApp::new(cc, settings, handle, event_tx, event_rx);
+            if let Some(ready) = &ready {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(ready)?;
+            }
             Ok(Box::new(app))
         }),
     )

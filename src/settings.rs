@@ -79,17 +79,7 @@ pub struct Settings {
     pub user_volumes: HashMap<String, u8>,
     /// Users muted locally (only for us), by id.
     pub muted_users: HashSet<String>,
-    /// Screen share through FockyTV (WHIP) instead of Discord's Go Live,
-    /// which stays in the code for later (docs/SCREENSHARE.md).
-    pub fockytv_share: bool,
-    pub fockytv_url: String,
-    /// Stream key on FockyTV; `None` = the Discord username, which is also
-    /// how others' lives are matched to voice members.
-    pub fockytv_nick: Option<String>,
-    /// Frame rate cap for FockyTV broadcasts: 60, 30 or 15.
-    pub fockytv_fps: u32,
-    /// Height cap for FockyTV screen shares (1080, 720; 0 = original).
-    pub fockytv_max_height: u32,
+    pub plugins: crate::plugins::Settings,
     /// Webcam, by the label `backend::camera::devices` gives it (`None` =
     /// the first camera).
     pub camera_device: Option<String>,
@@ -123,11 +113,7 @@ impl Default for Settings {
             echo_cancellation: false,
             user_volumes: HashMap::new(),
             muted_users: HashSet::new(),
-            fockytv_share: true,
-            fockytv_url: "https://tv.huestavo.com".into(),
-            fockytv_nick: None,
-            fockytv_fps: 60,
-            fockytv_max_height: 0,
+            plugins: Default::default(),
             camera_device: None,
             dj_volume: 50,
         }
@@ -137,7 +123,10 @@ impl Default for Settings {
 impl Settings {
     pub fn load() -> Option<Self> {
         let file = std::fs::read_to_string(crate::paths::settings_file()).ok()?;
-        match serde_json::from_str(&file) {
+        match serde_json::from_str::<serde_json::Value>(&file).and_then(|mut value| {
+            crate::plugins::migrate_legacy(&mut value);
+            serde_json::from_value(value)
+        }) {
             Ok(settings) => Some(settings),
             Err(err) => {
                 log::warn!("settings file is invalid, using defaults: {err}");

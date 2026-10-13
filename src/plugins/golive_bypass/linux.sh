@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Embedded in the binary; pkexec authenticates before this helper runs.
+# Owned by the GoLiveBypass plugin; pkexec authenticates before this helper runs.
 set -euo pipefail
 export PATH=/usr/bin:/bin
 
@@ -41,7 +41,7 @@ for tool in ip wg wg-quick runuser; do
 done
 for variable in "$@"; do
     case "$variable" in
-        DISPLAY=*|WAYLAND_DISPLAY=*|XDG_RUNTIME_DIR=*|DBUS_SESSION_BUS_ADDRESS=*|XAUTHORITY=*) ;;
+        DISPLAY=*|WAYLAND_DISPLAY=*|XDG_RUNTIME_DIR=*|DBUS_SESSION_BUS_ADDRESS=*|XAUTHORITY=*|FASTDISCORD_READY_FILE=*) ;;
         *) fail 'variável de ambiente não permitida' ;;
     esac
 done
