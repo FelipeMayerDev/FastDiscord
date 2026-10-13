@@ -70,22 +70,103 @@ pub fn install_fonts(ctx: &egui::Context) {
             "noto-bold",
             &include_bytes!("../assets/fonts/NotoSans-Bold.ttf")[..],
         ),
+        // Symbol fallbacks (all OFL, `assets/fonts`): servers name channels
+        // and themselves with stylized Unicode — 𝓰𝓪𝓶𝓲𝓷𝓰 math letters,
+        // circled letters, arrows, braille, runes — that neither Noto Sans
+        // nor egui's defaults carry, which rendered as squares (issue #47).
+        (
+            "noto-math",
+            &include_bytes!("../assets/fonts/NotoSansMath-Regular.ttf")[..],
+        ),
+        (
+            "noto-symbols",
+            &include_bytes!("../assets/fonts/NotoSansSymbols-Regular.ttf")[..],
+        ),
+        (
+            "noto-symbols2",
+            &include_bytes!("../assets/fonts/NotoSansSymbols2-Regular.ttf")[..],
+        ),
+        (
+            "noto-runic",
+            &include_bytes!("../assets/fonts/NotoSansRunic-Regular.ttf")[..],
+        ),
     ] {
         fonts.font_data.insert(
             name.into(),
             std::sync::Arc::new(egui::FontData::from_static(bytes)),
         );
     }
-    let fallbacks = fonts.families[&egui::FontFamily::Proportional].clone();
+    // egui picks the first family with the glyph, so text stays in Noto and
+    // only the exotic symbols fall through to the symbol fonts.
+    let fallbacks: Vec<String> = [
+        "Ubuntu-Light",
+        "noto-math",
+        "noto-symbols",
+        "noto-symbols2",
+        "noto-runic",
+        "NotoEmoji-Regular",
+        "emoji-icon-font",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    let mut proportional = vec!["noto".to_string()];
+    proportional.extend(fallbacks.clone());
     fonts
         .families
-        .get_mut(&egui::FontFamily::Proportional)
-        .unwrap()
-        .insert(0, "noto".into());
+        .insert(egui::FontFamily::Proportional, proportional);
     let mut semibold = vec!["noto-bold".to_string()];
     semibold.extend(fallbacks);
     fonts.families.insert(bold(), semibold);
     ctx.set_fonts(fonts);
+}
+
+#[cfg(test)]
+mod font_tests {
+    /// Issue #47: stylized channel names rendered as squares because no
+    /// font in the fallback chain carried those glyphs; the bundled Noto
+    /// symbol fallbacks must cover them. Compared by rendered advance
+    /// width against a character nothing carries (`U+E000`), which always
+    /// draws the replacement square — `Fonts::has_glyph` misreports
+    /// fallback hits, but the shaped glyphs don't lie.
+    #[test]
+    fn stylized_unicode_resolves_in_the_fallback_chain() {
+        let ctx = egui::Context::default();
+        super::install_fonts(&ctx);
+        // Fonts are built on the first pass; the atlas delta must be
+        // dropped before the output.
+        ctx.run_ui(egui::RawInput::default(), |_| {})
+            .textures_delta
+            .clear();
+        for (family, face) in [
+            ("proportional", egui::FontId::proportional(14.0)),
+            ("bold", egui::FontId::new(14.0, super::bold())),
+        ] {
+            let width = |text: &str| {
+                ctx.fonts_mut(|fonts| {
+                    fonts
+                        .layout(text.into(), face.clone(), egui::Color32::WHITE, 14.0)
+                        .size()
+                        .x
+                })
+            };
+            let replacement = width("\u{E000}");
+            for sample in [
+                '\u{1D4D6}', // mathematical bold script 𝓖
+                '\u{1D56C}', // mathematical bold fraktur 𝕬
+                '\u{24B6}',  // circled Ⓐ
+                '\u{16A0}',  // runic ᚠ
+                '\u{2192}',  // arrow →
+                '\u{2697}',  // alembic ⚗
+            ] {
+                assert_ne!(
+                    width(&sample.to_string()),
+                    replacement,
+                    "{family}: {sample:?} renders as the replacement square"
+                );
+            }
+        }
+    }
 }
 
 pub fn apply(ctx: &egui::Context, theme: Theme) {
