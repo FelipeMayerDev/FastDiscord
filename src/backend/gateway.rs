@@ -42,14 +42,31 @@ pub async fn run(
     event_tx: EventTx,
     voice_tx: UnboundedSender<Wire>,
 ) {
-    let api = Api::new(token);
+    let api = std::sync::Arc::new(Api::new(token));
+    let (rest_tx, mut rest_rx) = tokio::sync::mpsc::unbounded_channel();
+    let rest_api = api.clone();
+    let rest_events = event_tx.clone();
+    // HTTP stays ordered, but cannot block voice commands or gateway heartbeats.
+    let rest_task = tokio::spawn(async move {
+        while let Some(command) = rest_rx.recv().await {
+            handle_rest_command(&rest_api, command, &rest_events).await;
+        }
+    });
     let mut backoff = Duration::from_secs(3);
 
     loop {
         // A session that died before READY usually means a rejected token;
         // confirm against the REST API before scheduling another retry.
         let mut ready_seen = false;
-        let end = session(&api, &mut cmd_rx, &event_tx, &voice_tx, &mut ready_seen).await;
+        let end = session(
+            &api,
+            &mut cmd_rx,
+            &event_tx,
+            &voice_tx,
+            &rest_tx,
+            &mut ready_seen,
+        )
+        .await;
         match end {
             SessionEnd::Shutdown => break,
             SessionEnd::Fatal(why) => {
@@ -77,6 +94,7 @@ pub async fn run(
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(MAX_BACKOFF);
     }
+    rest_task.abort();
 }
 
 async fn session(
@@ -84,6 +102,7 @@ async fn session(
     cmd_rx: &mut UnboundedReceiver<Command>,
     event_tx: &EventTx,
     voice_tx: &UnboundedSender<Wire>,
+    rest_tx: &UnboundedSender<Command>,
     ready: &mut bool,
 ) -> SessionEnd {
     // The gateway session id, from READY — user accounts get no
@@ -139,7 +158,7 @@ async fn session(
     loop {
         tokio::select! {
             command = cmd_rx.recv() => match command {
-                Some(command) => handle_command(api, command, event_tx, &mut write).await,
+                Some(command) => handle_command(command, rest_tx, &mut write).await,
                 None => {
                     let _ = write.send(WsMessage::Close(None)).await;
                     return SessionEnd::Shutdown;
@@ -666,8 +685,144 @@ fn presence_payload(status: &str, custom: &CustomStatus) -> String {
     .to_string()
 }
 
-async fn handle_command(api: &Api, command: Command, event_tx: &EventTx, write: &mut WsSink) {
+async fn handle_command(command: Command, rest_tx: &UnboundedSender<Command>, write: &mut WsSink) {
     match command {
+        Command::SetPresence {
+            status,
+            custom_status,
+            save,
+        } => {
+            let payload = presence_payload(&status, &custom_status);
+            if let Err(err) = write.send(WsMessage::text(payload)).await {
+                log::warn!("falha ao atualizar o status: {err}");
+            }
+            if save {
+                let _ = rest_tx.send(Command::SetPresence {
+                    status,
+                    custom_status,
+                    save,
+                });
+            }
+        }
+        Command::JoinVoice {
+            guild_id,
+            channel_id,
+            self_mute,
+            self_deaf,
+        } => {
+            log::info!("enviando op 4: guild={guild_id} canal={channel_id}");
+            let payload = json!({
+                "op": 4,
+                "d": {
+                    "guild_id": guild_id,
+                    "channel_id": channel_id,
+                    "self_mute": self_mute,
+                    "self_deaf": self_deaf,
+                }
+            });
+            if let Err(err) = write.send(WsMessage::text(payload.to_string())).await {
+                log::warn!("falha ao pedir entrada no canal de voz: {err}");
+            }
+        }
+        Command::LeaveVoice { guild_id } => {
+            let payload = json!({
+                "op": 4,
+                "d": {
+                    "guild_id": guild_id,
+                    "channel_id": Value::Null,
+                    "self_mute": false,
+                    "self_deaf": false,
+                }
+            });
+            if let Err(err) = write.send(WsMessage::text(payload.to_string())).await {
+                log::warn!("falha ao sair do canal de voz: {err}");
+            }
+        }
+        Command::StartStream {
+            guild_id,
+            channel_id,
+            stream_key,
+        } => {
+            log::info!("enviando op 18: guild={guild_id} canal={channel_id}");
+            let create = json!({
+                "op": 18,
+                "d": {
+                    "type": "guild",
+                    "guild_id": guild_id,
+                    "channel_id": channel_id,
+                    "preferred_region": Value::Null,
+                }
+            });
+            // Discord-video-stream unpauses right after creating.
+            let unpause = json!({ "op": 22, "d": { "stream_key": stream_key, "paused": false } });
+            for payload in [create, unpause] {
+                if let Err(err) = write.send(WsMessage::text(payload.to_string())).await {
+                    log::warn!("falha ao criar a transmissão: {err}");
+                }
+            }
+        }
+        Command::WatchStream { stream_key } => {
+            log::info!("enviando op 20: {stream_key}");
+            let payload = json!({ "op": 20, "d": { "stream_key": stream_key } });
+            if let Err(err) = write.send(WsMessage::text(payload.to_string())).await {
+                log::warn!("falha ao assistir a transmissão: {err}");
+            }
+        }
+        Command::StopStream { stream_key } => {
+            let payload = json!({ "op": 19, "d": { "stream_key": stream_key } });
+            if let Err(err) = write.send(WsMessage::text(payload.to_string())).await {
+                log::warn!("falha ao encerrar a transmissão: {err}");
+            }
+        }
+        Command::SubscribeGuild { guild_id, user_ids } => {
+            if let Err(err) = write
+                .send(WsMessage::text(subscribe_payload(&guild_id, &user_ids)))
+                .await
+            {
+                log::warn!("falha ao assinar a guild {guild_id}: {err}");
+            }
+            for payload in presence_requests(&guild_id, &user_ids) {
+                if let Err(err) = write.send(WsMessage::text(payload)).await {
+                    log::warn!("falha ao consultar presenças da guild {guild_id}: {err}");
+                    break;
+                }
+            }
+        }
+        Command::SubscribeMemberList {
+            guild_id,
+            channel_id,
+            ranges,
+        } => {
+            let payload = crate::member_list::subscribe_payload(&guild_id, &channel_id, ranges);
+            if let Err(err) = write.send(WsMessage::text(payload)).await {
+                log::warn!("falha ao assinar a lista de membros de {channel_id}: {err}");
+            }
+        }
+        command => {
+            let _ = rest_tx.send(command);
+        }
+    }
+}
+
+async fn handle_rest_command(api: &Api, command: Command, event_tx: &EventTx) {
+    match command {
+        Command::SetPresence {
+            status,
+            custom_status,
+            save,
+        } => {
+            if save && let Err(err) = api.save_status(&status, &custom_status).await {
+                log::warn!("falha ao salvar o status na conta: {err}");
+            }
+        }
+        Command::JoinVoice { .. }
+        | Command::LeaveVoice { .. }
+        | Command::StartStream { .. }
+        | Command::WatchStream { .. }
+        | Command::StopStream { .. }
+        | Command::SubscribeGuild { .. }
+        | Command::SubscribeMemberList { .. } => unreachable!("gateway command routed to REST"),
+
         Command::LoadGuilds => match api.guilds().await {
             Ok(guilds) => {
                 let _ = event_tx.send(UiEvent::GuildsLoaded { guilds });
@@ -788,103 +943,6 @@ async fn handle_command(api: &Api, command: Command, event_tx: &EventTx, write: 
                 log::warn!("falha ao avisar digitação: {err}");
             }
         }
-        Command::SetPresence {
-            status,
-            custom_status,
-            save,
-        } => {
-            let payload = presence_payload(&status, &custom_status);
-            if let Err(err) = write.send(WsMessage::text(payload)).await {
-                log::warn!("falha ao atualizar o status: {err}");
-            }
-            if save && let Err(err) = api.save_status(&status, &custom_status).await {
-                log::warn!("falha ao salvar o status na conta: {err}");
-            }
-        }
-        Command::JoinVoice {
-            guild_id,
-            channel_id,
-            self_mute,
-            self_deaf,
-        } => {
-            log::info!("enviando op 4: guild={guild_id} canal={channel_id}");
-            let payload = json!({
-                "op": 4,
-                "d": {
-                    "guild_id": guild_id,
-                    "channel_id": channel_id,
-                    "self_mute": self_mute,
-                    "self_deaf": self_deaf,
-                }
-            });
-            if let Err(err) = write.send(WsMessage::text(payload.to_string())).await {
-                log::warn!("falha ao pedir entrada no canal de voz: {err}");
-            }
-        }
-        Command::LeaveVoice { guild_id } => {
-            let payload = json!({
-                "op": 4,
-                "d": {
-                    "guild_id": guild_id,
-                    "channel_id": Value::Null,
-                    "self_mute": false,
-                    "self_deaf": false,
-                }
-            });
-            if let Err(err) = write.send(WsMessage::text(payload.to_string())).await {
-                log::warn!("falha ao sair do canal de voz: {err}");
-            }
-        }
-        Command::StartStream {
-            guild_id,
-            channel_id,
-            stream_key,
-        } => {
-            log::info!("enviando op 18: guild={guild_id} canal={channel_id}");
-            let create = json!({
-                "op": 18,
-                "d": {
-                    "type": "guild",
-                    "guild_id": guild_id,
-                    "channel_id": channel_id,
-                    "preferred_region": Value::Null,
-                }
-            });
-            // Discord-video-stream unpauses right after creating.
-            let unpause = json!({ "op": 22, "d": { "stream_key": stream_key, "paused": false } });
-            for payload in [create, unpause] {
-                if let Err(err) = write.send(WsMessage::text(payload.to_string())).await {
-                    log::warn!("falha ao criar a transmissão: {err}");
-                }
-            }
-        }
-        Command::WatchStream { stream_key } => {
-            log::info!("enviando op 20: {stream_key}");
-            let payload = json!({ "op": 20, "d": { "stream_key": stream_key } });
-            if let Err(err) = write.send(WsMessage::text(payload.to_string())).await {
-                log::warn!("falha ao assistir a transmissão: {err}");
-            }
-        }
-        Command::StopStream { stream_key } => {
-            let payload = json!({ "op": 19, "d": { "stream_key": stream_key } });
-            if let Err(err) = write.send(WsMessage::text(payload.to_string())).await {
-                log::warn!("falha ao encerrar a transmissão: {err}");
-            }
-        }
-        Command::SubscribeGuild { guild_id, user_ids } => {
-            if let Err(err) = write
-                .send(WsMessage::text(subscribe_payload(&guild_id, &user_ids)))
-                .await
-            {
-                log::warn!("falha ao assinar a guild {guild_id}: {err}");
-            }
-            for payload in presence_requests(&guild_id, &user_ids) {
-                if let Err(err) = write.send(WsMessage::text(payload)).await {
-                    log::warn!("falha ao consultar presenças da guild {guild_id}: {err}");
-                    break;
-                }
-            }
-        }
         Command::LoadVoiceUser { guild_id, user_id } => {
             match api.guild_member(&guild_id, &user_id).await {
                 Ok(member) => {
@@ -968,16 +1026,6 @@ async fn handle_command(api: &Api, command: Command, event_tx: &EventTx, write: 
                 }),
             }
         }
-        Command::SubscribeMemberList {
-            guild_id,
-            channel_id,
-            ranges,
-        } => {
-            let payload = crate::member_list::subscribe_payload(&guild_id, &channel_id, ranges);
-            if let Err(err) = write.send(WsMessage::text(payload)).await {
-                log::warn!("falha ao assinar a lista de membros de {channel_id}: {err}");
-            }
-        }
         Command::LoadMessagesAround {
             channel_id,
             message_id,
@@ -1038,6 +1086,52 @@ async fn report(api: &Api, err: ApiError, event_tx: &EventTx, context: &str) {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn queued_http_does_not_delay_voice_join() {
+        use futures_util::StreamExt;
+        use tokio_tungstenite::tungstenite::protocol::Role;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        let socket = tokio_tungstenite::WebSocketStream::from_raw_socket(
+            tokio_tungstenite::MaybeTlsStream::Plain(client),
+            Role::Client,
+            None,
+        )
+        .await;
+        let (mut write, _) = socket.split();
+        let mut server =
+            tokio_tungstenite::WebSocketStream::from_raw_socket(server, Role::Server, None).await;
+        let (rest_tx, mut rest_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        super::handle_command(super::Command::LoadGuilds, &rest_tx, &mut write).await;
+        // The HTTP worker has not completed (or even consumed) the queued request.
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            super::handle_command(
+                super::Command::JoinVoice {
+                    guild_id: "1".into(),
+                    channel_id: "2".into(),
+                    self_mute: false,
+                    self_deaf: false,
+                },
+                &rest_tx,
+                &mut write,
+            )
+            .await;
+            let frame = server.next().await.unwrap().unwrap();
+            let value: serde_json::Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            assert_eq!(value["op"], 4);
+            assert_eq!(value["d"]["channel_id"], "2");
+        })
+        .await
+        .unwrap();
+        assert!(matches!(rest_rx.try_recv(), Ok(super::Command::LoadGuilds)));
+        assert!(rest_rx.try_recv().is_err());
+    }
+
     #[test]
     fn presence_payload_carries_custom_status_as_activity() {
         let custom = CustomStatus {

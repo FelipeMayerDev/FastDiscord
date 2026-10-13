@@ -29,6 +29,8 @@ has no voice on Linux. This port follows Acheron's model:
   `LeaveVoice` send **op 4** over the live socket. `dispatch` handles
   `VOICE_STATE_UPDATE` (who's in each channel, our `session_id`) and
   `VOICE_SERVER_UPDATE` (`endpoint` + `token`).
+- REST commands run in a separate ordered worker. HTTP requests cannot hold
+  up gateway heartbeats or op 4; connection/read timeouts are 10/30 seconds.
 - New `src/backend/voice.rs`: once both events arrive, build a
   `ConnectionInfo` and call `Driver::connect`; songbird handles the voice
   WS, UDP and DAVE. Connect/drop events become `UiEvent`s.

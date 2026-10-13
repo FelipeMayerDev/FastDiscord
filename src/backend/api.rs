@@ -45,6 +45,8 @@ impl Api {
     pub fn new(token: impl Into<String>) -> Self {
         let http = reqwest::Client::builder()
             .user_agent(USER_AGENT)
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .read_timeout(std::time::Duration::from_secs(30))
             .build()
             .expect("failed to build the HTTP client");
         Self {
