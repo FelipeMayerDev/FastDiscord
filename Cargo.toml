@@ -149,6 +149,10 @@ opt-level = 3
 [profile.dev.package.openh264]
 opt-level = 3
 
+# Convert live video frames to texture pixels fast enough in debug builds.
+[profile.dev.package.epaint]
+opt-level = 3
+
 [profile.release]
 lto = "thin"
 strip = "symbols"
