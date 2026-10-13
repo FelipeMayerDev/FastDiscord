@@ -531,9 +531,9 @@ fn spawn_decoder(
     frames: Arc<Mutex<Option<Frame>>>,
     events: EventTx,
     keyframe: Arc<AtomicBool>,
-) -> Result<tokio::sync::mpsc::UnboundedSender<(Vec<u8>, std::time::Instant)>, String> {
+) -> Result<std::sync::mpsc::Sender<(Vec<u8>, std::time::Instant)>, String> {
     use openh264::formats::YUVSource;
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(Vec<u8>, std::time::Instant)>();
+    let (tx, rx) = std::sync::mpsc::channel::<(Vec<u8>, std::time::Instant)>();
     std::thread::Builder::new()
         .name("fastdiscord-h264".into())
         .spawn(move || {
@@ -545,7 +545,7 @@ fn spawn_decoder(
             let mut reported = std::time::Instant::now();
             let (mut received, mut decoded, mut failed, mut empty) = (0, 0, 0, 0);
             let mut max_queue = Duration::ZERO;
-            while let Some((frame, queued)) = rx.blocking_recv() {
+            for (frame, queued) in rx {
                 received += 1;
                 max_queue = max_queue.max(queued.elapsed());
                 if reported.elapsed() >= Duration::from_secs(5) {
@@ -566,16 +566,12 @@ fn spawn_decoder(
                         continue;
                     }
                 };
-                seq += 1;
-                decoded += 1;
-                // Keep H264 references, but only convert the newest queued picture.
-                if !rx.is_empty() {
-                    continue;
-                }
                 let (width, height) = yuv.dimensions();
-                if seq == 1 { log::info!("transmissão: vídeo decodificado {width}x{height}"); }
+                if seq == 0 { log::info!("transmissão: vídeo decodificado {width}x{height}"); }
                 let mut pixels = vec![0; width * height * 4];
                 yuv.write_rgba8(&mut pixels);
+                seq += 1;
+                decoded += 1;
                 *frames.lock().unwrap() = Some(Frame {
                     width: width as u32,
                     height: height as u32,
