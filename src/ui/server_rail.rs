@@ -203,7 +203,19 @@ fn rail_button(
     if tooltip.is_empty() {
         response
     } else {
-        response.on_hover_text(tooltip)
+        // Discord pins rail tooltips to the right of the icon, vertically
+        // centered; no fallback aligns, so it never flips below.
+        let mut hover = egui::Tooltip::for_enabled(&response);
+        hover.popup = hover
+            .popup
+            .align(egui::RectAlign::RIGHT)
+            .align_alternatives(&[])
+            .gap(12.0);
+        hover.show(|ui| {
+            ui.set_max_width(ui.spacing().tooltip_width);
+            ui.label(tooltip);
+        });
+        response
     }
 }
 
