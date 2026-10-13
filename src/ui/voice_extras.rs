@@ -126,6 +126,7 @@ pub fn soundboard(app: &mut VesktopApp, button: &egui::Response) {
                 .then_some("Não dá pra usar o soundboard com o áudio desativado.");
             let guild = app.guilds.iter().find(|g| g.id == guild_id).cloned();
             egui::ScrollArea::vertical()
+                .min_scrolled_height(420.0)
                 .max_height(420.0)
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(CARD_GAP, CARD_GAP);

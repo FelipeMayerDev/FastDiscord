@@ -166,3 +166,78 @@ mod motion_tests {
         assert_eq!(super::animate_bool(&ctx, id, false, 0.12), 0.0);
     }
 }
+
+#[cfg(test)]
+mod popup_sizing_tests {
+    use egui::{Rect, ScrollArea, Vec2, pos2};
+
+    /// Issue #42: the pickers open while their content is still loading, and
+    /// egui feeds a popup area's remembered size back as the available height
+    /// of the ScrollArea inside it, so the popup used to stay stuck at the
+    /// loading size even after the content arrived. The pickers pin
+    /// `min_scrolled_height` to their `max_height` to break that loop; this
+    /// test pins the egui behavior that makes the pattern work.
+    #[test]
+    fn popup_grows_to_full_size_when_its_content_arrives() {
+        let ctx = egui::Context::default();
+        let popup_id = egui::Id::new("picker_repro");
+        let screen = Rect::from_min_size(pos2(0.0, 0.0), Vec2::new(1280.0, 800.0));
+        let height = |ctx: &egui::Context| {
+            ctx.memory(|memory| memory.area_rect(popup_id).map_or(0.0, |rect| rect.height()))
+        };
+
+        let mut open = true;
+        let frame = |ctx: &egui::Context, loaded: bool, open: &mut bool| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |root| {
+                    root.vertical(|ui| {
+                        let button = ui.button("picker");
+                        egui::Popup::from_response(&button)
+                            .id(popup_id)
+                            .open_bool(open)
+                            .align(egui::RectAlign::TOP_START)
+                            .gap(8.0)
+                            .show(|ui| {
+                                ui.set_width(440.0);
+                                ui.label("Soundboard");
+                                if !loaded {
+                                    ui.label("Carregando…");
+                                    return;
+                                }
+                                let mut query = String::new();
+                                ui.text_edit_singleline(&mut query);
+                                ScrollArea::vertical()
+                                    .min_scrolled_height(420.0)
+                                    .max_height(420.0)
+                                    .show(ui, |ui| {
+                                        for row in 0..40 {
+                                            ui.label(format!("som {row}"));
+                                        }
+                                    });
+                            });
+                    });
+                },
+            )
+            .textures_delta
+            .clear();
+        };
+
+        // Loading frames are small; the content arriving must grow the popup
+        // to its full height on that very frame, not only after a reopen.
+        frame(&ctx, false, &mut open);
+        assert!(height(&ctx) < 100.0, "loading: {}", height(&ctx));
+        frame(&ctx, true, &mut open);
+        assert!(height(&ctx) >= 460.0, "loaded: {}", height(&ctx));
+
+        // Reopening with the content cached must also start full-sized.
+        open = false;
+        frame(&ctx, true, &mut open);
+        open = true;
+        frame(&ctx, true, &mut open);
+        assert!(height(&ctx) >= 460.0, "reopened: {}", height(&ctx));
+    }
+}

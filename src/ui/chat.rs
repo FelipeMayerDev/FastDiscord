@@ -1636,6 +1636,7 @@ fn gif_picker(
     };
     let mut send = None;
     ScrollArea::vertical()
+        .min_scrolled_height(360.0)
         .max_height(360.0)
         .auto_shrink([false, true])
         .show(ui, |ui| {
@@ -1849,6 +1850,7 @@ fn emoji_picker(app: &mut VesktopApp, ui: &mut egui::Ui, tools: &mut ChatTools, 
     }
     let mut picked = None;
     ScrollArea::vertical()
+        .min_scrolled_height(300.0)
         .max_height(300.0)
         .auto_shrink([false, true])
         .show_rows(ui, CELL, list.len().div_ceil(COLUMNS), |ui, rows| {

@@ -457,6 +457,7 @@ fn thread_list(
     }
     let mut clicked = None;
     egui::ScrollArea::vertical()
+        .min_scrolled_height(max_height)
         .max_height(max_height)
         .auto_shrink([false, true])
         .show(ui, |ui| {
