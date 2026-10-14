@@ -704,6 +704,69 @@ impl VesktopApp {
         self.settings.save();
     }
 
+    /// Pin (or unpin) a guild at the top of the server rail.
+    pub(crate) fn toggle_favorite_guild(&mut self, guild_id: &str) {
+        if !self.settings.favorite_guilds.remove(guild_id) {
+            self.settings.favorite_guilds.insert(guild_id.to_string());
+        }
+        self.settings.save();
+    }
+
+    /// Mute (or unmute) a guild: the account-wide flag rides to Discord,
+    /// the rail stops showing unread pills and mention badges.
+    pub(crate) fn toggle_guild_mute(&mut self, guild_id: &str) {
+        let muted = !self.settings.muted_guilds.contains(guild_id);
+        if muted {
+            self.settings.muted_guilds.insert(guild_id.to_string());
+        } else {
+            self.settings.muted_guilds.remove(guild_id);
+        }
+        self.settings.save();
+        self.send(Command::SetGuildMute {
+            guild_id: guild_id.to_string(),
+            muted,
+        });
+    }
+
+    /// Leave a guild: the REST call does the work, GuildLeft drops the
+    /// local state.
+    pub(crate) fn leave_guild(&mut self, guild_id: &str) {
+        self.send(Command::LeaveGuild {
+            guild_id: guild_id.to_string(),
+        });
+    }
+
+    /// Drop every trace of a guild we just left.
+    fn forget_guild(&mut self, guild_id: &str) {
+        self.guilds.retain(|guild| guild.id != guild_id);
+        self.guild_channels.remove(guild_id);
+        let gone: HashSet<String> = self
+            .channel_index
+            .iter()
+            .filter(|(_, channel)| {
+                matches!(channel, ChannelRef::Guild(owner) if owner == guild_id)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        self.channel_index.retain(|id, _| !gone.contains(id));
+        self.messages.retain(|id, _| !gone.contains(id));
+        self.unread.retain(|id, _| !gone.contains(id));
+        self.mentions.retain(|id, _| !gone.contains(id));
+        self.first_unread.retain(|id, _| !gone.contains(id));
+        self.last_seen.retain(|id, _| !gone.contains(id));
+        self.settings.favorite_guilds.remove(guild_id);
+        self.settings.muted_guilds.remove(guild_id);
+        self.settings.last_channel_by_guild.remove(guild_id);
+        if self.selected_guild.as_deref() == Some(guild_id) {
+            let fallback = self.guilds.first().map(|guild| guild.id.clone());
+            match fallback {
+                Some(next) => self.select_guild(&next),
+                None => self.select_home(),
+            }
+        }
+        self.settings.save();
+    }
+
     pub(crate) fn select_home(&mut self) {
         self.selected_guild = None;
         self.settings.selected_guild_id = None;
@@ -1750,6 +1813,7 @@ impl VesktopApp {
                 self.relationships_loading = false;
                 self.refresh_relationships();
             }
+            UiEvent::GuildLeft { guild_id } => self.forget_guild(&guild_id),
             UiEvent::RelationshipError { error } => {
                 self.relationships_loading = false;
                 self.friend_error = Some(error);
@@ -3074,6 +3138,59 @@ mod tests {
         app.mark_channel_read("channel", "50".into());
         assert!(app.first_unread.get("channel").is_none());
         assert!(!app.unread_jump.contains("channel"));
+    }
+
+    #[test]
+    fn favorite_mute_and_leave_manage_guilds_from_the_rail() {
+        let (_rt, mut app, mut commands, _) = test_app();
+        app.guilds = vec![
+            crate::model::Guild {
+                id: "1".into(),
+                name: "Primeiro".into(),
+                icon: None,
+            },
+            crate::model::Guild {
+                id: "2".into(),
+                name: "Segundo".into(),
+                icon: None,
+            },
+        ];
+        app.channel_index
+            .insert("10".into(), ChannelRef::Guild("1".into()));
+        app.unread.insert("10".into(), 3);
+        app.mentions.insert("10".into(), 1);
+
+        // Favorites flip in the settings…
+        app.toggle_favorite_guild("2");
+        assert!(app.settings.favorite_guilds.contains("2"));
+        app.toggle_favorite_guild("2");
+        assert!(!app.settings.favorite_guilds.contains("2"));
+
+        // …and muting rides to Discord as a REST command.
+        app.toggle_guild_mute("1");
+        assert!(app.settings.muted_guilds.contains("1"));
+        assert!(
+            matches!(commands.try_recv().unwrap(), Command::SetGuildMute { guild_id, muted: true } if guild_id == "1")
+        );
+        app.toggle_guild_mute("1");
+        assert!(!app.settings.muted_guilds.contains("1"));
+        assert!(
+            matches!(commands.try_recv().unwrap(), Command::SetGuildMute { guild_id, muted: false } if guild_id == "1")
+        );
+
+        // Leaving the selected guild drops its state and falls back to
+        // the next guild in the rail.
+        app.selected_guild = Some("1".into());
+        app.leave_guild("1");
+        assert!(
+            matches!(commands.try_recv().unwrap(), Command::LeaveGuild { guild_id } if guild_id == "1")
+        );
+        app.handle_event(UiEvent::GuildLeft { guild_id: "1".into() }, true);
+        assert!(app.guilds.iter().all(|guild| guild.id != "1"));
+        assert!(app.channel_index.get("10").is_none());
+        assert!(app.unread.get("10").is_none());
+        assert!(app.mentions.get("10").is_none());
+        assert_eq!(app.selected_guild.as_deref(), Some("2"));
     }
 
     #[test]

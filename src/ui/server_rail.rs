@@ -3,7 +3,7 @@
 //! the left edge and a red badge for mentions.
 
 use egui::Id;
-use egui::{Align2, CornerRadius, FontId, Image, Sense, TextureHandle, Vec2, pos2};
+use egui::{Align2, CornerRadius, FontId, Image, RichText, Sense, TextureHandle, Vec2, pos2};
 
 use crate::app::{ChannelRef, VesktopApp};
 use crate::theme;
@@ -56,7 +56,10 @@ pub fn paint(app: &mut VesktopApp, ui: &mut egui::Ui) {
     ui.add_space(10.0);
 
     let mut clicked: Option<String> = None;
-    let guilds = app.guilds.clone();
+    // Favorites float to the top, keeping Discord's order inside each group.
+    let mut guilds = app.guilds.clone();
+    let favorites = &app.settings.favorite_guilds;
+    guilds.sort_by_key(|guild| !favorites.contains(&guild.id));
     egui::ScrollArea::vertical()
         .auto_shrink(false)
         .scroll_bar_visibility(egui::containers::scroll_area::ScrollBarVisibility::AlwaysHidden)
@@ -64,18 +67,22 @@ pub fn paint(app: &mut VesktopApp, ui: &mut egui::Ui) {
             for guild in guilds {
                 let selected = app.selected_guild.as_deref() == Some(guild.id.as_str());
                 let guild_id = guild.id.clone();
-                let unread = app.unread.iter().any(|(id, count)| {
+                let muted = app.settings.muted_guilds.contains(&guild.id);
+                let unread = !muted && app.unread.iter().any(|(id, count)| {
                     *count > 0
                         && matches!(app.channel_index.get(id), Some(ChannelRef::Guild(owner)) if owner == &guild_id)
                 });
-                let mention_count: u64 = app
-                    .unread
-                    .iter()
-                    .filter(|(id, _)| {
-                        matches!(app.channel_index.get(*id), Some(ChannelRef::Guild(owner)) if owner == &guild_id)
-                    })
-                    .map(|(id, _)| app.mentions.get(id).copied().unwrap_or(0))
-                    .sum();
+                let mention_count: u64 = if muted {
+                    0
+                } else {
+                    app.unread
+                        .iter()
+                        .filter(|(id, _)| {
+                            matches!(app.channel_index.get(*id), Some(ChannelRef::Guild(owner)) if owner == &guild_id)
+                        })
+                        .map(|(id, _)| app.mentions.get(id).copied().unwrap_or(0))
+                        .sum()
+                };
                 let texture = util::guild_icon_url(&guild)
                     .and_then(|url| app.images.get(ui.ctx(), &app.handle, &url));
                 let response = rail_button(
@@ -91,11 +98,65 @@ pub fn paint(app: &mut VesktopApp, ui: &mut egui::Ui) {
                 if response.clicked() {
                     clicked = Some(guild.id.clone());
                 }
+                guild_context_menu(app, &response, &guild);
                 ui.add_space(8.0);
             }
         });
     if let Some(id) = clicked {
         app.select_guild(&id);
+    }
+}
+
+/// Right-click menu on a rail icon: pin it to the top, mute it, or leave.
+/// Leaving asks for a second click within a few seconds, since it kicks
+/// you out of the server for good.
+fn guild_context_menu(app: &mut VesktopApp, response: &egui::Response, guild: &crate::model::Guild) {
+    let mut leave = false;
+    egui::Popup::context_menu(response).show(|ui| {
+        ui.set_min_width(190.0);
+        let favorite = app.settings.favorite_guilds.contains(&guild.id);
+        let label = if favorite {
+            "Remover dos favoritos"
+        } else {
+            "Favoritar"
+        };
+        if ui.button(label).clicked() {
+            app.toggle_favorite_guild(&guild.id);
+            ui.close();
+        }
+        let muted = app.settings.muted_guilds.contains(&guild.id);
+        let label = if muted {
+            "Dessilenciar servidor"
+        } else {
+            "Silenciar servidor"
+        };
+        if ui.button(label).clicked() {
+            app.toggle_guild_mute(&guild.id);
+            ui.close();
+        }
+        ui.separator();
+        let arm_id = Id::new(("rail_leave_arm", &guild.id));
+        let armed_at = ui
+            .ctx()
+            .data(|data| data.get_temp::<std::time::Instant>(arm_id));
+        let armed = armed_at.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(5));
+        let label = if armed {
+            "Confirmar saída do servidor"
+        } else {
+            "Sair do servidor"
+        };
+        if ui.button(RichText::new(label).color(theme::RED)).clicked() {
+            if armed {
+                leave = true;
+                ui.close();
+            } else {
+                ui.ctx()
+                    .data_mut(|data| data.insert_temp(arm_id, std::time::Instant::now()));
+            }
+        }
+    });
+    if leave {
+        app.leave_guild(&guild.id);
     }
 }
 

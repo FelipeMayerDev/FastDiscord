@@ -158,6 +158,32 @@ impl Api {
         Ok(())
     }
 
+    /// Mute (or unmute) a guild for this account: no notifications, and
+    /// @everyone/@here stops pinging.
+    pub async fn set_guild_mute(&self, guild_id: &str, muted: bool) -> ApiResult<()> {
+        let resp = self
+            .http
+            .patch(format!("{REST_BASE}/users/@me/guilds/{guild_id}"))
+            .header(reqwest::header::AUTHORIZATION, &self.token)
+            .json(&serde_json::json!({ "muted": muted, "suppress_everyone": muted }))
+            .send()
+            .await?;
+        Self::check_status(resp).await?;
+        Ok(())
+    }
+
+    /// Leave a guild. Irreversible without a fresh invite.
+    pub async fn leave_guild(&self, guild_id: &str) -> ApiResult<()> {
+        let resp = self
+            .http
+            .delete(format!("{REST_BASE}/users/@me/guilds/{guild_id}"))
+            .header(reqwest::header::AUTHORIZATION, &self.token)
+            .send()
+            .await?;
+        Self::check_status(resp).await?;
+        Ok(())
+    }
+
     pub async fn open_dm(&self, user_id: &str) -> ApiResult<Channel> {
         let resp = self
             .http

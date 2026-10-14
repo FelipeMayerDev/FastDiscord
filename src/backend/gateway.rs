@@ -904,6 +904,15 @@ async fn handle_rest_command(api: &Api, command: Command, event_tx: &EventTx) {
                 error: error.to_string(),
             }),
         },
+        Command::SetGuildMute { guild_id, muted } => {
+            if let Err(error) = api.set_guild_mute(&guild_id, muted).await {
+                log::warn!("falha ao {} o servidor: {error}", if muted { "silenciar" } else { "dessilenciar" });
+            }
+        }
+        Command::LeaveGuild { guild_id } => match api.leave_guild(&guild_id).await {
+            Ok(()) => event_tx.send(UiEvent::GuildLeft { guild_id }),
+            Err(error) => log::warn!("falha ao sair do servidor: {error}"),
+        },
         Command::OpenDm { user_id } => match api.open_dm(&user_id).await {
             Ok(channel) => event_tx.send(UiEvent::DmOpened { channel }),
             Err(error) => event_tx.send(UiEvent::RelationshipError {

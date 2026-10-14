@@ -50,6 +50,11 @@ pub struct Settings {
     pub selected_channel_id: Option<String>,
     /// Last open channel per guild, so switching servers restores context.
     pub last_channel_by_guild: HashMap<String, String>,
+    /// Guilds pinned to the top of the server rail.
+    pub favorite_guilds: HashSet<String>,
+    /// Guilds muted for this account: the rail shows no unread pills or
+    /// mention badges for them.
+    pub muted_guilds: HashSet<String>,
     pub tray: bool,
     pub minimize_to_tray: bool,
     pub check_for_updates: bool,
@@ -96,6 +101,8 @@ impl Default for Settings {
             selected_guild_id: None,
             selected_channel_id: None,
             last_channel_by_guild: HashMap::new(),
+            favorite_guilds: HashSet::new(),
+            muted_guilds: HashSet::new(),
             tray: true,
             minimize_to_tray: true,
             check_for_updates: true,

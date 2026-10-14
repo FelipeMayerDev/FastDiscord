@@ -44,6 +44,16 @@ pub enum Command {
     RemoveRelationship {
         user_id: String,
     },
+    /// PATCH /users/@me/guilds/{id}: mute (or unmute) the guild, so
+    /// @everyone/@here stop pinging and notifications quiet down.
+    SetGuildMute {
+        guild_id: String,
+        muted: bool,
+    },
+    /// DELETE /users/@me/guilds/{id}: leave the guild.
+    LeaveGuild {
+        guild_id: String,
+    },
     OpenDm {
         user_id: String,
     },
@@ -193,6 +203,10 @@ pub enum UiEvent {
     RelationshipsChanged,
     RelationshipError {
         error: String,
+    },
+    /// The REST call to leave a guild succeeded; drop its local state.
+    GuildLeft {
+        guild_id: String,
     },
     DmOpened {
         channel: Channel,
