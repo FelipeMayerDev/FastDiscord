@@ -98,6 +98,11 @@ pub fn paint(app: &mut VesktopApp, ui: &mut egui::Ui) {
                 if response.clicked() {
                     clicked = Some(guild.id.clone());
                 }
+                // Issue #36: hovering a server loads its channel list before
+                // the click lands, so the sidebar opens ready.
+                if response.hovered() {
+                    app.prefetch_guild_channels(&guild.id);
+                }
                 guild_context_menu(app, &response, &guild);
                 ui.add_space(8.0);
             }

@@ -730,6 +730,19 @@ impl VesktopApp {
         self.settings.save();
     }
 
+    /// Issue #36: fetch a guild's channels before it is opened. The rail
+    /// calls it on hover, so by the click the sidebar is ready and no
+    /// "Carregando canais…" pop-in shows.
+    pub(crate) fn prefetch_guild_channels(&mut self, guild_id: &str) {
+        if !self.guild_channels.contains_key(guild_id)
+            && self.loading_guilds.insert(guild_id.to_string())
+        {
+            self.send(Command::LoadGuildChannels {
+                guild_id: guild_id.to_string(),
+            });
+        }
+    }
+
     /// Pin (or unpin) a guild at the top of the server rail.
     pub(crate) fn toggle_favorite_guild(&mut self, guild_id: &str) {
         if !self.settings.favorite_guilds.remove(guild_id) {
@@ -3990,5 +4003,30 @@ mod tests {
         assert!(!app.channel_is_new(&new_channel, "g"));
         // No join date known: never new.
         assert!(!app.channel_is_new(&new_channel, "other"));
+    }
+
+    /// Issue #36: hovering a server prefetched its channels once — not
+    /// again while loading, and not for one already loaded.
+    #[test]
+    fn guild_hover_prefetches_channels_exactly_once() {
+        let (_rt, mut app, mut commands, _) = test_app();
+        app.prefetch_guild_channels("g");
+        assert!(matches!(
+            commands.try_recv().unwrap(),
+            Command::LoadGuildChannels { ref guild_id } if guild_id == "g"
+        ));
+        // Still in flight: the repeated hover sends nothing.
+        app.prefetch_guild_channels("g");
+        assert!(commands.try_recv().is_err());
+        // Loaded: no refetch from hover either.
+        app.handle_event(
+            UiEvent::GuildChannelsLoaded {
+                guild_id: "g".into(),
+                channels: Vec::new(),
+            },
+            true,
+        );
+        app.prefetch_guild_channels("g");
+        assert!(commands.try_recv().is_err());
     }
 }
