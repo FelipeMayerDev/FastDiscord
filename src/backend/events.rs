@@ -157,6 +157,12 @@ pub enum Command {
         guild_id: String,
         user_id: String,
     },
+    /// Our own member in a guild, for its role list — the input to the
+    /// channel permission math behind the sidebar's lock icons.
+    LoadOwnMember {
+        guild_id: String,
+        user_id: String,
+    },
     /// The thread browser or a forum opened: its archived public threads.
     LoadThreads {
         channel_id: String,
@@ -461,6 +467,11 @@ pub enum UiEvent {
     GuildRoles {
         guild_id: String,
         roles: Vec<crate::member_list::Role>,
+    },
+    /// Our own member in a guild (`LoadOwnMember`): just the role ids.
+    OwnMemberLoaded {
+        guild_id: String,
+        roles: Vec<String>,
     },
     MemberListUpdate {
         update: crate::member_list::MemberListUpdate,

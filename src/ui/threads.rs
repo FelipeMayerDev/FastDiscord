@@ -356,8 +356,20 @@ pub(crate) fn paint_sidebar_threads(
                 .max_rect(row.shrink2(Vec2::new(8.0, 2.0)))
                 .layout(egui::Layout::left_to_right(egui::Align::Center)),
         );
+        // Private threads we haven't joined wear Discord's padlock.
+        if app.channel_hidden(&thread, guild_id) {
+            let (icon_rect, _) = content.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+            crate::ui::icons::draw(
+                content.painter(),
+                crate::ui::icons::Icon::Lock,
+                icon_rect.center(),
+                theme::MUTED,
+                0.0,
+            );
+            content.add_space(4.0);
+        }
         crate::ui::emoji::label(app, &mut content, text, true);
-        if response.clicked() {
+        if response.clicked() && !app.channel_hidden(&thread, guild_id) {
             *clicked = Some(thread.id.clone());
         }
     }

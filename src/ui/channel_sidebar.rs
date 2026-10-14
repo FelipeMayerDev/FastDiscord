@@ -1339,11 +1339,16 @@ fn paint_guild_channels(app: &mut VesktopApp, ui: &mut egui::Ui) {
                         .map(|since| since.elapsed().as_secs())
                 })
                 .flatten();
+            let locked = app.channel_hidden(channel, &guild_id);
             if row(
                 app,
                 ui,
                 None,
-                Some(crate::ui::icons::Icon::Voice),
+                Some(if locked {
+                    crate::ui::icons::Icon::Lock
+                } else {
+                    crate::ui::icons::Icon::Voice
+                }),
                 &name,
                 active,
                 unread,
@@ -1352,13 +1357,20 @@ fn paint_guild_channels(app: &mut VesktopApp, ui: &mut egui::Ui) {
             )
             .clicked()
             {
-                *clicked_voice = Some(channel.id.clone());
+                if !locked {
+                    *clicked_voice = Some(channel.id.clone());
+                }
             }
             for member in app.voice_members(&channel.id) {
                 voice_member_row(app, ui, &guild_id, &member);
             }
         } else {
-            let prefix = if channel.kind == crate::model::CHANNEL_KIND_ANNOUNCEMENT {
+            // Locked channels trade their icon for the padlock, as Discord
+            // does; the row stays clickable so the API can answer for it.
+            let locked = app.channel_hidden(channel, &guild_id);
+            let prefix = if locked {
+                crate::ui::icons::Icon::Lock
+            } else if channel.kind == crate::model::CHANNEL_KIND_ANNOUNCEMENT {
                 crate::ui::icons::Icon::Announcement
             } else {
                 crate::ui::icons::Icon::TextChannel
@@ -1376,7 +1388,9 @@ fn paint_guild_channels(app: &mut VesktopApp, ui: &mut egui::Ui) {
             )
             .clicked()
             {
-                *clicked = Some(channel.id.clone());
+                if !locked {
+                    *clicked = Some(channel.id.clone());
+                }
             }
             crate::ui::threads::paint_sidebar_threads(
                 app,

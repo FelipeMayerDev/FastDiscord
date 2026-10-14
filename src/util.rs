@@ -14,6 +14,37 @@ pub fn snowflake_ms(id: &str) -> Option<i64> {
         .map(|value| ((value >> 22) + DISCORD_EPOCH) as i64)
 }
 
+/// Discord ships permission bitfields as decimal strings (role
+/// `permissions`) or JSON numbers (channel overwrites); a null means none.
+pub fn de_u64_lenient<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct Lenient;
+    impl serde::de::Visitor<'_> for Lenient {
+        type Value = u64;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a number, a decimal string or null")
+        }
+        fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<u64, E> {
+            Ok(value)
+        }
+        fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<u64, E> {
+            u64::try_from(value).map_err(serde::de::Error::custom)
+        }
+        fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<u64, E> {
+            value.parse().map_err(serde::de::Error::custom)
+        }
+        fn visit_none<E>(self) -> Result<u64, E> {
+            Ok(0)
+        }
+        fn visit_unit<E>(self) -> Result<u64, E> {
+            Ok(0)
+        }
+    }
+    deserializer.deserialize_any(Lenient)
+}
+
 /// `HH:MM` in the local timezone for an ISO-8601 timestamp.
 pub fn message_time(iso: &str) -> String {
     DateTime::parse_from_rfc3339(iso)

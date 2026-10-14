@@ -238,6 +238,10 @@ pub struct VesktopApp {
     pub(crate) selected_guild: Option<String>,
     pub(crate) selected_channel: Option<String>,
     pub(crate) user_cache: HashMap<String, User>,
+    /// Our role ids per guild, from `LoadOwnMember` (issue #55): the input
+    /// to the channel permission math behind the sidebar's lock icons.
+    pub(crate) own_roles: HashMap<String, Vec<String>>,
+    own_roles_requested: HashSet<String>,
     pub(crate) images: ImageCache,
     /// Larger cache for inline image attachments.
     pub(crate) images_large: ImageCache,
@@ -359,6 +363,8 @@ impl VesktopApp {
             selected_guild: None,
             selected_channel: None,
             user_cache: HashMap::new(),
+            own_roles: HashMap::new(),
+            own_roles_requested: HashSet::new(),
             images: ImageCache::new(128),
             images_large: ImageCache::new(800),
             viewer: None,
@@ -911,6 +917,68 @@ impl VesktopApp {
         self.settings.save();
         self.request_channel_presences(&channel_id);
         self.fetch_channel_if_needed(channel_id);
+    }
+
+    /// Issue #55: the sidebar's lock, by Discord's permission rules — base
+    /// guild permissions (@everyone plus our roles) under the channel's
+    /// overwrites, falling back to the category's when the channel is
+    /// synced. Private threads we aren't in always lock; public ones ride
+    /// on the parent. Without the role data yet nothing locks (fail open).
+    pub(crate) fn channel_hidden(&self, channel: &Channel, guild_id: &str) -> bool {
+        if channel.is_thread() {
+            return matches!(channel.kind, crate::model::CHANNEL_KIND_PRIVATE_THREAD)
+                && channel.member.is_none();
+        }
+        let (roles, own_roles, me) = match (
+            self.members.roles.get(guild_id),
+            self.own_roles.get(guild_id),
+            self.me.as_ref(),
+        ) {
+            (Some(roles), Some(own_roles), Some(me)) => (roles, own_roles, me),
+            _ => return false,
+        };
+        let mut perms = roles.get(guild_id).map_or(0, |role| role.permissions);
+        for id in own_roles {
+            if let Some(role) = roles.get(id) {
+                perms |= role.permissions;
+            }
+        }
+        if perms & crate::model::PERMISSION_ADMINISTRATOR != 0 {
+            return false;
+        }
+        // Synced channels carry no overwrites of their own: the category's
+        // apply instead.
+        let has_overwrites =
+            |channel: &Channel| !channel.permission_overwrites.is_empty();
+        let source = if has_overwrites(channel) {
+            Some(channel)
+        } else {
+            channel
+                .parent_id
+                .as_deref()
+                .and_then(|id| self.find_channel(id))
+                .filter(|parent| has_overwrites(parent))
+        };
+        if let Some(source) = source {
+            let (mut allow, mut deny) = (0u64, 0u64);
+            let (mut member_allow, mut member_deny) = (0u64, 0u64);
+            for overwrite in &source.permission_overwrites {
+                if overwrite.kind == 0 {
+                    if overwrite.id == guild_id {
+                        perms = (perms & !overwrite.deny) | overwrite.allow;
+                    } else if own_roles.contains(&overwrite.id) {
+                        allow |= overwrite.allow;
+                        deny |= overwrite.deny;
+                    }
+                } else if overwrite.kind == 1 && overwrite.id == me.id {
+                    member_allow = overwrite.allow;
+                    member_deny = overwrite.deny;
+                }
+            }
+            perms = (perms & !deny) | allow;
+            perms = (perms & !member_deny) | member_allow;
+        }
+        perms & crate::model::PERMISSION_VIEW_CHANNEL == 0
     }
 
     fn request_channel_presences(&self, channel_id: &str) {
@@ -2052,6 +2120,16 @@ impl VesktopApp {
                 }
                 self.guild_channels.insert(guild_id.clone(), channels);
                 self.loading_guilds.remove(&guild_id);
+                // The lock icons need our role ids in the guild (issue #55).
+                if let Some(me) = self.me.as_ref()
+                    && !self.own_roles.contains_key(&guild_id)
+                    && self.own_roles_requested.insert(guild_id.clone())
+                {
+                    self.send(Command::LoadOwnMember {
+                        guild_id: guild_id.clone(),
+                        user_id: me.id.clone(),
+                    });
+                }
                 if self.selected_guild.as_deref() == Some(guild_id.as_str())
                     && self
                         .selected_channel
@@ -2598,6 +2676,9 @@ impl VesktopApp {
             UiEvent::GuildRoles { guild_id, roles } => {
                 let roles = roles.into_iter().map(|role| (role.id.clone(), role));
                 self.members.roles.insert(guild_id, roles.collect());
+            }
+            UiEvent::OwnMemberLoaded { guild_id, roles } => {
+                self.own_roles.insert(guild_id, roles);
             }
             UiEvent::MemberListUpdate { update } => {
                 for member in update.members() {
@@ -3762,5 +3843,101 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    fn test_channel(id: &str, kind: i64, extra: serde_json::Value) -> Channel {
+        let mut value = serde_json::json!({ "id": id, "type": kind, "name": id, "guild_id": "g" });
+        let extra = match extra {
+            serde_json::Value::Null => serde_json::json!({}),
+            extra => extra,
+        };
+        if let (Some(base), Some(extra)) = (value.as_object_mut(), extra.as_object()) {
+            base.extend(extra.iter().map(|(k, v)| (k.clone(), v.clone())));
+        }
+        serde_json::from_value(value).unwrap()
+    }
+
+    fn role(id: &str, permissions: u64) -> crate::member_list::Role {
+        serde_json::from_value(serde_json::json!({ "id": id, "name": id, "permissions": permissions.to_string() }))
+            .unwrap()
+    }
+
+    /// Issue #55: the sidebar lock follows Discord's permission algorithm.
+    #[test]
+    fn channel_lock_follows_discord_permission_rules() {
+        const VIEW: u64 = crate::model::PERMISSION_VIEW_CHANNEL;
+        const ADMIN: u64 = crate::model::PERMISSION_ADMINISTRATOR;
+        const CONNECT: u64 = 1 << 20;
+        let (_rt, mut app, _, _) = test_app();
+        app.me = Some(
+            serde_json::from_value(serde_json::json!({ "id": "me", "username": "eu" })).unwrap(),
+        );
+        // @everyone can't view; role "10" can; role "11" can connect.
+        app.members.roles.insert(
+            "g".into(),
+            [
+                role("g", CONNECT),
+                role("10", VIEW),
+                role("11", CONNECT | ADMIN),
+            ]
+            .into_iter()
+            .map(|role| (role.id.clone(), role))
+            .collect(),
+        );
+        app.own_roles.insert("g".into(), vec!["10".into()]);
+        app.channel_index.insert("c".into(), ChannelRef::Guild("g".into()));
+        app.channel_index
+            .insert("cat".into(), ChannelRef::Guild("g".into()));
+        // Missing role data fails open: no lock.
+        assert!(!app.channel_hidden(&test_channel("c", 0, serde_json::json!({})), "g"));
+
+        // A role overwrite denying VIEW hides, the member overwrite wins back.
+        let deny_role = serde_json::json!({ "permission_overwrites": [
+            { "id": "10", "type": 0, "allow": 0, "deny": VIEW }
+        ] });
+        assert!(app.channel_hidden(&test_channel("c", 0, deny_role.clone()), "g"));
+        let member_saves = serde_json::json!({ "permission_overwrites": [
+            { "id": "10", "type": 0, "allow": 0, "deny": VIEW },
+            { "id": "me", "type": 1, "allow": VIEW, "deny": 0 }
+        ] });
+        assert!(!app.channel_hidden(&test_channel("c", 0, member_saves), "g"));
+
+        // Synced with the category: the parent's overwrites apply, unless
+        // the channel carries its own.
+        app.guild_channels.insert(
+            "g".into(),
+            vec![
+                test_channel("cat", crate::model::CHANNEL_KIND_CATEGORY, deny_role.clone()),
+                test_channel("c", 0, serde_json::json!({})),
+                test_channel("open", 0, serde_json::json!({ "permission_overwrites": [
+                    { "id": "g", "type": 0, "allow": VIEW, "deny": 0 }
+                ] })),
+            ],
+        );
+        app.channel_index.insert("open".into(), ChannelRef::Guild("g".into()));
+        let synced = test_channel("c", 0, serde_json::json!({ "parent_id": "cat" }));
+        assert!(app.channel_hidden(&synced, "g"));
+        let detached = test_channel(
+            "c",
+            0,
+            serde_json::json!({ "parent_id": "cat", "permission_overwrites": [
+                { "id": "g", "type": 0, "allow": VIEW, "deny": 0 }
+            ] }),
+        );
+        assert!(!app.channel_hidden(&detached, "g"));
+
+        // Administrator rides over every deny.
+        app.own_roles.insert("g".into(), vec!["11".into()]);
+        assert!(!app.channel_hidden(&test_channel("c", 0, deny_role), "g"));
+
+        // A private thread we're not in always locks; joined ones don't.
+        let private = |joined: bool| {
+            let extra = joined
+                .then(|| serde_json::json!({ "member": { "id": "t" } }))
+                .unwrap_or(serde_json::json!({}));
+            test_channel("t", crate::model::CHANNEL_KIND_PRIVATE_THREAD, extra)
+        };
+        assert!(app.channel_hidden(&private(false), "g"));
+        assert!(!app.channel_hidden(&private(true), "g"));
     }
 }

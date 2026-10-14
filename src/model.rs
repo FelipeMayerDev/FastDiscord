@@ -123,7 +123,27 @@ pub struct Channel {
     /// Forum posts only: ids of their tags, from the parent's `available_tags`.
     #[serde(default)]
     pub applied_tags: Vec<String>,
+    /// Who gains or loses permissions here beyond their guild roles; empty
+    /// on channels synced with their category (resolve the parent then).
+    #[serde(default)]
+    pub permission_overwrites: Vec<Overwrite>,
 }
+
+/// One `permission_overwrites` entry: `type` 0 targets a role, 1 a member.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Overwrite {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub kind: i64,
+    #[serde(default, deserialize_with = "crate::util::de_u64_lenient")]
+    pub allow: u64,
+    #[serde(default, deserialize_with = "crate::util::de_u64_lenient")]
+    pub deny: u64,
+}
+
+/// Discord's permission bits the client reasons about.
+pub const PERMISSION_VIEW_CHANNEL: u64 = 1 << 10;
+pub const PERMISSION_ADMINISTRATOR: u64 = 1 << 3;
 
 /// A forum tag; at most one of the emoji fields is set.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -404,6 +424,10 @@ pub struct Member {
     pub user: User,
     #[serde(default)]
     pub nick: Option<String>,
+    /// Our own member fetch also carries these, to compute channel
+    /// permissions for the lock icons.
+    #[serde(default)]
+    pub roles: Vec<String>,
 }
 
 /// The editable bits of our own profile (settings → Perfil). Empty strings

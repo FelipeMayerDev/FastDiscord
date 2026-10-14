@@ -1029,6 +1029,17 @@ async fn handle_rest_command(api: &Api, command: Command, event_tx: &EventTx) {
                 Err(err) => log::warn!("falha ao carregar membro {user_id}: {err}"),
             }
         }
+        Command::LoadOwnMember { guild_id, user_id } => {
+            match api.guild_member(&guild_id, &user_id).await {
+                Ok(member) => {
+                    let _ = event_tx.send(UiEvent::OwnMemberLoaded {
+                        guild_id,
+                        roles: member.roles,
+                    });
+                }
+                Err(err) => log::warn!("falha ao carregar nosso membro em {guild_id}: {err}"),
+            }
+        }
         Command::LoadThreads { channel_id } => match api.archived_threads(&channel_id).await {
             Ok(threads) => event_tx.send(UiEvent::ThreadsUpserted { threads }),
             Err(err) => report(api, err, event_tx, "carregar tópicos").await,

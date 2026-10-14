@@ -21,6 +21,7 @@ pub enum Icon {
     Voice,
     Announcement,
     TextChannel,
+    Lock,
     Settings,
 }
 
@@ -193,6 +194,27 @@ pub fn draw(p: &egui::Painter, icon: Icon, c: Pos2, color: Color32, hover: f32) 
             for y in [-3.0, 4.0] {
                 line(Vec2::new(-8.0, y), Vec2::new(8.0, y));
             }
+        }
+        // Discord's closed padlock on channels the user can't view.
+        Icon::Lock => {
+            // The shackle lifts a little on hover, like the other icons.
+            let radius = 4.0 + hover;
+            let base = c.y - 1.0;
+            let arc: Vec<Pos2> = (0..=8)
+                .map(|step| {
+                    let angle = std::f32::consts::PI * (1.0 - step as f32 / 8.0);
+                    pos2(
+                        c.x + radius * angle.cos(),
+                        base - radius * angle.sin(),
+                    )
+                })
+                .collect();
+            p.add(egui::Shape::line(arc, stroke));
+            p.rect_filled(
+                Rect::from_center_size(c + Vec2::new(0.0, 3.5), Vec2::new(12.0, 9.0)),
+                2.0,
+                color,
+            );
         }
         Icon::Settings => {
             p.circle_stroke(c, 6.0, stroke);

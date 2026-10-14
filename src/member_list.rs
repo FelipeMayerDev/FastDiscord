@@ -24,6 +24,10 @@ pub struct Role {
     pub color: u32,
     #[serde(default)]
     pub position: i64,
+    /// Permission bitflags, as a decimal string in Discord's payloads; the
+    /// `@everyone` role's (id = guild id) seeds channel permission math.
+    #[serde(default, deserialize_with = "crate::util::de_u64_lenient")]
+    pub permissions: u64,
 }
 
 /// A row: `{"group": {...}}` or `{"member": {...}}`.
@@ -372,6 +376,7 @@ mod tests {
                         name: id.into(),
                         color,
                         position,
+                        permissions: 0,
                     };
                     (id.to_string(), role)
                 })
