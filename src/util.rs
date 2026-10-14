@@ -153,6 +153,11 @@ pub fn animated_avatar_url(user: &User) -> Option<String> {
     ))
 }
 
+/// A clan tag's badge image, next to the tag in the name chip.
+pub fn clan_badge_url(guild_id: &str, badge: &str) -> String {
+    format!("https://cdn.discordapp.com/clan-badges/{guild_id}/{badge}.png?size=16")
+}
+
 /// The picture an embed shows inline. Tenor and Giphy `gifv` embeds are
 /// mp4 videos; their animated rendition lives next to the video, so swap
 /// the URL (still thumbnail when the pattern doesn't match).

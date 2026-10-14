@@ -18,6 +18,7 @@ pub mod threads;
 pub mod voice_extras;
 pub mod voice_processing;
 
+use crate::app::VesktopApp;
 use egui::{Align2, Color32, CornerRadius, FontId, Image, Rect, Sense, TextureHandle, Vec2, pos2};
 
 /// Reduced motion changes state immediately and schedules no animation frames.
@@ -162,6 +163,33 @@ pub fn new_chip(ui: &mut egui::Ui) {
         )
         .selectable(false),
     );
+}
+
+/// A user's clan tag chip: badge plus tag in a small pill, Discord's
+/// server-identity mark after the display name (issue #52).
+pub fn clan_tag(app: &mut VesktopApp, ui: &mut egui::Ui, clan: &crate::model::Clan) {
+    let Some(tag) = clan.tag.as_deref() else {
+        return;
+    };
+    egui::Frame::new()
+        .fill(Color32::from_white_alpha(24))
+        .corner_radius(CornerRadius::same(4))
+        .inner_margin(egui::Margin::symmetric(3, 1))
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = 3.0;
+            if let (Some(guild_id), Some(badge)) = (&clan.identity_guild_id, &clan.badge) {
+                let url = crate::util::clan_badge_url(guild_id, badge);
+                if let Some(texture) = app.images.get(ui.ctx(), &app.handle, &url) {
+                    draw_texture(ui, &texture, Vec2::splat(12.0));
+                }
+            }
+            ui.label(
+                egui::RichText::new(tag)
+                    .size(11.0)
+                    .family(crate::theme::bold())
+                    .color(crate::theme::TEXT),
+            );
+        });
 }
 
 /// Default group avatar, shared by the DM list and conversation header.

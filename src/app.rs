@@ -2343,6 +2343,7 @@ impl VesktopApp {
                         global_name: None,
                         discriminator: None,
                         avatar: None,
+                        clan: None,
                     });
                 self.typing
                     .entry(channel_id)
@@ -2787,6 +2788,7 @@ impl VesktopApp {
                         global_name: None,
                         discriminator: None,
                         avatar: avatar.clone(),
+                        clan: None,
                     });
                 self.qr = QrState::Scanned {
                     username,

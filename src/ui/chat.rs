@@ -635,8 +635,8 @@ fn paint_message(
                 );
                 ui.add_space(GAP);
                 ui.vertical(|ui| {
-                    // Author line: name, then the time right after it in
-                    // small muted text, Discord-style.
+                    // Author line: name, then the clan tag chip and the
+                    // time right after it, small muted text, Discord-style.
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing = Vec2::ZERO;
                         ui.add(
@@ -648,6 +648,10 @@ fn paint_message(
                             )
                             .truncate(),
                         );
+                        if let Some(clan) = message.author.clan_tag() {
+                            ui.add_space(6.0);
+                            crate::ui::clan_tag(app, ui, clan);
+                        }
                         ui.add_space(8.0);
                         let (label, exact) = util::header_time(&message.timestamp);
                         if !label.is_empty() {

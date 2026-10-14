@@ -268,19 +268,39 @@ fn member_row(
         );
     }
     let text_left = avatar.right() + 12.0;
+    let name_font = FontId::new(15.0, theme::bold());
+    let name_color = if offline {
+        color.gamma_multiply(0.5)
+    } else {
+        color
+    };
     ui.painter()
         .with_clip_rect(inner.with_min_x(text_left))
         .text(
             pos2(text_left, inner.center().y),
             Align2::LEFT_CENTER,
             name,
-            FontId::new(15.0, theme::bold()),
-            if offline {
-                color.gamma_multiply(0.5)
-            } else {
-                color
-            },
+            name_font.clone(),
+            name_color,
         );
+    // The clan tag rides right after the name, as in chat (issue #52).
+    if let Some(clan) = user.clan_tag() {
+        let galley = ui
+            .painter()
+            .layout_no_wrap(name.to_string(), name_font, name_color);
+        let chip_left = text_left + galley.rect.width() + 6.0;
+        if chip_left < inner.right() {
+            let mut chip = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(egui::Rect::from_min_size(
+                        pos2(chip_left, inner.center().y - 9.0),
+                        Vec2::new(inner.right() - chip_left, 18.0),
+                    ))
+                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            );
+            crate::ui::clan_tag(app, &mut chip, clan);
+        }
+    }
 
     let mut open_dm = false;
     egui::Popup::menu(&response)

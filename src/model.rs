@@ -34,11 +34,38 @@ pub struct User {
     pub discriminator: Option<String>,
     #[serde(default)]
     pub avatar: Option<String>,
+    /// The server identity ("clan") whose tag rides next to the display
+    /// name, as Discord shows it in chat and the member list (issue #52).
+    #[serde(default)]
+    pub clan: Option<Clan>,
+}
+
+/// `user.clan`: a tag like `"[gato]"` with its badge from the CDN.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Clan {
+    #[serde(default)]
+    pub tag: Option<String>,
+    /// Badge image hash, served from `clan-badges/{identity_guild_id}/`.
+    #[serde(default)]
+    pub badge: Option<String>,
+    /// The guild whose identity the tag carries.
+    #[serde(default)]
+    pub identity_guild_id: Option<String>,
+    /// `false` once the user chose to hide the tag.
+    #[serde(default)]
+    pub identity_enabled: Option<bool>,
 }
 
 impl User {
     pub fn display_name(&self) -> &str {
         self.global_name.as_deref().unwrap_or(&self.username)
+    }
+
+    /// The tag to show next to the display name: set and not hidden.
+    pub fn clan_tag(&self) -> Option<&Clan> {
+        self.clan
+            .as_ref()
+            .filter(|clan| clan.identity_enabled != Some(false) && clan.tag.is_some())
     }
 }
 
@@ -455,4 +482,34 @@ pub fn presence_device(client_status: Option<&serde_json::Value>) -> Option<Stri
         return None;
     };
     Some(device.to_string())
+}
+
+#[cfg(test)]
+mod clan_tests {
+    use super::*;
+
+    /// Issue #52: the tag rides along the user payload, `null` when unset,
+    /// and `identity_enabled: false` hides it like Discord does.
+    #[test]
+    fn clan_tag_parses_and_respects_hiding() {
+        let user: User = serde_json::from_value(serde_json::json!({
+            "id": "1", "username": "u",
+            "clan": { "tag": "[gato]", "badge": "abc", "identity_guild_id": "42", "identity_enabled": true }
+        }))
+        .unwrap();
+        assert_eq!(user.clan_tag().unwrap().tag.as_deref(), Some("[gato]"));
+
+        let hidden: User = serde_json::from_value(serde_json::json!({
+            "id": "1", "username": "u",
+            "clan": { "tag": "[gato]", "identity_enabled": false }
+        }))
+        .unwrap();
+        assert!(hidden.clan_tag().is_none());
+
+        let none: User = serde_json::from_value(serde_json::json!({
+            "id": "1", "username": "u", "clan": null
+        }))
+        .unwrap();
+        assert!(none.clan_tag().is_none());
+    }
 }
