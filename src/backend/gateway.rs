@@ -253,10 +253,8 @@ fn seed_presences(value: &Value, event_tx: &EventTx) {
             .and_then(|cs| cs.get("mobile"))
             .and_then(Value::as_str)
             .is_some();
-        let on_computer = client_status
-            .is_some_and(|cs| {
-                cs.get("desktop").is_some() || cs.get("web").is_some()
-            });
+        let on_computer =
+            client_status.is_some_and(|cs| cs.get("desktop").is_some() || cs.get("web").is_some());
         let device = if mobile && !on_computer {
             Some("mobile".to_string())
         } else if on_computer {
@@ -485,6 +483,24 @@ fn dispatch(value: Value, event_tx: &EventTx, voice_tx: &UnboundedSender<Wire>, 
             seed_presences(&data["presences"], event_tx);
         }
         "PRESENCE_UPDATE" => seed_presences(&data, event_tx),
+        "MESSAGE_REACTION_ADD" | "MESSAGE_REACTION_REMOVE" => {
+            if let (Some(channel_id), Some(message_id), Some(user_id), Ok(emoji)) = (
+                data.get("channel_id").and_then(Value::as_str),
+                data.get("message_id").and_then(Value::as_str),
+                data.get("user_id").and_then(Value::as_str),
+                serde_json::from_value::<crate::model::ReactionEmoji>(
+                    data.get("emoji").cloned().unwrap_or(Value::Null),
+                ),
+            ) {
+                let _ = event_tx.send(UiEvent::ReactionChanged {
+                    channel_id: channel_id.to_string(),
+                    message_id: message_id.to_string(),
+                    user_id: user_id.to_string(),
+                    emoji,
+                    added: kind == "MESSAGE_REACTION_ADD",
+                });
+            }
+        }
         "GUILD_MEMBER_LIST_UPDATE" => {
             match serde_json::from_value::<crate::member_list::MemberListUpdate>(data) {
                 Ok(update) => event_tx.send(UiEvent::MemberListUpdate { update }),
@@ -906,7 +922,10 @@ async fn handle_rest_command(api: &Api, command: Command, event_tx: &EventTx) {
         },
         Command::SetGuildMute { guild_id, muted } => {
             if let Err(error) = api.set_guild_mute(&guild_id, muted).await {
-                log::warn!("falha ao {} o servidor: {error}", if muted { "silenciar" } else { "dessilenciar" });
+                log::warn!(
+                    "falha ao {} o servidor: {error}",
+                    if muted { "silenciar" } else { "dessilenciar" }
+                );
             }
         }
         Command::LeaveGuild { guild_id } => match api.leave_guild(&guild_id).await {
@@ -986,6 +1005,19 @@ async fn handle_rest_command(api: &Api, command: Command, event_tx: &EventTx) {
                 error: format!("não consegui apagar a mensagem: {err}"),
             }),
         },
+        Command::ToggleReaction {
+            channel_id,
+            message_id,
+            emoji,
+            add,
+        } => {
+            if let Err(err) = api
+                .toggle_reaction(&channel_id, &message_id, &emoji, add)
+                .await
+            {
+                log::warn!("falha ao reagir com {emoji}: {err}");
+            }
+        }
         Command::SendTyping { channel_id } => {
             if let Err(err) = api.send_typing(&channel_id).await {
                 log::warn!("falha ao avisar digitação: {err}");
@@ -1253,7 +1285,10 @@ mod tests {
             "",
         );
         let mut statuses = std::collections::HashMap::new();
-        while let Ok(UiEvent::PresenceUpdate { user_id, status, .. }) = rx.try_recv() {
+        while let Ok(UiEvent::PresenceUpdate {
+            user_id, status, ..
+        }) = rx.try_recv()
+        {
             statuses.insert(user_id, status);
         }
         assert_eq!(statuses.get("1").map(String::as_str), Some("online"));
@@ -1298,12 +1333,13 @@ mod tests {
             ]),
             &events,
         );
-        let device = |rx: &mut tokio::sync::mpsc::UnboundedReceiver<UiEvent>| {
-            match rx.try_recv().unwrap() {
-                UiEvent::PresenceUpdate { user_id, device, .. } => (user_id, device),
+        let device =
+            |rx: &mut tokio::sync::mpsc::UnboundedReceiver<UiEvent>| match rx.try_recv().unwrap() {
+                UiEvent::PresenceUpdate {
+                    user_id, device, ..
+                } => (user_id, device),
                 _ => panic!("expected a presence update"),
-            }
-        };
+            };
         assert_eq!(device(&mut rx), ("1".into(), Some("mobile".into())));
         assert_eq!(device(&mut rx), ("2".into(), Some("desktop".into())));
         assert_eq!(device(&mut rx), ("3".into(), Some("desktop".into())));

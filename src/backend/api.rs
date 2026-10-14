@@ -184,6 +184,32 @@ impl Api {
         Ok(())
     }
 
+    /// React (or unreact) as ourselves. The emoji key is the Unicode emoji
+    /// or `name:id` for custom ones, percent-encoded into the path.
+    pub async fn toggle_reaction(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        emoji: &str,
+        add: bool,
+    ) -> ApiResult<()> {
+        let url = format!(
+            "{REST_BASE}/channels/{channel_id}/messages/{message_id}/reactions/{}/@me",
+            encode_emoji(emoji)
+        );
+        let builder = if add {
+            self.http.put(&url)
+        } else {
+            self.http.delete(&url)
+        };
+        let resp = builder
+            .header(reqwest::header::AUTHORIZATION, &self.token)
+            .send()
+            .await?;
+        Self::check_status(resp).await?;
+        Ok(())
+    }
+
     pub async fn open_dm(&self, user_id: &str) -> ApiResult<Channel> {
         let resp = self
             .http
@@ -617,9 +643,30 @@ pub(crate) fn read_attachment(path: &std::path::Path) -> anyhow::Result<(String,
     Ok((filename, bytes))
 }
 
+/// Percent-encode an emoji key for the reactions URL path: unreserved
+/// bytes stay, the custom emoji's `:` stays, everything else encodes.
+fn encode_emoji(key: &str) -> String {
+    let mut out = String::with_capacity(key.len());
+    for byte in key.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b':' => {
+                out.push(*byte as char)
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod attachment_tests {
     use super::*;
+
+    #[test]
+    fn reaction_keys_encode_for_the_path() {
+        assert_eq!(encode_emoji("👍"), "%F0%9F%91%8D");
+        assert_eq!(encode_emoji("blob_wave:123"), "blob_wave:123");
+    }
 
     #[test]
     fn attachment_rejects_directories_and_large_files_and_preserves_bytes() {

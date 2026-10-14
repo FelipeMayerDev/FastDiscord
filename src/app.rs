@@ -750,9 +750,7 @@ impl VesktopApp {
         let gone: HashSet<String> = self
             .channel_index
             .iter()
-            .filter(|(_, channel)| {
-                matches!(channel, ChannelRef::Guild(owner) if owner == guild_id)
-            })
+            .filter(|(_, channel)| matches!(channel, ChannelRef::Guild(owner) if owner == guild_id))
             .map(|(id, _)| id.clone())
             .collect();
         self.channel_index.retain(|id, _| !gone.contains(id));
@@ -772,6 +770,86 @@ impl VesktopApp {
             }
         }
         self.settings.save();
+    }
+
+    /// Fold a gateway reaction echo into a loaded message: bump or drop
+    /// the matching chip, and track whether it is ours.
+    pub(crate) fn apply_reaction(
+        &mut self,
+        channel_id: &str,
+        message_id: &str,
+        user_id: &str,
+        emoji: crate::model::ReactionEmoji,
+        added: bool,
+    ) {
+        let mine = self.me.as_ref().is_some_and(|me| me.id == user_id);
+        let Some(message) = self
+            .messages
+            .get_mut(channel_id)
+            .and_then(|list| list.iter_mut().find(|m| m.id == message_id))
+        else {
+            return;
+        };
+        let same = |r: &crate::model::Reaction| match (&r.emoji.id, &emoji.id) {
+            (Some(a), Some(b)) => a == b,
+            (None, None) => r.emoji.name == emoji.name,
+            _ => false,
+        };
+        match message.reactions.iter().position(same) {
+            Some(i) if added => {
+                let reaction = &mut message.reactions[i];
+                // Our echo after the optimistic flip must not count twice.
+                if !(mine && reaction.me) {
+                    reaction.count += 1;
+                }
+                reaction.me |= mine;
+            }
+            Some(i) => {
+                let reaction = &mut message.reactions[i];
+                if !(mine && !reaction.me) {
+                    reaction.count = reaction.count.saturating_sub(1);
+                }
+                if mine {
+                    reaction.me = false;
+                }
+                if reaction.count == 0 {
+                    message.reactions.remove(i);
+                }
+            }
+            None if added => message.reactions.push(crate::model::Reaction {
+                count: 1,
+                emoji,
+                me: mine,
+            }),
+            None => {}
+        }
+    }
+
+    /// A click on a reaction chip: flip ours optimistically, then tell
+    /// Discord; `apply_reaction` swallows the gateway echo.
+    pub(crate) fn toggle_reaction(
+        &mut self,
+        channel_id: &str,
+        message_id: &str,
+        emoji: crate::model::ReactionEmoji,
+        add: bool,
+    ) {
+        let Some(me) = self.me.as_ref().map(|me| me.id.clone()) else {
+            return;
+        };
+        let key = match (&emoji.id, &emoji.name) {
+            (Some(id), Some(name)) => format!("{name}:{id}"),
+            (Some(id), None) => format!("_:{id}"),
+            (None, Some(name)) => name.clone(),
+            (None, None) => return,
+        };
+        self.apply_reaction(channel_id, message_id, &me, emoji, add);
+        self.send(Command::ToggleReaction {
+            channel_id: channel_id.to_string(),
+            message_id: message_id.to_string(),
+            emoji: key,
+            add,
+        });
     }
 
     pub(crate) fn select_home(&mut self) {
@@ -1814,9 +1892,7 @@ impl VesktopApp {
                 // Discord's snapshot seeds the read markers; anything the
                 // user already read in this session wins.
                 for (channel_id, message_id) in markers {
-                    self.last_seen
-                        .entry(channel_id)
-                        .or_insert(message_id);
+                    self.last_seen.entry(channel_id).or_insert(message_id);
                 }
             }
             UiEvent::Disconnected { reason, retry_in } => {
@@ -1867,6 +1943,13 @@ impl VesktopApp {
                 self.refresh_relationships();
             }
             UiEvent::GuildLeft { guild_id } => self.forget_guild(&guild_id),
+            UiEvent::ReactionChanged {
+                channel_id,
+                message_id,
+                user_id,
+                emoji,
+                added,
+            } => self.apply_reaction(&channel_id, &message_id, &user_id, emoji, added),
             UiEvent::RelationshipError { error } => {
                 self.relationships_loading = false;
                 self.friend_error = Some(error);
@@ -3125,6 +3208,56 @@ mod tests {
     }
 
     #[test]
+    fn reactions_flip_optimistically_and_swallow_our_echo() {
+        let (_rt, mut app, mut commands, _) = test_app();
+        app.me = Some(
+            serde_json::from_value(serde_json::json!({ "id": "me", "username": "eu" })).unwrap(),
+        );
+        app.messages
+            .insert("channel".into(), vec![sample_message(1)]);
+        let thumbs = || crate::model::ReactionEmoji {
+            id: None,
+            name: Some("👍".into()),
+            animated: false,
+        };
+        let echo = |app: &mut VesktopApp, user: &str, added| {
+            app.handle_event(
+                UiEvent::ReactionChanged {
+                    channel_id: "channel".into(),
+                    message_id: "1".into(),
+                    user_id: user.into(),
+                    emoji: thumbs(),
+                    added,
+                },
+                true,
+            )
+        };
+        let chip = |app: &VesktopApp| {
+            app.messages["channel"][0]
+                .reactions
+                .first()
+                .map(|r| (r.count, r.me))
+        };
+
+        echo(&mut app, "other", true);
+        assert_eq!(chip(&app), Some((1, false)));
+        // Our click counts once, the gateway's echo of it doesn't.
+        app.toggle_reaction("channel", "1", thumbs(), true);
+        assert!(
+            matches!(commands.try_recv().unwrap(), Command::ToggleReaction { emoji, add: true, .. } if emoji == "👍")
+        );
+        assert_eq!(chip(&app), Some((2, true)));
+        echo(&mut app, "me", true);
+        assert_eq!(chip(&app), Some((2, true)));
+        app.toggle_reaction("channel", "1", thumbs(), false);
+        echo(&mut app, "me", false);
+        assert_eq!(chip(&app), Some((1, false)));
+        // The last reactor leaving drops the chip.
+        echo(&mut app, "other", false);
+        assert_eq!(chip(&app), None);
+    }
+
+    #[test]
     fn read_state_seeds_markers_and_session_reads_win() {
         let (_rt, mut app, _, _) = test_app();
         app.handle_event(
@@ -3239,7 +3372,12 @@ mod tests {
         assert!(
             matches!(commands.try_recv().unwrap(), Command::LeaveGuild { guild_id } if guild_id == "1")
         );
-        app.handle_event(UiEvent::GuildLeft { guild_id: "1".into() }, true);
+        app.handle_event(
+            UiEvent::GuildLeft {
+                guild_id: "1".into(),
+            },
+            true,
+        );
         assert!(app.guilds.iter().all(|guild| guild.id != "1"));
         assert!(app.channel_index.get("10").is_none());
         assert!(app.unread.get("10").is_none());
@@ -3252,8 +3390,7 @@ mod tests {
         let (_rt, mut app, mut commands, _) = test_app();
         let ctx = egui::Context::default();
         app.me = Some(
-            serde_json::from_value(serde_json::json!({ "id": "9", "username": "member" }))
-                .unwrap(),
+            serde_json::from_value(serde_json::json!({ "id": "9", "username": "member" })).unwrap(),
         );
         app.settings.idle_timeout_minutes = 10;
         let idle_frame = |app: &mut VesktopApp, ctx: &egui::Context| {

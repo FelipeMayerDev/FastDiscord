@@ -284,6 +284,9 @@ pub struct Reaction {
     #[serde(default)]
     pub count: u64,
     pub emoji: ReactionEmoji,
+    /// Whether the current user is among the reactors.
+    #[serde(default)]
+    pub me: bool,
 }
 
 /// A reaction's emoji: custom ones have an `id`, Unicode ones only a `name`.
@@ -293,6 +296,9 @@ pub struct ReactionEmoji {
     pub id: Option<String>,
     #[serde(default)]
     pub name: Option<String>,
+    /// Custom only: the emoji is a GIF.
+    #[serde(default)]
+    pub animated: bool,
 }
 
 /// `message_reference`: which message a reply points at.

@@ -81,6 +81,15 @@ pub enum Command {
         channel_id: String,
         message_id: String,
     },
+    /// React (or unreact) as ourselves; the change comes back through the
+    /// gateway's MESSAGE_REACTION echo. The emoji key is `name` for
+    /// Unicode and `name:id` for custom ones.
+    ToggleReaction {
+        channel_id: String,
+        message_id: String,
+        emoji: String,
+        add: bool,
+    },
     /// Signal the user is typing, at most once every few seconds.
     SendTyping {
         channel_id: String,
@@ -258,6 +267,15 @@ pub enum UiEvent {
     MessageDeleted {
         channel_id: String,
         message_id: String,
+    },
+    /// A reaction echoed by the gateway, on a loaded message — ours after
+    /// the REST toggle, or anyone else's.
+    ReactionChanged {
+        channel_id: String,
+        message_id: String,
+        user_id: String,
+        emoji: crate::model::ReactionEmoji,
+        added: bool,
     },
     SendFailed {
         channel_id: String,

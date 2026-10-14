@@ -632,7 +632,7 @@ fn post_matches(post: &Channel, query: &str, tags: &[String]) -> bool {
 
 /// The image of a tag or reaction emoji: custom from Discord's CDN,
 /// Unicode as Twemoji.
-fn emoji_image(id: Option<&str>, name: Option<&str>) -> Option<String> {
+pub(crate) fn emoji_image(id: Option<&str>, name: Option<&str>) -> Option<String> {
     match id {
         Some(id) => Some(crate::ui::emoji::custom_url(id, false)),
         None => emojis::get(name?).map(crate::ui::emoji::twemoji_url),
@@ -711,7 +711,7 @@ impl VesktopApp {
 /// A rounded label: tags, badges, chips. `emoji` is a custom emoji painted
 /// before the text; `fill` sees the response, for hover.
 #[allow(clippy::too_many_arguments)]
-fn pill(
+pub(crate) fn pill(
     app: &mut VesktopApp,
     ui: &mut egui::Ui,
     text: &str,
@@ -785,7 +785,7 @@ fn draw_guidelines_icon(painter: &egui::Painter, center: egui::Pos2, color: Colo
     ));
 }
 
-fn chip_fill(ui: &egui::Ui, response: &egui::Response, selected: bool) -> Color32 {
+pub(crate) fn chip_fill(ui: &egui::Ui, response: &egui::Response, selected: bool) -> Color32 {
     if selected {
         theme::BLURPLE.gamma_multiply(0.6)
     } else {
@@ -1002,8 +1002,12 @@ fn guidelines(app: &mut VesktopApp, ui: &mut egui::Ui, topic: &str, open: &mut b
             });
             if *open {
                 ui.add_space(4.0);
-                let runs =
-                    crate::ui::chat::content_runs_sized(topic, &app.user_cache, &HashMap::new(), 13.5);
+                let runs = crate::ui::chat::content_runs_sized(
+                    topic,
+                    &app.user_cache,
+                    &HashMap::new(),
+                    13.5,
+                );
                 crate::ui::chat::paint_runs_with(app, ui, runs, false);
             }
         });
@@ -1446,7 +1450,7 @@ pub(crate) fn message_menu(
     let regular = matches!(message.kind, MESSAGE_KIND_DEFAULT | MESSAGE_KIND_REPLY);
     let can_start = parent.is_some() && regular;
     let own = regular && app.me.as_ref().is_some_and(|me| me.id == message.author.id);
-    if thread.is_none() && !can_start && !own {
+    if thread.is_none() && !can_start && !own && !regular {
         return;
     }
     egui::Popup::menu(row)
@@ -1462,6 +1466,22 @@ pub(crate) fn message_menu(
                 && ui.button("Criar tópico").clicked()
             {
                 start_draft(ui.ctx(), ThreadDraft::from_message(&parent, message));
+            }
+            if regular {
+                ui.menu_button("Adicionar reação", |ui| {
+                    let id = egui::Id::new("reaction_picker");
+                    let (mut query, mut tab) = ui.ctx().data_mut(|data| {
+                        data.get_temp::<(String, Option<emojis::Group>)>(id)
+                            .unwrap_or_default()
+                    });
+                    let picked =
+                        crate::ui::chat::emoji_picker(app, ui, &mut query, &mut tab, false);
+                    ui.ctx().data_mut(|data| data.insert_temp(id, (query, tab)));
+                    // Re-adding one of ours is a no-op on both ends.
+                    if let Some(emoji) = picked {
+                        app.toggle_reaction(&message.channel_id, &message.id, emoji, true);
+                    }
+                });
             }
             if own {
                 let action = |delete| MessageAction {

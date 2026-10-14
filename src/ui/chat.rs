@@ -13,7 +13,7 @@ use egui::{
 
 use crate::app::{ChannelRef, VesktopApp};
 use crate::markup::{self, Style};
-use crate::model::{GuildEmoji, Message, User};
+use crate::model::{GuildEmoji, Message, ReactionEmoji, User};
 use crate::theme;
 use crate::ui::channel_sidebar::draw_search_icon;
 use crate::ui::image_viewer::ImageViewer;
@@ -328,7 +328,15 @@ pub fn paint(app: &mut VesktopApp, ui: &mut egui::Ui) {
                                     );
                                     let smile = smile.on_hover_text("Inserir emoji");
                                     picker_popup(&smile, "emoji_picker").show(|ui| {
-                                        emoji_picker(app, ui, &mut tools, smile.clicked());
+                                        if let Some(emoji) = emoji_picker(
+                                            app,
+                                            ui,
+                                            &mut tools.emoji_query,
+                                            &mut tools.emoji_tab,
+                                            smile.clicked(),
+                                        ) {
+                                            app.compose.push_str(&emoji_markup(&emoji));
+                                        }
                                     });
                                     let (gif_rect, gif) = ui
                                         .allocate_exact_size(Vec2::new(30.0, 24.0), Sense::click());
@@ -620,7 +628,9 @@ fn paint_message(
                     ui,
                     avatar,
                     app.presence.get(&message.author.id).map(String::as_str),
-                    app.presence_device.get(&message.author.id).map(String::as_str),
+                    app.presence_device
+                        .get(&message.author.id)
+                        .map(String::as_str),
                     theme::CHAT,
                 );
                 ui.add_space(GAP);
@@ -941,7 +951,46 @@ fn paint_content(
             bar_color,
         );
     }
+    reaction_chips(app, ui, message);
     crate::ui::threads::message_thread_summary(app, ui, message);
+}
+
+/// Discord's reaction chips under a message: emoji and count, tinted
+/// when we reacted; a click adds or removes ours.
+fn reaction_chips(app: &mut VesktopApp, ui: &mut egui::Ui, message: &Message) {
+    if message.reactions.is_empty() {
+        return;
+    }
+    let mut toggled = None;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::splat(4.0);
+        for reaction in &message.reactions {
+            let emoji = crate::ui::threads::emoji_image(
+                reaction.emoji.id.as_deref(),
+                reaction.emoji.name.as_deref(),
+            );
+            let name = match &emoji {
+                Some(_) => String::new(),
+                None => reaction.emoji.name.clone().unwrap_or_default(),
+            };
+            let response = crate::ui::threads::pill(
+                app,
+                ui,
+                format!("{name} {}", reaction.count).trim(),
+                FontId::proportional(13.0),
+                theme::TEXT,
+                emoji.as_deref(),
+                24.0,
+                |ui, response| crate::ui::threads::chip_fill(ui, response, reaction.me),
+            );
+            if response.clicked() {
+                toggled = Some((reaction.emoji.clone(), !reaction.me));
+            }
+        }
+    });
+    if let Some((emoji, add)) = toggled {
+        app.toggle_reaction(&message.channel_id, &message.id, emoji, add);
+    }
 }
 
 /// Discord hides the link text when the message is nothing but a GIF/image
@@ -1820,18 +1869,33 @@ enum PickerEmoji<'a> {
     Custom(&'a GuildEmoji),
 }
 
+/// What goes into the compose box for an emoji.
+fn emoji_markup(emoji: &ReactionEmoji) -> String {
+    let name = emoji.name.clone().unwrap_or_default();
+    match &emoji.id {
+        None => name,
+        Some(id) => format!("<{}:{name}:{id}>", if emoji.animated { "a" } else { "" }),
+    }
+}
+
 impl PickerEmoji<'_> {
-    /// What goes into the compose box.
-    fn markup(self) -> String {
+    fn emoji(self) -> ReactionEmoji {
         match self {
-            Self::Unicode(emoji) => emoji.as_str().to_string(),
-            Self::Custom(emoji) => format!(
-                "<{}:{}:{}>",
-                if emoji.animated { "a" } else { "" },
-                emoji.name,
-                emoji.id
-            ),
+            Self::Unicode(emoji) => ReactionEmoji {
+                id: None,
+                name: Some(emoji.as_str().to_string()),
+                animated: false,
+            },
+            Self::Custom(emoji) => ReactionEmoji {
+                id: Some(emoji.id.clone()),
+                name: Some(emoji.name.clone()),
+                animated: emoji.animated,
+            },
         }
+    }
+
+    fn markup(self) -> String {
+        emoji_markup(&self.emoji())
     }
 
     fn name(self) -> String {
@@ -1873,14 +1937,20 @@ fn picker_emojis<'a>(
 }
 
 /// Emoji picker: search, category tabs, Unicode emojis and the servers'
-/// custom ones (the current server first). A click inserts it into the
-/// compose box; Shift+click keeps the picker open, as in Discord.
-fn emoji_picker(app: &mut VesktopApp, ui: &mut egui::Ui, tools: &mut ChatTools, just_opened: bool) {
+/// custom ones (the current server first). A click returns the pick;
+/// Shift+click keeps the picker open, as in Discord.
+pub(crate) fn emoji_picker(
+    app: &mut VesktopApp,
+    ui: &mut egui::Ui,
+    query: &mut String,
+    tab_state: &mut Option<emojis::Group>,
+    just_opened: bool,
+) -> Option<ReactionEmoji> {
     const CELL: f32 = 36.0;
     const COLUMNS: usize = 9;
     ui.set_width(CELL * COLUMNS as f32);
     let search = ui.add(
-        TextEdit::singleline(&mut tools.emoji_query)
+        TextEdit::singleline(query)
             .hint_text("Encontre o emoji perfeito")
             .desired_width(f32::INFINITY),
     );
@@ -1895,7 +1965,7 @@ fn emoji_picker(app: &mut VesktopApp, ui: &mut egui::Ui, tools: &mut ChatTools, 
         .flatten()
         .filter(|emoji| emoji.available != Some(false))
         .collect();
-    let tab = match tools.emoji_tab {
+    let tab = match *tab_state {
         None if custom.is_empty() => Some(emojis::Group::SmileysAndEmotion),
         tab => tab,
     };
@@ -1905,22 +1975,22 @@ fn emoji_picker(app: &mut VesktopApp, ui: &mut egui::Ui, tools: &mut ChatTools, 
             if group.is_none() && custom.is_empty() {
                 continue;
             }
-            let selected = tools.emoji_query.trim().is_empty() && group == tab;
+            let selected = query.trim().is_empty() && group == tab;
             if ui
                 .selectable_label(selected, RichText::new(icon).size(18.0))
                 .on_hover_text(label)
                 .clicked()
             {
-                tools.emoji_tab = group;
-                tools.emoji_query.clear();
+                *tab_state = group;
+                query.clear();
             }
         }
     });
     ui.add_space(4.0);
-    let list = picker_emojis(&tools.emoji_query, tab, &custom);
+    let list = picker_emojis(query, tab, &custom);
     if list.is_empty() {
         ui.label(RichText::new("Nenhum emoji encontrado.").color(theme::MUTED));
-        return;
+        return None;
     }
     let mut picked = None;
     ScrollArea::vertical()
@@ -1965,12 +2035,11 @@ fn emoji_picker(app: &mut VesktopApp, ui: &mut egui::Ui, tools: &mut ChatTools, 
                 });
             }
         });
-    if let Some(emoji) = picked {
-        app.compose.push_str(&emoji.markup());
-        if !ui.input(|input| input.modifiers.shift) {
-            ui.close();
-        }
+    let picked = picked.map(PickerEmoji::emoji);
+    if picked.is_some() && !ui.input(|input| input.modifiers.shift) {
+        ui.close();
     }
+    picked
 }
 
 /// Smiley face for the compose box emoji button.
