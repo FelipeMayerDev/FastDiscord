@@ -91,13 +91,35 @@ pub fn initial_circle(ui: &mut egui::Ui, size: f32, label: &str, color: Color32)
     rect
 }
 
-/// Presence defaults to offline until the gateway reports otherwise.
-pub fn presence_dot(ui: &egui::Ui, avatar: Rect, status: Option<&str>, background: Color32) {
+/// Presence defaults to offline until the gateway reports otherwise; the
+/// dot becomes a tiny phone when the mobile client is the only one online.
+pub fn presence_dot(
+    ui: &egui::Ui,
+    avatar: Rect,
+    status: Option<&str>,
+    device: Option<&str>,
+    background: Color32,
+) {
     let radius = (avatar.width() * 0.17).clamp(3.0, 6.0);
     let center = avatar.max - Vec2::splat(radius);
+    let color = status_color(status.unwrap_or("offline"));
     ui.painter().circle_filled(center, radius + 1.5, background);
-    ui.painter()
-        .circle_filled(center, radius, status_color(status.unwrap_or("offline")));
+    if device == Some("mobile") {
+        let size = Vec2::new(radius * 1.4, radius * 1.9);
+        let phone = Rect::from_center_size(center, size);
+        let painter = ui.painter();
+        painter.rect_filled(phone, radius * 0.4, color);
+        // The home indicator, in the ring's color so it reads on the phone.
+        painter.line_segment(
+            [
+                pos2(center.x - size.x * 0.28, phone.bottom() - size.y * 0.14),
+                pos2(center.x + size.x * 0.28, phone.bottom() - size.y * 0.14),
+            ],
+            egui::Stroke::new(1.0, background),
+        );
+    } else {
+        ui.painter().circle_filled(center, radius, color);
+    }
 }
 
 pub fn status_color(status: &str) -> Color32 {

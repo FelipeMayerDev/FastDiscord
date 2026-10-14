@@ -181,6 +181,9 @@ pub struct VesktopApp {
     pub(crate) typing: HashMap<String, HashMap<String, std::time::Instant>>,
     /// Latest presence status per user id ("online", "idle", "dnd", …).
     pub(crate) presence: HashMap<String, String>,
+    /// The device behind each user's presence ("mobile" or "desktop"):
+    /// the status dot becomes a phone for mobile-only users.
+    pub(crate) presence_device: HashMap<String, String>,
     /// When the last Disconnected event landed, to count the retry down.
     pub(crate) disconnected_at: Option<std::time::Instant>,
     /// Who is in which voice channel: guild → user → state.
@@ -317,6 +320,7 @@ impl VesktopApp {
             last_seen: HashMap::new(),
             typing: HashMap::new(),
             presence: HashMap::new(),
+            presence_device: HashMap::new(),
             voice_states: HashMap::new(),
             voice: VoiceConn::Disconnected,
             voice_connected_at: None,
@@ -660,6 +664,7 @@ impl VesktopApp {
         self.last_seen.clear();
         self.typing.clear();
         self.presence.clear();
+        self.presence_device.clear();
         self.selected_guild = None;
         self.selected_channel = None;
         self.user_cache.clear();
@@ -2039,8 +2044,20 @@ impl VesktopApp {
                     .or_default()
                     .insert(user_id, std::time::Instant::now());
             }
-            UiEvent::PresenceUpdate { user_id, status } => {
-                self.presence.insert(user_id, status);
+            UiEvent::PresenceUpdate {
+                user_id,
+                status,
+                device,
+            } => {
+                self.presence.insert(user_id.clone(), status);
+                match device {
+                    Some(device) => {
+                        self.presence_device.insert(user_id, device);
+                    }
+                    None => {
+                        self.presence_device.remove(&user_id);
+                    }
+                }
             }
             UiEvent::SendFailed { channel_id, error } => {
                 self.attachment_sending = false;

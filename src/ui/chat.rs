@@ -140,6 +140,7 @@ pub fn paint(app: &mut VesktopApp, ui: &mut egui::Ui) {
                         ui,
                         avatar_rect,
                         app.presence.get(&partner.id).map(String::as_str),
+                        app.presence_device.get(&partner.id).map(String::as_str),
                         theme::CHAT,
                     );
                 }
@@ -617,6 +618,7 @@ fn paint_message(
                     ui,
                     avatar,
                     app.presence.get(&message.author.id).map(String::as_str),
+                    app.presence_device.get(&message.author.id).map(String::as_str),
                     theme::CHAT,
                 );
                 ui.add_space(GAP);

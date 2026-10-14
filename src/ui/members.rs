@@ -259,7 +259,13 @@ fn member_row(
         }
     }
     if !offline {
-        crate::ui::presence_dot(ui, avatar, status.as_deref(), theme::SIDEBAR);
+        crate::ui::presence_dot(
+            ui,
+            avatar,
+            status.as_deref(),
+            app.presence_device.get(&user.id).map(String::as_str),
+            theme::SIDEBAR,
+        );
     }
     let text_left = avatar.right() + 12.0;
     ui.painter()

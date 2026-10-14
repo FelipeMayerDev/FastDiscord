@@ -297,7 +297,13 @@ fn user_panel(app: &mut VesktopApp, ui: &mut egui::Ui) {
                         .circle_filled(avatar_rect.center(), 16.0, util::name_color(&name));
                 }
             }
-            crate::ui::presence_dot(ui, avatar_rect, Some(&app.settings.status), theme::SIDEBAR);
+            crate::ui::presence_dot(
+                ui,
+                avatar_rect,
+                Some(&app.settings.status),
+                Some("desktop"),
+                theme::SIDEBAR,
+            );
             ui.add_space(8.0);
 
             // Name over the status line: "Em voz" while connected, else the
@@ -1136,6 +1142,7 @@ fn voice_member_row(app: &mut VesktopApp, ui: &mut egui::Ui, guild_id: &str, mem
         &content,
         avatar,
         app.presence.get(&member.user_id).map(String::as_str),
+        app.presence_device.get(&member.user_id).map(String::as_str),
         theme::RAIL,
     );
     if speaking {
@@ -1490,6 +1497,7 @@ fn row(
                 &content,
                 avatar,
                 app.presence.get(&user.id).map(String::as_str),
+                app.presence_device.get(&user.id).map(String::as_str),
                 theme::RAIL.blend(bg),
             );
         }

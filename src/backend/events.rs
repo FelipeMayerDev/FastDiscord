@@ -256,6 +256,10 @@ pub enum UiEvent {
     PresenceUpdate {
         user_id: String,
         status: String,
+        /// The platform behind the presence, when any client is online:
+        /// "mobile" when the phone is the only client, "desktop" for
+        /// web/desktop. The status dot becomes a phone for the former.
+        device: Option<String>,
     },
     /// A guild's full voice roster, from READY or GUILD_CREATE (empty on
     /// GUILD_DELETE), replacing whatever the UI had.

@@ -246,9 +246,28 @@ fn seed_presences(value: &Value, event_tx: &EventTx) {
             .and_then(Value::as_str),
         value.get("status").and_then(Value::as_str),
     ) {
+        // The status dot reflects the device: a phone when the mobile
+        // client is the only one online, the usual dot for web/desktop.
+        let client_status = value.get("client_status");
+        let mobile = client_status
+            .and_then(|cs| cs.get("mobile"))
+            .and_then(Value::as_str)
+            .is_some();
+        let on_computer = client_status
+            .is_some_and(|cs| {
+                cs.get("desktop").is_some() || cs.get("web").is_some()
+            });
+        let device = if mobile && !on_computer {
+            Some("mobile".to_string())
+        } else if on_computer {
+            Some("desktop".to_string())
+        } else {
+            None
+        };
         event_tx.send(UiEvent::PresenceUpdate {
             user_id: user_id.to_owned(),
             status: status.to_owned(),
+            device,
         });
     }
 }
@@ -458,6 +477,7 @@ fn dispatch(value: Value, event_tx: &EventTx, voice_tx: &UnboundedSender<Wire>, 
                         event_tx.send(UiEvent::PresenceUpdate {
                             user_id: user_id.to_owned(),
                             status: "offline".into(),
+                            device: None,
                         });
                     }
                 }
@@ -1224,7 +1244,7 @@ mod tests {
             "",
         );
         let mut statuses = std::collections::HashMap::new();
-        while let Ok(UiEvent::PresenceUpdate { user_id, status }) = rx.try_recv() {
+        while let Ok(UiEvent::PresenceUpdate { user_id, status, .. }) = rx.try_recv() {
             statuses.insert(user_id, status);
         }
         assert_eq!(statuses.get("1").map(String::as_str), Some("online"));
@@ -1245,12 +1265,41 @@ mod tests {
             &events,
         );
         assert!(
-            matches!(rx.try_recv().unwrap(), super::UiEvent::PresenceUpdate { user_id, status } if user_id == "1" && status == "online")
+            matches!(rx.try_recv().unwrap(), super::UiEvent::PresenceUpdate { user_id, status, .. } if user_id == "1" && status == "online")
         );
         assert!(
-            matches!(rx.try_recv().unwrap(), super::UiEvent::PresenceUpdate { user_id, status } if user_id == "2" && status == "idle")
+            matches!(rx.try_recv().unwrap(), super::UiEvent::PresenceUpdate { user_id, status, .. } if user_id == "2" && status == "idle")
         );
         assert!(rx.try_recv().is_err());
+    }
+
+    /// The status dot reflects the device: a phone only when the mobile
+    /// client is the sole one online; web/desktop keep the dot.
+    #[test]
+    fn presence_picks_the_device_behind_the_status() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let events = super::EventTx::new(tx, egui::Context::default());
+        super::seed_presences(
+            &serde_json::json!([
+                {"user": {"id": "1"}, "status": "online", "client_status": {"mobile": "online"}},
+                {"user": {"id": "2"}, "status": "online", "client_status": {"mobile": "online", "desktop": "idle"}},
+                {"user": {"id": "3"}, "status": "online", "client_status": {"web": "online"}},
+                {"user": {"id": "4"}, "status": "offline"},
+                {"user": {"id": "5"}, "status": "online"}
+            ]),
+            &events,
+        );
+        let device = |rx: &mut tokio::sync::mpsc::UnboundedReceiver<UiEvent>| {
+            match rx.try_recv().unwrap() {
+                UiEvent::PresenceUpdate { user_id, device, .. } => (user_id, device),
+                _ => panic!("expected a presence update"),
+            }
+        };
+        assert_eq!(device(&mut rx), ("1".into(), Some("mobile".into())));
+        assert_eq!(device(&mut rx), ("2".into(), Some("desktop".into())));
+        assert_eq!(device(&mut rx), ("3".into(), Some("desktop".into())));
+        assert_eq!(device(&mut rx), ("4".into(), None));
+        assert_eq!(device(&mut rx), ("5".into(), None));
     }
 
     use super::*;

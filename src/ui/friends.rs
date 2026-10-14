@@ -92,6 +92,7 @@ pub fn paint(app: &mut VesktopApp, ui: &mut egui::Ui) {
                     ui,
                     avatar,
                     app.presence.get(&relation.user.id).map(String::as_str),
+                    app.presence_device.get(&relation.user.id).map(String::as_str),
                     theme::CHAT,
                 );
                 ui.vertical(|ui| {
