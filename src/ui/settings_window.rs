@@ -297,6 +297,37 @@ fn behavior_settings(app: &mut VesktopApp, ui: &mut egui::Ui) {
         app.settings.check_for_updates = updates;
         app.settings.save();
     }
+    ui.add_space(8.0);
+    ui.separator();
+    ui.add_space(8.0);
+    // CustomIdle: the Vencord plugin, natively.
+    let mut idle_on = app.settings.idle_timeout_minutes > 0;
+    if ui
+        .add(egui::Checkbox::new(
+            &mut idle_on,
+            "Aparecer ocioso após inatividade (CustomIdle)",
+        ))
+        .changed()
+    {
+        app.settings.idle_timeout_minutes = if idle_on { 10 } else { 0 };
+        app.settings.save();
+    }
+    if idle_on {
+        let mut minutes = app.settings.idle_timeout_minutes.max(1);
+        if ui
+            .add(
+                egui::DragValue::new(&mut minutes)
+                    .range(1..=120)
+                    .suffix(" min")
+                    .custom_formatter(|value, _| format!("{value}")),
+            )
+            .changed()
+        {
+            app.settings.idle_timeout_minutes = minutes;
+            app.settings.save();
+        }
+        ui.weak("Sem input por esse tempo, seu status vira \"Ausente\" até você voltar. \"Não perturbe\" e \"Invisível\" são preservados.");
+    }
 }
 
 /// Device pickers, input sensitivity and noise suppression. Device changes

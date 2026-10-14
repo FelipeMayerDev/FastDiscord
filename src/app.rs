@@ -211,6 +211,11 @@ pub struct VesktopApp {
     pub(crate) stream: Option<GoLive>,
     /// The stream we watch (op 20), with its decoded frames.
     pub(crate) watch: Option<GoLive>,
+    /// CustomIdle: set once we auto-idled after the configured inactivity,
+    /// so activity restores the user's chosen status exactly once.
+    auto_idle: bool,
+    /// CustomIdle: the last instant of user input.
+    last_input: Instant,
     pub(crate) watch_texture: Option<egui::TextureHandle>,
     /// Our WHIP publish when FockyTV is the share backend.
     pub(crate) fockytv: Option<crate::plugins::fockytv::Publisher>,
@@ -335,6 +340,8 @@ impl VesktopApp {
             screen_texture: None,
             stream: None,
             watch: None,
+            auto_idle: false,
+            last_input: Instant::now(),
             watch_texture: None,
             fockytv: None,
             fockytv_live: HashMap::new(),
@@ -1456,7 +1463,8 @@ impl VesktopApp {
     }
 
     /// Own status from the user panel or the tray: kept in settings.json,
-    /// sent over the gateway and saved in the account settings.
+    /// sent over the gateway and saved in the account settings. An explicit
+    /// choice cancels the CustomIdle auto-idle.
     pub(crate) fn set_own_status(
         &mut self,
         status: &str,
@@ -1464,6 +1472,8 @@ impl VesktopApp {
     ) {
         self.settings.status = status.to_owned();
         self.settings.custom_status = custom_status;
+        self.auto_idle = false;
+        self.last_input = Instant::now();
         self.settings.save();
         self.send_presence(true);
     }
@@ -1480,6 +1490,49 @@ impl VesktopApp {
             custom_status: self.settings.custom_status.clone(),
             save,
         });
+    }
+
+    /// CustomIdle, the Vencord plugin natively: after
+    /// `settings.idle_timeout_minutes` without input, appear idle; any
+    /// input restores the chosen status. Never overrides an explicit
+    /// "Não perturbe" or "Invisível".
+    fn poll_custom_idle(&mut self, ctx: &egui::Context) {
+        let timeout = u64::from(self.settings.idle_timeout_minutes);
+        if timeout == 0 {
+            if self.auto_idle {
+                // The feature was just turned off: restore the status.
+                self.auto_idle = false;
+                self.send_presence(false);
+            }
+            self.last_input = Instant::now();
+            return;
+        }
+        let active = ctx.input(|input| !input.events.is_empty());
+        if active {
+            self.last_input = Instant::now();
+            if self.auto_idle {
+                self.auto_idle = false;
+                self.send_presence(false);
+            }
+        } else if !self.auto_idle
+            && !matches!(self.settings.status.as_str(), "dnd" | "invisible")
+            && self.last_input.elapsed() >= Duration::from_secs(timeout * 60)
+        {
+            self.auto_idle = true;
+            if let Some(me) = &self.me {
+                self.presence.insert(me.id.clone(), "idle".into());
+            }
+            self.send(Command::SetPresence {
+                status: "idle".into(),
+                custom_status: self.settings.custom_status.clone(),
+                save: false,
+            });
+        }
+        // Wake exactly at the deadline; egui keeps the earliest repaint
+        // request of the frame.
+        let remaining = (self.last_input + Duration::from_secs(timeout * 60))
+            .saturating_duration_since(Instant::now());
+        ctx.request_repaint_after(remaining.max(Duration::from_millis(250)));
     }
 
     /// Voice member menu volume: persists and feeds the mixer.
@@ -2553,6 +2606,7 @@ impl VesktopApp {
 
 impl eframe::App for VesktopApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_custom_idle(ctx);
         if ui::plugins::poll(self, ctx) {
             self.quitting = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -3191,6 +3245,57 @@ mod tests {
         assert!(app.unread.get("10").is_none());
         assert!(app.mentions.get("10").is_none());
         assert_eq!(app.selected_guild.as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn custom_idle_appears_idle_after_silence_and_restores_on_activity() {
+        let (_rt, mut app, mut commands, _) = test_app();
+        let ctx = egui::Context::default();
+        app.me = Some(
+            serde_json::from_value(serde_json::json!({ "id": "9", "username": "member" }))
+                .unwrap(),
+        );
+        app.settings.idle_timeout_minutes = 10;
+        let idle_frame = |app: &mut VesktopApp, ctx: &egui::Context| {
+            ctx.run_ui(egui::RawInput::default(), |_| {})
+                .textures_delta
+                .clear();
+            app.poll_custom_idle(ctx);
+        };
+
+        // Long silence: we auto-idle without saving the status.
+        app.last_input = Instant::now() - Duration::from_secs(11 * 60);
+        idle_frame(&mut app, &ctx);
+        assert!(app.auto_idle);
+        assert_eq!(app.presence.get("9").map(String::as_str), Some("idle"));
+        assert!(
+            matches!(commands.try_recv().unwrap(), Command::SetPresence { status, save: false, .. } if status == "idle")
+        );
+
+        // Any input restores the chosen status exactly once.
+        ctx.run_ui(
+            egui::RawInput {
+                events: vec![egui::Event::PointerMoved(egui::pos2(4.0, 4.0))],
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .textures_delta
+        .clear();
+        app.poll_custom_idle(&ctx);
+        assert!(!app.auto_idle);
+        assert_eq!(app.presence.get("9").map(String::as_str), Some("online"));
+        assert!(
+            matches!(commands.try_recv().unwrap(), Command::SetPresence { status, save: false, .. } if status == "online")
+        );
+
+        // An explicit "Não perturbe" is never overridden.
+        app.set_own_status("dnd", Default::default());
+        let _ = commands.try_recv();
+        app.last_input = Instant::now() - Duration::from_secs(11 * 60);
+        idle_frame(&mut app, &ctx);
+        assert!(!app.auto_idle);
+        assert!(commands.try_recv().is_err());
     }
 
     #[test]

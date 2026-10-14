@@ -84,6 +84,8 @@ pub struct Settings {
     pub user_volumes: HashMap<String, u8>,
     /// Users muted locally (only for us), by id.
     pub muted_users: HashSet<String>,
+    /// CustomIdle: minutes of no input before appearing idle (0 = off).
+    pub idle_timeout_minutes: u16,
     pub plugins: crate::plugins::Settings,
     /// Webcam, by the label `backend::camera::devices` gives it (`None` =
     /// the first camera).
@@ -120,6 +122,7 @@ impl Default for Settings {
             echo_cancellation: false,
             user_volumes: HashMap::new(),
             muted_users: HashSet::new(),
+            idle_timeout_minutes: 0,
             plugins: Default::default(),
             camera_device: None,
             dj_volume: 50,
