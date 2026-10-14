@@ -158,6 +158,19 @@ pub fn clan_badge_url(guild_id: &str, badge: &str) -> String {
     format!("https://cdn.discordapp.com/clan-badges/{guild_id}/{badge}.png?size=16")
 }
 
+/// A user's profile banner, for the DM profile card.
+pub fn user_banner_url(user_id: &str, hash: &str) -> String {
+    format!("https://cdn.discordapp.com/banners/{user_id}/{hash}.png?size=600")
+}
+
+/// When the Discord account was created, from the user id snowflake —
+/// the "Membro do Discord desde" of the profile card.
+pub fn account_created(iso_ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(iso_ms)
+        .map(|time| time.with_timezone(&Local).format("%d/%m/%Y").to_string())
+        .unwrap_or_default()
+}
+
 /// The picture an embed shows inline. Tenor and Giphy `gifv` embeds are
 /// mp4 videos; their animated rendition lives next to the video, so swap
 /// the URL (still thumbnail when the pattern doesn't match).

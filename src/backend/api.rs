@@ -607,6 +607,17 @@ impl Api {
         Ok(self.patch("/users/@me", body).await?.json().await?)
     }
 
+    /// Another user's profile with mutual friends count and shared guilds
+    /// (issue #49): GET /users/{id}/profile.
+    pub async fn user_profile(&self, user_id: &str) -> ApiResult<crate::model::UserProfile> {
+        let query = [
+            ("with_mutual_guilds", "true".to_string()),
+            ("with_mutual_friends_count", "true".to_string()),
+        ];
+        self.get_json(&format!("/users/{user_id}/profile"), &query)
+            .await
+    }
+
     pub async fn modify_profile(&self, pronouns: &str, bio: &str) -> ApiResult<()> {
         let body = serde_json::json!({ "pronouns": pronouns, "bio": bio });
         self.patch("/users/@me/profile", &body).await?;

@@ -78,11 +78,38 @@ pub fn panel(app: &mut VesktopApp, ui: &mut egui::Ui, channel_id: &str) {
     if !shown(ui.ctx()) {
         return;
     }
-    let (rows, more) = match app.channel_index.get(channel_id).cloned() {
-        Some(ChannelRef::Guild(guild_id)) => guild_rows(app, &guild_id, channel_id),
-        Some(ChannelRef::Dm) => (dm_rows(app, channel_id), None),
-        None => return,
-    };
+    match app.channel_index.get(channel_id).cloned() {
+        Some(ChannelRef::Guild(guild_id)) => {
+            let (rows, more) = guild_rows(app, &guild_id, channel_id);
+            rows_panel(app, ui, rows, more, channel_id);
+        }
+        Some(ChannelRef::Dm) => {
+            // Issue #49: a 1:1 DM shows Discord's profile card in place of
+            // the member list; group DMs keep their recipients.
+            let partner = app
+                .dm_channels
+                .iter()
+                .find(|channel| channel.id == channel_id)
+                .and_then(|channel| channel.dm_partner().cloned());
+            match partner {
+                Some(user) => profile_card(app, ui, &user),
+                None => {
+                    let rows = dm_rows(app, channel_id);
+                    rows_panel(app, ui, rows, None, channel_id);
+                }
+            }
+        }
+        None => {}
+    }
+}
+
+fn rows_panel(
+    app: &mut VesktopApp,
+    ui: &mut egui::Ui,
+    rows: Vec<Row>,
+    more: Option<(String, usize)>,
+    channel_id: &str,
+) {
     let me = app.me.as_ref().map(|me| me.id.clone());
     let mut want_more = false;
     egui::Panel::right("members")
@@ -133,7 +160,7 @@ pub fn panel(app: &mut VesktopApp, ui: &mut egui::Ui, channel_id: &str) {
         });
     // Near the end of what's loaded: subscribe to the next 100 rows.
     if let (true, Some((guild_id, ranges))) = (want_more, more) {
-        subscribe(app, guild_id, channel_id, ranges + 1);
+        subscribe(app, guild_id, channel_id, ranges);
     }
 }
 
@@ -321,4 +348,250 @@ fn member_row(
     if open_dm {
         app.open_dm(user.id.clone());
     }
+}
+
+/// Issue #49: Discord's DM profile card in the right sidebar — banner,
+/// avatar, add-friend button, about, member since and mutuals.
+fn profile_card(app: &mut VesktopApp, ui: &mut egui::Ui, user: &User) {
+    app.request_dm_profile(&user.id);
+    let profile = app.dm_profiles.get(&user.id).cloned().flatten();
+    let meta = profile
+        .as_ref()
+        .and_then(|profile| profile.user_profile.clone())
+        .unwrap_or_default();
+    let me = app.me.as_ref().map(|me| me.id.clone());
+    let friend = app
+        .relationships
+        .iter()
+        .any(|relation| relation.id == user.id && relation.kind == 1);
+
+    egui::Panel::right("members")
+        .exact_size(WIDTH)
+        .resizable(false)
+        .frame(egui::Frame::new().fill(theme::SIDEBAR))
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            let scroll = egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+                let width = ui.available_width();
+                // Banner: the image when there is one, the accent color
+                // behind it otherwise, Discord's blurple as a last resort.
+                let (banner, _) =
+                    ui.allocate_exact_size(Vec2::new(width, 100.0), Sense::hover());
+                let accent = meta.accent_color.map(|rgb| {
+                    Color32::from_rgb(
+                        ((rgb >> 16) & 0xFF) as u8,
+                        ((rgb >> 8) & 0xFF) as u8,
+                        (rgb & 0xFF) as u8,
+                    )
+                });
+                let banner_url = meta
+                    .banner
+                    .as_deref()
+                    .map(|hash| util::user_banner_url(&user.id, hash));
+                match banner_url.and_then(|url| app.images_large.get(ui.ctx(), &app.handle, &url))
+                {
+                    Some(texture) => {
+                        Image::new((texture.id(), banner.size())).paint_at(ui, banner);
+                    }
+                    None => {
+                        ui.painter()
+                            .rect_filled(banner, 0.0, accent.unwrap_or(theme::BLURPLE));
+                    }
+                }
+                // The avatar rides the banner's bottom edge, with a ring in
+                // the sidebar color and the presence dot.
+                let avatar = egui::Rect::from_min_size(
+                    pos2(banner.left() + 16.0, banner.bottom() - 36.0),
+                    Vec2::splat(72.0),
+                );
+                ui.painter()
+                    .circle_filled(avatar.center(), avatar.width() / 2.0 + 3.0, theme::SIDEBAR);
+                match app
+                    .images
+                    .get(ui.ctx(), &app.handle, &util::user_avatar_url(user))
+                {
+                    Some(texture) => {
+                        Image::new((texture.id(), avatar.size()))
+                            .corner_radius(egui::CornerRadius::same(36))
+                            .paint_at(ui, avatar);
+                    }
+                    None => {
+                        ui.painter().circle_filled(
+                            avatar.center(),
+                            avatar.width() / 2.0,
+                            util::name_color(user.display_name()),
+                        );
+                        ui.painter().text(
+                            avatar.center(),
+                            Align2::CENTER_CENTER,
+                            user.display_name()
+                                .chars()
+                                .next()
+                                .map(|c| c.to_uppercase().to_string())
+                                .unwrap_or_else(|| "?".into()),
+                            FontId::proportional(28.0),
+                            Color32::WHITE,
+                        );
+                    }
+                }
+                crate::ui::presence_dot(
+                    ui,
+                    avatar,
+                    app.presence.get(&user.id).map(String::as_str),
+                    app.presence_device.get(&user.id).map(String::as_str),
+                    theme::SIDEBAR,
+                );
+                ui.add_space(40.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(16.0);
+                    ui.label(
+                        RichText::new(user.display_name())
+                            .family(theme::bold())
+                            .size(20.0)
+                            .color(theme::TEXT),
+                    );
+                    if let Some(clan) = user.clan_tag() {
+                        crate::ui::clan_tag(app, ui, clan);
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.add_space(16.0);
+                    ui.label(
+                        RichText::new(format!("@{}", user.username))
+                            .size(12.5)
+                            .color(theme::MUTED),
+                    );
+                });
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(10.0);
+                ui.add_space(6.0);
+                ui.set_clip_rect(ui.max_rect());
+                if me.as_deref() != Some(user.id.as_str()) && !friend {
+                    ui.horizontal(|ui| {
+                        ui.add_space(16.0);
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("Adicionar amigo").color(theme::WHITE),
+                                )
+                                .fill(theme::BLURPLE),
+                            )
+                            .clicked()
+                        {
+                            app.send(crate::backend::Command::RequestFriend {
+                                username: user.username.clone(),
+                            });
+                        }
+                    });
+                    ui.add_space(6.0);
+                }
+                section(ui, "SOBRE MIM");
+                match meta.bio.as_deref().filter(|bio| !bio.trim().is_empty()) {
+                    Some(bio) => {
+                        ui.horizontal(|ui| {
+                            ui.add_space(16.0);
+                            ui.add(
+                                egui::Label::new(RichText::new(bio).size(13.0).color(theme::TEXT))
+                                    .wrap(),
+                            );
+                        });
+                    }
+                    None if profile.is_some() => {
+                        ui.horizontal(|ui| {
+                            ui.add_space(16.0);
+                            ui.label(
+                                RichText::new("Sem sobre mim.")
+                                    .size(13.0)
+                                    .color(theme::MUTED),
+                            );
+                        });
+                    }
+                    None => {}
+                }
+                ui.add_space(10.0);
+                section(ui, "MEMBRO DO DISCORD DESDE");
+                ui.horizontal(|ui| {
+                    ui.add_space(16.0);
+                    let joined = util::snowflake_ms(&user.id)
+                        .map(util::account_created)
+                        .unwrap_or_else(|| "—".into());
+                    ui.label(RichText::new(joined).size(13.0).color(theme::TEXT));
+                });
+                let Some(profile) = profile else {
+                    ui.add_space(10.0);
+                    if !app.dm_profiles.contains_key(&user.id) {
+                        ui.horizontal(|ui| {
+                            ui.add_space(16.0);
+                            ui.label(
+                                RichText::new("Carregando perfil…")
+                                    .size(12.0)
+                                    .color(theme::MUTED),
+                            );
+                        });
+                    }
+                    return;
+                };
+                ui.add_space(10.0);
+                if profile.mutual_friends_count.is_some_and(|count| count > 0) {
+                    section(
+                        ui,
+                        &format!("AMIGOS EM COMUM — {}", profile.mutual_friends_count.unwrap()),
+                    );
+                }
+                let shared: Vec<_> = profile
+                    .mutual_guilds
+                    .iter()
+                    .filter_map(|mutual| {
+                        app.guilds
+                            .iter()
+                            .find(|guild| guild.id == mutual.id)
+                            .cloned()
+                    })
+                    .collect();
+                if !shared.is_empty() {
+                    section(
+                        ui,
+                        &format!("SERVIDORES EM COMUM — {}", shared.len()),
+                    );
+                    ui.horizontal(|ui| {
+                        ui.add_space(16.0);
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        for (index, guild) in shared.iter().enumerate().take(12) {
+                            let texture = util::guild_icon_url(guild)
+                                .and_then(|url| app.images.get(ui.ctx(), &app.handle, &url));
+                            let icon = crate::ui::round_avatar(
+                                ui,
+                                texture.as_ref(),
+                                28.0,
+                                &guild.name,
+                                theme::BLURPLE,
+                            );
+                            ui.interact(
+                                icon,
+                                ui.id().with(("mutual_guild", index)),
+                                Sense::hover(),
+                            )
+                            .on_hover_text(&guild.name);
+                        }
+                    });
+                }
+                ui.add_space(12.0);
+            });
+            let _ = scroll;
+        });
+}
+
+/// A small muted section header of the profile card.
+fn section(ui: &mut egui::Ui, label: &str) {
+    ui.horizontal(|ui| {
+        ui.add_space(16.0);
+        ui.label(
+            RichText::new(label)
+                .size(11.0)
+                .family(theme::bold())
+                .color(theme::MUTED),
+        );
+    });
+    ui.add_space(3.0);
 }

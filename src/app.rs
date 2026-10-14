@@ -249,6 +249,10 @@ pub struct VesktopApp {
     /// Channels and threads opened this session: visiting one clears its
     /// "NOVO" tag, the way it disappears in Discord.
     pub(crate) visited_channels: HashSet<String>,
+    /// DM partners' profiles for the sidebar card (issue #49), by user id;
+    /// `None` = the fetch failed and the card shows its placeholder.
+    pub(crate) dm_profiles: HashMap<String, Option<crate::model::UserProfile>>,
+    dm_profiles_pending: HashSet<String>,
     pub(crate) images: ImageCache,
     /// Larger cache for inline image attachments.
     pub(crate) images_large: ImageCache,
@@ -374,6 +378,8 @@ impl VesktopApp {
             own_roles_requested: HashSet::new(),
             guild_joined_at: HashMap::new(),
             visited_channels: HashSet::new(),
+            dm_profiles: HashMap::new(),
+            dm_profiles_pending: HashSet::new(),
             images: ImageCache::new(128),
             images_large: ImageCache::new(800),
             viewer: None,
@@ -1015,6 +1021,19 @@ impl VesktopApp {
             return false;
         };
         util::snowflake_ms(channel_id).is_some_and(|created| created > *joined_at)
+    }
+
+    /// Issue #49: fetch a DM partner's profile once. The event handler
+    /// caches failures as `None`, so a broken fetch doesn't loop.
+    pub(crate) fn request_dm_profile(&mut self, user_id: &str) {
+        if self.dm_profiles.contains_key(user_id)
+            || !self.dm_profiles_pending.insert(user_id.to_string())
+        {
+            return;
+        }
+        self.send(Command::LoadDmProfile {
+            user_id: user_id.to_string(),
+        });
     }
 
     fn request_channel_presences(&self, channel_id: &str) {
@@ -2723,6 +2742,10 @@ impl VesktopApp {
             } => {
                 self.guild_joined_at.insert(guild_id, joined_at_ms);
             }
+            UiEvent::DmProfileLoaded { user_id, profile } => {
+                self.dm_profiles_pending.remove(&user_id);
+                self.dm_profiles.insert(user_id, profile);
+            }
             UiEvent::MemberListUpdate { update } => {
                 for member in update.members() {
                     let status = member.presence.as_ref().map(|p| p.status.clone());
@@ -4028,5 +4051,105 @@ mod tests {
         );
         app.prefetch_guild_channels("g");
         assert!(commands.try_recv().is_err());
+    }
+
+    /// Issue #49: the DM profile card's data parses straight from the
+    /// profile endpoint and the request dedupes across frames.
+    #[test]
+    fn dm_profile_parses_and_requests_dedupe() {
+        let (_rt, mut app, mut commands, _) = test_app();
+        app.request_dm_profile("42");
+        app.request_dm_profile("42");
+        assert!(matches!(
+            commands.try_recv().unwrap(),
+            Command::LoadDmProfile { ref user_id } if user_id == "42"
+        ));
+        assert!(commands.try_recv().is_err());
+        let profile: crate::model::UserProfile = serde_json::from_value(serde_json::json!({
+            "user": { "id": "42", "username": "amigo", "global_name": "Amigo" },
+            "user_profile": { "bio": "oi", "accent_color": 5_793_266 },
+            "mutual_guilds": [{ "id": "g" }, { "id": "g2" }],
+            "mutual_friends_count": 7
+        }))
+        .unwrap();
+        assert_eq!(profile.user.display_name(), "Amigo");
+        assert_eq!(profile.mutual_guilds.len(), 2);
+        assert_eq!(profile.mutual_friends_count, Some(7));
+        assert_eq!(
+            profile.user_profile.as_ref().unwrap().bio.as_deref(),
+            Some("oi")
+        );
+        app.handle_event(
+            UiEvent::DmProfileLoaded {
+                user_id: "42".into(),
+                profile: Some(profile),
+            },
+            true,
+        );
+        // Cached now: no refetch.
+        app.request_dm_profile("42");
+        assert!(commands.try_recv().is_err());
+    }
+
+    /// Issue #49: the card replaces the DM member rows and stays inside
+    /// the sidebar's width, loaded profile or not.
+    #[test]
+    fn dm_profile_card_replaces_member_rows() {
+        let (_rt, mut app, _, _) = test_app();
+        app.channel_index
+            .insert("dm".into(), ChannelRef::Dm);
+        app.dm_channels.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "dm", "type": 1,
+                "recipients": [{ "id": "42", "username": "amigo", "global_name": "Amigo" }]
+            }))
+            .unwrap(),
+        );
+        app.dm_profiles.insert(
+            "42".into(),
+            Some(serde_json::from_value(serde_json::json!({
+                "user": { "id": "42", "username": "amigo", "global_name": "Amigo" },
+                "user_profile": { "bio": "oi" },
+                "mutual_guilds": [{ "id": "g" }],
+                "mutual_friends_count": 3
+            }))
+            .unwrap()),
+        );
+        app.guilds.push(Guild {
+            id: "g".into(),
+            name: "Servidor".into(),
+            icon: None,
+        });
+        let ctx = Context::default();
+        theme::install_fonts(&ctx);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0));
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |root| {
+                root.horizontal(|ui| {
+                    ui.allocate_space(egui::vec2(280.0, 800.0));
+                    ui::members::panel(&mut app, ui, "dm");
+                });
+            },
+        );
+        output.textures_delta.clear();
+        // A failure also renders (placeholder card, no profile sections).
+        app.dm_profiles.insert("42".into(), None);
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |root| {
+                root.horizontal(|ui| {
+                    ui.allocate_space(egui::vec2(280.0, 800.0));
+                    ui::members::panel(&mut app, ui, "dm");
+                });
+            },
+        );
+        output.textures_delta.clear();
     }
 }

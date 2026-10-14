@@ -163,6 +163,10 @@ pub enum Command {
         guild_id: String,
         user_id: String,
     },
+    /// Another user's profile with mutuals, for the DM profile card.
+    LoadDmProfile {
+        user_id: String,
+    },
     /// The thread browser or a forum opened: its archived public threads.
     LoadThreads {
         channel_id: String,
@@ -478,6 +482,12 @@ pub enum UiEvent {
     GuildJoinedAt {
         guild_id: String,
         joined_at_ms: i64,
+    },
+    /// A DM partner's profile (`LoadDmProfile`); `None` when the fetch
+    /// failed, so the card shows its placeholder instead of retry-looping.
+    DmProfileLoaded {
+        user_id: String,
+        profile: Option<crate::model::UserProfile>,
     },
     MemberListUpdate {
         update: crate::member_list::MemberListUpdate,

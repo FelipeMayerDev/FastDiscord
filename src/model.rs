@@ -467,6 +467,41 @@ pub struct Profile {
     pub nick: String,
 }
 
+/// `GET /users/{id}/profile` for another user: the DM profile card
+/// (issue #49).
+#[derive(Clone, Debug, Deserialize)]
+pub struct UserProfile {
+    pub user: User,
+    #[serde(default)]
+    pub user_profile: Option<UserProfileMeta>,
+    /// Guilds we share with this user, ids only (`with_mutual_guilds`).
+    #[serde(default)]
+    pub mutual_guilds: Vec<MutualGuild>,
+    /// How many friends we share (`with_mutual_friends_count`).
+    #[serde(default)]
+    pub mutual_friends_count: Option<u64>,
+}
+
+/// The profile section of `/users/{id}/profile`: about me, banner.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct UserProfileMeta {
+    #[serde(default)]
+    pub bio: Option<String>,
+    #[serde(default)]
+    pub pronouns: Option<String>,
+    /// Banner image hash, at `banners/{user id}/{hash}`.
+    #[serde(default)]
+    pub banner: Option<String>,
+    /// `0xRRGGBB` behind the banner when there's no image.
+    #[serde(default)]
+    pub accent_color: Option<u32>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct MutualGuild {
+    pub id: String,
+}
+
 /// The device behind a presence's `client_status`, for the status icon:
 /// web/desktop keep the dot, then a phone, then a console (`embedded`
 /// is how Xbox/PlayStation sessions show up).
