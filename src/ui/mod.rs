@@ -149,6 +149,21 @@ pub fn status_color(status: &str) -> Color32 {
     }
 }
 
+/// Discord's blue "NOVO" chip on channels and threads created after the
+/// user joined the guild, until they visit them (issue #54).
+pub fn new_chip(ui: &mut egui::Ui) {
+    ui.add(
+        egui::Label::new(
+            egui::RichText::new(" NOVO ")
+                .size(9.5)
+                .family(crate::theme::bold())
+                .color(Color32::WHITE)
+                .background_color(crate::theme::BLURPLE),
+        )
+        .selectable(false),
+    );
+}
+
 /// Default group avatar, shared by the DM list and conversation header.
 pub fn group_avatar(ui: &mut egui::Ui, size: f32) -> Rect {
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());

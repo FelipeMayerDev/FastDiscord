@@ -473,6 +473,12 @@ pub enum UiEvent {
         guild_id: String,
         roles: Vec<String>,
     },
+    /// When we joined a guild (READY, GUILD_CREATE), in ms: channels and
+    /// threads created after it wear the sidebar's "NOVO" tag.
+    GuildJoinedAt {
+        guild_id: String,
+        joined_at_ms: i64,
+    },
     MemberListUpdate {
         update: crate::member_list::MemberListUpdate,
     },

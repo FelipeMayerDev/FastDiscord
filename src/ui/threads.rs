@@ -369,6 +369,10 @@ pub(crate) fn paint_sidebar_threads(
             content.add_space(4.0);
         }
         crate::ui::emoji::label(app, &mut content, text, true);
+        if app.channel_is_new(&thread.id, guild_id) {
+            content.add_space(4.0);
+            crate::ui::new_chip(&mut content);
+        }
         if response.clicked() && !app.channel_hidden(&thread, guild_id) {
             *clicked = Some(thread.id.clone());
         }

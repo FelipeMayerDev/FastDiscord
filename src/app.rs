@@ -17,6 +17,7 @@ use crate::model::{Channel, Guild, Message, Relationship, User, VoiceState};
 use crate::settings::{Settings, Theme};
 use crate::theme;
 use crate::ui;
+use crate::util;
 
 const STARTUP_CACHE_KEY: &str = "startup_cache_v1";
 
@@ -242,6 +243,12 @@ pub struct VesktopApp {
     /// to the channel permission math behind the sidebar's lock icons.
     pub(crate) own_roles: HashMap<String, Vec<String>>,
     own_roles_requested: HashSet<String>,
+    /// When the current user joined each guild, in ms (issue #54): the
+    /// "NOVO" tag marks channels created after it, as Discord computes it.
+    pub(crate) guild_joined_at: HashMap<String, i64>,
+    /// Channels and threads opened this session: visiting one clears its
+    /// "NOVO" tag, the way it disappears in Discord.
+    pub(crate) visited_channels: HashSet<String>,
     pub(crate) images: ImageCache,
     /// Larger cache for inline image attachments.
     pub(crate) images_large: ImageCache,
@@ -365,6 +372,8 @@ impl VesktopApp {
             user_cache: HashMap::new(),
             own_roles: HashMap::new(),
             own_roles_requested: HashSet::new(),
+            guild_joined_at: HashMap::new(),
+            visited_channels: HashSet::new(),
             images: ImageCache::new(128),
             images_large: ImageCache::new(800),
             viewer: None,
@@ -898,6 +907,7 @@ impl VesktopApp {
     pub(crate) fn select_channel(&mut self, channel_id: String) {
         self.home_page = ui::friends::HomePage::DirectMessages;
         self.selected_channel = Some(channel_id.clone());
+        self.visited_channels.insert(channel_id.clone());
         self.unread.remove(&channel_id);
         self.mentions.remove(&channel_id);
         // A pending divider from earlier in the session lands the view on
@@ -979,6 +989,19 @@ impl VesktopApp {
             perms = (perms & !member_deny) | member_allow;
         }
         perms & crate::model::PERMISSION_VIEW_CHANNEL == 0
+    }
+
+    /// Issue #54: the sidebar's "NOVO" tag, Discord's rule — the channel
+    /// was created after we joined the guild (snowflake timestamp against
+    /// `joined_at`, both Discord's data) and we haven't opened it yet.
+    pub(crate) fn channel_is_new(&self, channel_id: &str, guild_id: &str) -> bool {
+        if self.visited_channels.contains(channel_id) {
+            return false;
+        }
+        let Some(joined_at) = self.guild_joined_at.get(guild_id) else {
+            return false;
+        };
+        util::snowflake_ms(channel_id).is_some_and(|created| created > *joined_at)
     }
 
     fn request_channel_presences(&self, channel_id: &str) {
@@ -2680,6 +2703,12 @@ impl VesktopApp {
             UiEvent::OwnMemberLoaded { guild_id, roles } => {
                 self.own_roles.insert(guild_id, roles);
             }
+            UiEvent::GuildJoinedAt {
+                guild_id,
+                joined_at_ms,
+            } => {
+                self.guild_joined_at.insert(guild_id, joined_at_ms);
+            }
             UiEvent::MemberListUpdate { update } => {
                 for member in update.members() {
                     let status = member.presence.as_ref().map(|p| p.status.clone());
@@ -3939,5 +3968,25 @@ mod tests {
         };
         assert!(app.channel_hidden(&private(false), "g"));
         assert!(!app.channel_hidden(&private(true), "g"));
+    }
+
+    /// Issue #54: "NOVO" marks channels created after the guild was joined
+    /// and clears once the channel is opened.
+    #[test]
+    fn new_tag_tracks_join_date_and_visits() {
+        let (_rt, mut app, _, _) = test_app();
+        // Joined 2026-01-01; the test channels encode 2024-01-01 and the
+        // join instant itself.
+        app.guild_joined_at
+            .insert("g".into(), 1_767_225_600_000);
+        let channel_at = |ms: i64| ((ms - 1_420_070_400_000_i64) << 22).to_string();
+        let old_channel = channel_at(1_704_067_200_000);
+        assert!(!app.channel_is_new(&old_channel, "g"));
+        let new_channel = channel_at(1_767_225_601_000);
+        assert!(app.channel_is_new(&new_channel, "g"));
+        app.select_channel(new_channel.clone());
+        assert!(!app.channel_is_new(&new_channel, "g"));
+        // No join date known: never new.
+        assert!(!app.channel_is_new(&new_channel, "other"));
     }
 }

@@ -297,6 +297,7 @@ fn dispatch(value: Value, event_tx: &EventTx, voice_tx: &UnboundedSender<Wire>, 
                         continue;
                     };
                     send_roles(id, guild, event_tx);
+                    send_joined_at(id, guild, event_tx);
                     let states = guild
                         .get("voice_states")
                         .cloned()
@@ -326,6 +327,7 @@ fn dispatch(value: Value, event_tx: &EventTx, voice_tx: &UnboundedSender<Wire>, 
                 return;
             };
             send_roles(id, &data, event_tx);
+            send_joined_at(id, &data, event_tx);
             let states = data
                 .get("voice_states")
                 .cloned()
@@ -625,6 +627,19 @@ fn send_roles(guild_id: &str, guild: &Value, event_tx: &EventTx) {
         event_tx.send(UiEvent::GuildRoles {
             guild_id: guild_id.to_string(),
             roles,
+        });
+    }
+}
+
+/// When the current user joined the guild (issue #54): channels created
+/// after it earn the sidebar's "NOVO" tag, exactly Discord's rule.
+fn send_joined_at(guild_id: &str, guild: &Value, event_tx: &EventTx) {
+    if let Some(joined_at) = guild.get("joined_at").and_then(Value::as_str)
+        && let Ok(time) = chrono::DateTime::parse_from_rfc3339(joined_at)
+    {
+        event_tx.send(UiEvent::GuildJoinedAt {
+            guild_id: guild_id.to_string(),
+            joined_at_ms: time.timestamp_millis(),
         });
     }
 }

@@ -1285,6 +1285,7 @@ fn paint_dm_list(app: &mut VesktopApp, ui: &mut egui::Ui) {
             unread,
             false,
             None,
+            false,
         );
         if response.clicked() {
             clicked = Some(channel.id.clone());
@@ -1354,6 +1355,7 @@ fn paint_guild_channels(app: &mut VesktopApp, ui: &mut egui::Ui) {
                 unread,
                 false,
                 elapsed,
+                app.channel_is_new(&channel.id, &guild_id),
             )
             .clicked()
             {
@@ -1385,6 +1387,7 @@ fn paint_guild_channels(app: &mut VesktopApp, ui: &mut egui::Ui) {
                 unread,
                 false,
                 None,
+                app.channel_is_new(&channel.id, &guild_id),
             )
             .clicked()
             {
@@ -1466,6 +1469,7 @@ fn row(
     unread: bool,
     dimmed: bool,
     elapsed: Option<u64>,
+    new_flag: bool,
 ) -> egui::Response {
     let width = ui.available_width();
     // Discord: 42px DM rows, 34px channel rows.
@@ -1552,19 +1556,25 @@ fn row(
     if unread {
         text = text.family(theme::bold());
     }
-    if let Some(seconds) = elapsed {
-        let timer = format!(
-            "{:02}:{:02}:{:02}",
-            seconds / 3600,
-            seconds / 60 % 60,
-            seconds % 60
-        );
-        let timer_width = 66.0;
-        content.allocate_ui_with_layout(
-            Vec2::new(content.available_width() - timer_width, height - 6.0),
-            egui::Layout::left_to_right(egui::Align::Center),
-            |ui| crate::ui::emoji::label(app, ui, text, true),
-        );
+        if let Some(seconds) = elapsed {
+            let timer = format!(
+                "{:02}:{:02}:{:02}",
+                seconds / 3600,
+                seconds / 60 % 60,
+                seconds % 60
+            );
+            let timer_width = 66.0;
+            content.allocate_ui_with_layout(
+                Vec2::new(content.available_width() - timer_width, height - 6.0),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    crate::ui::emoji::label(app, ui, text, true);
+                    if new_flag {
+                        ui.add_space(4.0);
+                        crate::ui::new_chip(ui);
+                    }
+                },
+            );
         ui.painter().text(
             pos2(rect.right() - 8.0, rect.center().y),
             egui::Align2::RIGHT_CENTER,
@@ -1576,6 +1586,10 @@ fn row(
             .request_repaint_after(std::time::Duration::from_secs(1));
     } else {
         crate::ui::emoji::label(app, &mut content, text, true);
+        if new_flag {
+            content.add_space(4.0);
+            crate::ui::new_chip(&mut content);
+        }
     }
     response
 }
