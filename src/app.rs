@@ -3060,6 +3060,75 @@ mod tests {
     }
 
     #[test]
+    fn stream_stats_show_resolution_and_fps_while_hovering() {
+        let (_rt, mut app, _, _) = test_app();
+        let ctx = egui::Context::default();
+        let canvas = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(640.0, 360.0));
+        assert!(ui::screen_share::stream_stats_text(&app, &ctx).is_none());
+        assert!(!ui::screen_share::stream_stats_visible(&app, &ctx, canvas));
+
+        app.watch = Some(GoLive {
+            key: "stream".into(),
+            rtc: None,
+            task: None,
+            frames: Default::default(),
+            fockytv: None,
+            started: Instant::now(),
+        });
+        app.watch_texture = Some(ctx.load_texture(
+            "watch",
+            egui::ColorImage::new([320, 180], vec![egui::Color32::BLACK; 320 * 180]),
+            egui::TextureOptions::LINEAR,
+        ));
+        // No frame counter yet: only the resolution shows.
+        assert_eq!(
+            ui::screen_share::stream_stats_text(&app, &ctx).unwrap(),
+            "320×180"
+        );
+        // poll_watch's counter: 60 frames over the last 2 s.
+        let watch = app.watch.as_ref().unwrap();
+        let fps_id = egui::Id::new(("watch_fps", &watch.key, watch.started));
+        ctx.data_mut(|data| {
+            data.insert_temp(fps_id, (Instant::now() - Duration::from_secs(2), 60u64));
+        });
+        assert_eq!(
+            ui::screen_share::stream_stats_text(&app, &ctx).unwrap(),
+            "320×180 · 30 fps"
+        );
+
+        // Stats stay hidden until the canvas is hovered…
+        run_pointer_frame(&ctx, egui::pos2(1200.0, 700.0));
+        assert!(!ui::screen_share::stream_stats_visible(&app, &ctx, canvas));
+        // …visible while hovering…
+        run_pointer_frame(&ctx, egui::pos2(320.0, 180.0));
+        assert!(ui::screen_share::stream_stats_visible(&app, &ctx, canvas));
+        // …and held a few seconds after the pointer leaves.
+        run_pointer_frame(&ctx, egui::pos2(1200.0, 700.0));
+        assert!(ui::screen_share::stream_stats_visible(&app, &ctx, canvas));
+        let hover_id = egui::Id::new(("watch_stats_hover", &watch.key, watch.started));
+        ctx.data_mut(|data| {
+            data.insert_temp(hover_id, Instant::now() - ui::screen_share::STATS_HOLD);
+        });
+        assert!(!ui::screen_share::stream_stats_visible(&app, &ctx, canvas));
+    }
+
+    fn run_pointer_frame(ctx: &egui::Context, pos: egui::Pos2) {
+        ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 800.0),
+                )),
+                events: vec![egui::Event::PointerMoved(pos)],
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .textures_delta
+        .clear();
+    }
+
+    #[test]
     fn invalid_share_nick_opens_settings_before_capture() {
         let (_rt, mut app, mut commands, _) = test_app();
         app.me = Some(

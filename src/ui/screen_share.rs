@@ -5,9 +5,9 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use egui::{Rect, RichText, Vec2, pos2};
+use egui::{Color32, FontId, Rect, RichText, Vec2, pos2};
 
 use crate::app::{VesktopApp, VoiceConn};
 use crate::backend::capture::{self, Capture, Frame, Source};
@@ -471,6 +471,7 @@ pub fn poll_watch(app: &mut VesktopApp, ctx: &egui::Context) {
 /// The video letterboxed into `area`, or a placeholder until it arrives.
 fn paint_video(app: &VesktopApp, ui: &mut egui::Ui, area: Rect) {
     ui.painter().rect_filled(area, 6.0, egui::Color32::BLACK);
+    paint_stream_stats(app, ui, area);
     match &app.watch_texture {
         Some(texture) => {
             let size = texture.size_vec2();
@@ -499,6 +500,72 @@ fn paint_video(app: &VesktopApp, ui: &mut egui::Ui, area: Rect) {
             );
         }
     }
+}
+
+/// How long the stream stats stay up after the pointer leaves the canvas.
+pub(crate) const STATS_HOLD: Duration = Duration::from_secs(5);
+
+/// The "1280×720 · 30 fps" label for the watched stream, or None while
+/// there is no video.
+pub(crate) fn stream_stats_text(app: &VesktopApp, ctx: &egui::Context) -> Option<String> {
+    let watch = app.watch.as_ref()?;
+    let texture = app.watch_texture.as_ref()?;
+    // The same frame counter `poll_watch` feeds; it resets every 5 s.
+    let fps_id = egui::Id::new(("watch_fps", &watch.key, watch.started));
+    let (since, shown) = ctx.data(|data| {
+        data.get_temp::<(Instant, u64)>(fps_id)
+            .unwrap_or((Instant::now(), 0))
+    });
+    let window = since.elapsed().as_secs_f64();
+    let [width, height] = texture.size();
+    let mut text = format!("{width}×{height}");
+    if window >= 1.0 && shown > 0 {
+        text += &format!(" · {:.0} fps", shown as f64 / window);
+    }
+    Some(text)
+}
+
+/// Whether the stats pill should be up right now: while the pointer is
+/// over the canvas, and held for a few seconds after it leaves.
+pub(crate) fn stream_stats_visible(app: &VesktopApp, ctx: &egui::Context, area: Rect) -> bool {
+    let Some(watch) = app.watch.as_ref() else {
+        return false;
+    };
+    let hover_id = egui::Id::new(("watch_stats_hover", &watch.key, watch.started));
+    let hovered = ctx
+        .pointer_hover_pos()
+        .is_some_and(|pointer| area.contains(pointer));
+    ctx.data_mut(|data| {
+        if hovered {
+            data.insert_temp(hover_id, Instant::now());
+            true
+        } else {
+            data.get_temp::<Instant>(hover_id)
+                .is_some_and(|at| at.elapsed() < STATS_HOLD)
+        }
+    })
+}
+
+/// Resolution and FPS in the canvas's top-right corner.
+fn paint_stream_stats(app: &VesktopApp, ui: &mut egui::Ui, area: Rect) {
+    if !stream_stats_visible(app, ui.ctx(), area) {
+        return;
+    }
+    let Some(text) = stream_stats_text(app, ui.ctx()) else {
+        return;
+    };
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text, FontId::monospace(11.0), theme::WHITE);
+    let pad = 6.0;
+    let size = galley.size() + Vec2::splat(pad * 2.0);
+    let rect = Rect::from_min_size(
+        pos2(area.right() - 8.0 - size.x, area.top() + 8.0),
+        size,
+    );
+    let painter = ui.painter();
+    painter.rect_filled(rect, 4.0, Color32::from_black_alpha(170));
+    painter.galley(rect.min + Vec2::splat(pad), galley, theme::WHITE);
 }
 
 /// A watched stream in place of the chat (its voice channel's view): the
