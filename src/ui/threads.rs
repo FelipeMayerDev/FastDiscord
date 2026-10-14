@@ -856,7 +856,7 @@ pub(crate) fn paint_forum(app: &mut VesktopApp, ui: &mut egui::Ui, forum_id: &st
                         ui.label(RichText::new(error).small().color(theme::RED));
                     }
                     if let Some(topic) = &topic {
-                        guidelines(ui, topic, &mut guidelines_open);
+                        guidelines(app, ui, topic, &mut guidelines_open);
                     }
                     new_sort = filter_chips(app, ui, &forum, sort, &mut view);
                     clicked = post_cards(app, ui, &forum, sort, &view, now_ms);
@@ -977,7 +977,7 @@ fn search_bar(
 
 /// "Diretrizes da postagem": the forum's topic, collapsed or expanded by
 /// its header (or the search bar's button).
-fn guidelines(ui: &mut egui::Ui, topic: &str, open: &mut bool) {
+fn guidelines(app: &mut VesktopApp, ui: &mut egui::Ui, topic: &str, open: &mut bool) {
     let frame = egui::Frame::new()
         .fill(theme::SIDEBAR)
         .corner_radius(theme::RADIUS_SM)
@@ -1002,7 +1002,9 @@ fn guidelines(ui: &mut egui::Ui, topic: &str, open: &mut bool) {
             });
             if *open {
                 ui.add_space(4.0);
-                ui.label(RichText::new(topic).color(theme::TEXT));
+                let runs =
+                    crate::ui::chat::content_runs_sized(topic, &app.user_cache, &HashMap::new(), 13.5);
+                crate::ui::chat::paint_runs_with(app, ui, runs, false);
             }
         });
     // The header row toggles; the text below stays selectable.

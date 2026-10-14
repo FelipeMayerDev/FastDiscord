@@ -186,7 +186,9 @@ pub fn paint(app: &mut VesktopApp, ui: &mut egui::Ui) {
             );
             if let Some(topic) = &topic {
                 ui.add_space(10.0);
-                ui.label(RichText::new(topic).small().color(theme::MUTED));
+                let channel_names = app.channel_names();
+                let runs = content_runs_sized(topic, &app.user_cache, &channel_names, 12.5);
+                paint_runs_with(app, ui, runs, false);
             }
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1128,6 +1130,30 @@ fn discord_invites(content: &str) -> Vec<&str> {
 }
 
 #[cfg(test)]
+mod topic_runs_tests {
+    /// Channel topics and forum guidelines render through the message
+    /// markdown pipeline at a smaller base size.
+    #[test]
+    fn sized_runs_keep_their_base_size() {
+        let users = std::collections::HashMap::new();
+        let channels = std::collections::HashMap::new();
+        let runs = super::content_runs_sized("**regras** do servidor", &users, &channels, 12.5);
+        let sizes: Vec<f32> = runs
+            .iter()
+            .flat_map(|run| match run {
+                super::Inline::Text(job) => job
+                    .sections
+                    .iter()
+                    .map(|section| section.format.font_id.size)
+                    .collect::<Vec<_>>(),
+                super::Inline::Emoji { format, .. } => vec![format.font_id.size],
+            })
+            .collect();
+        assert_eq!(sizes, vec![12.5, 12.5]);
+    }
+}
+
+#[cfg(test)]
 mod invite_tests {
     use super::discord_invites;
 
@@ -1441,7 +1467,7 @@ fn link_at_char(job: &LayoutJob, char_index: usize) -> Option<&str> {
 
 /// Message text between its emoji: styled text, or an emoji image with the
 /// text it falls back to.
-enum Inline {
+pub(crate) enum Inline {
     Text(LayoutJob),
     Emoji {
         url: String,
@@ -1453,7 +1479,18 @@ enum Inline {
 /// Message text: one selectable label when it has no emoji; otherwise its
 /// runs wrap between emoji images, selectable run by run. A message of only
 /// emoji (up to 27) shows them jumbo, like Discord.
-fn paint_runs(app: &mut VesktopApp, ui: &mut egui::Ui, runs: Vec<Inline>) {
+pub(crate) fn paint_runs(app: &mut VesktopApp, ui: &mut egui::Ui, runs: Vec<Inline>) {
+    paint_runs_with(app, ui, runs, true);
+}
+
+/// `allow_jumbo: false` keeps emojis at text size — channel topics and
+/// the forum guidelines never blow up a lone emoji.
+pub(crate) fn paint_runs_with(
+    app: &mut VesktopApp,
+    ui: &mut egui::Ui,
+    runs: Vec<Inline>,
+    allow_jumbo: bool,
+) {
     let emojis = runs
         .iter()
         .filter(|run| matches!(run, Inline::Emoji { .. }))
@@ -1466,12 +1503,25 @@ fn paint_runs(app: &mut VesktopApp, ui: &mut egui::Ui, runs: Vec<Inline>) {
         }
         return;
     }
-    let jumbo = emojis <= 27
+    let jumbo = allow_jumbo
+        && emojis <= 27
         && runs.iter().all(|run| match run {
             Inline::Text(job) => job.text.trim().is_empty(),
             Inline::Emoji { .. } => true,
         });
-    let size = if jumbo { 48.0 } else { 22.0 };
+    let size = if jumbo {
+        48.0
+    } else {
+        // Discord's inline emojis run ~1.5× the text size.
+        runs.iter()
+            .map(|run| match run {
+                Inline::Emoji { format, .. } => format.font_id.size * 1.5,
+                Inline::Text(_) => 0.0,
+            })
+            .fold(0.0_f32, f32::max)
+            .round()
+            .max(16.0)
+    };
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
         for run in runs {
@@ -1490,16 +1540,27 @@ fn paint_runs(app: &mut VesktopApp, ui: &mut egui::Ui, runs: Vec<Inline>) {
 
 /// Maps markup segments to styled runs and emoji, resolving mention and
 /// channel ids against the state the caller already gathered.
-fn content_runs(
+pub(crate) fn content_runs(
     text: &str,
     users: &HashMap<String, User>,
     channels: &HashMap<String, String>,
+) -> Vec<Inline> {
+    content_runs_sized(text, users, channels, 14.5)
+}
+
+/// The same pipeline at a different base size — channel topics and the
+/// forum guidelines use it at reading sizes smaller than a message.
+pub(crate) fn content_runs_sized(
+    text: &str,
+    users: &HashMap<String, User>,
+    channels: &HashMap<String, String>,
+    size: f32,
 ) -> Vec<Inline> {
     let mut runs = Vec::new();
     let mut job = LayoutJob::default();
     for segment in markup::tokenize(text) {
         let mut format = TextFormat {
-            font_id: FontId::proportional(14.5),
+            font_id: FontId::proportional(size),
             color: theme::TEXT,
             ..Default::default()
         };
@@ -1514,7 +1575,7 @@ fn content_runs(
                 None
             }
             Style::Code | Style::CodeBlock => {
-                format.font_id = FontId::monospace(13.0);
+                format.font_id = FontId::monospace(size - 1.5);
                 format.background = theme::INPUT;
                 None
             }
