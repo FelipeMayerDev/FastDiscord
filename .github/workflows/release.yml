@@ -46,13 +46,34 @@ jobs:
       GST_VERSION: "1.26.11"
     steps:
       - uses: actions/checkout@v4
-      - name: GStreamer (runtime + devel)
+      # freedesktop.org flakes (503s, resets every ~1 MB), so the MSIs are
+      # downloaded once per GST_VERSION and kept in the Actions cache.
+      - id: gst-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: gst-msi
+          key: gst-msi-${{ env.GST_VERSION }}
+      - name: Download GStreamer MSIs
+        if: steps.gst-cache.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
           $base = "https://gstreamer.freedesktop.org/data/pkg/windows/$env:GST_VERSION/msvc"
+          New-Item -ItemType Directory -Force gst-msi | Out-Null
           foreach ($msi in "gstreamer-1.0-msvc-x86_64-$env:GST_VERSION.msi", "gstreamer-1.0-devel-msvc-x86_64-$env:GST_VERSION.msi") {
-            Invoke-WebRequest "$base/$msi" -OutFile $msi
-            Start-Process msiexec -Wait -ArgumentList "/i", $msi, "/passive", "INSTALLLEVEL=1000", "INSTALLDIR=C:\gstreamer"
+            # -C - resumes after each reset instead of starting over.
+            curl.exe -fsSL --retry 1000 --retry-delay 2 --retry-all-errors -C - -o "gst-msi\$msi" "$base/$msi"
+            if ($LASTEXITCODE) { throw "download of $msi failed" }
+          }
+      - if: steps.gst-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: gst-msi
+          key: gst-msi-${{ env.GST_VERSION }}
+      - name: GStreamer (runtime + devel)
+        shell: pwsh
+        run: |
+          foreach ($msi in "gstreamer-1.0-msvc-x86_64-$env:GST_VERSION.msi", "gstreamer-1.0-devel-msvc-x86_64-$env:GST_VERSION.msi") {
+            Start-Process msiexec -Wait -ArgumentList "/i", "$PWD\gst-msi\$msi", "/passive", "INSTALLLEVEL=1000", "INSTALLDIR=C:\gstreamer"
           }
           $root = "C:\gstreamer\1.0\msvc_x86_64"
           if (-not (Test-Path "$root\bin\gst-inspect-1.0.exe")) { throw "GStreamer not installed at $root" }
