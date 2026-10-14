@@ -253,6 +253,9 @@ pub struct VesktopApp {
     /// `None` = the fetch failed and the card shows its placeholder.
     pub(crate) dm_profiles: HashMap<String, Option<crate::model::UserProfile>>,
     dm_profiles_pending: HashSet<String>,
+    /// Last message id we confirmed read per channel (issue #62): dedupes
+    /// the ack stream the same way the official client throttles it.
+    acked: HashMap<String, String>,
     pub(crate) images: ImageCache,
     /// Larger cache for inline image attachments.
     pub(crate) images_large: ImageCache,
@@ -380,6 +383,7 @@ impl VesktopApp {
             visited_channels: HashSet::new(),
             dm_profiles: HashMap::new(),
             dm_profiles_pending: HashSet::new(),
+            acked: HashMap::new(),
             images: ImageCache::new(128),
             images_large: ImageCache::new(800),
             viewer: None,
@@ -927,6 +931,10 @@ impl VesktopApp {
         self.home_page = ui::friends::HomePage::DirectMessages;
         self.selected_channel = Some(channel_id.clone());
         self.visited_channels.insert(channel_id.clone());
+        // Opening marks the channel read on the account (issue #62), as
+        // Discord does; when the history isn't cached yet the ack rides
+        // on its MessagesLoaded.
+        self.ack_channel(&channel_id);
         self.unread.remove(&channel_id);
         self.mentions.remove(&channel_id);
         // A pending divider from earlier in the session lands the view on
@@ -1033,6 +1041,34 @@ impl VesktopApp {
         }
         self.send(Command::LoadDmProfile {
             user_id: user_id.to_string(),
+        });
+    }
+
+    /// Issue #62: confirm the read state server-side up to the latest
+    /// message, as the official client does on open and while watching
+    /// live. The marker only moves forward, so a busy channel doesn't
+    /// spam the ack endpoint.
+    fn ack_channel(&mut self, channel_id: &str) {
+        let Some(latest) = self
+            .messages
+            .get(channel_id)
+            .and_then(|messages| messages.last())
+            .map(|message| message.id.clone())
+        else {
+            return;
+        };
+        if self
+            .acked
+            .get(channel_id)
+            .is_some_and(|acked| snowflake_cmp(acked, &latest) != std::cmp::Ordering::Less)
+        {
+            return;
+        }
+        self.acked.insert(channel_id.to_string(), latest.clone());
+        self.last_seen.insert(channel_id.to_string(), latest.clone());
+        self.send(Command::AckChannel {
+            channel_id: channel_id.to_string(),
+            message_id: latest,
         });
     }
 
@@ -2252,6 +2288,11 @@ impl VesktopApp {
                 }
                 if self.selected_channel.as_deref() == Some(channel_id.as_str()) {
                     self.request_channel_presences(&channel_id);
+                    // First page (or catch-up) of the open channel: it just
+                    // got read up to here.
+                    if !older {
+                        self.ack_channel(&channel_id);
+                    }
                 }
                 if let Some(after) = next_after {
                     self.stale_channels
@@ -2304,6 +2345,7 @@ impl VesktopApp {
                 self.user_cache
                     .insert(message.author.id.clone(), message.author.clone());
                 let detached = self.detached.contains(&message.channel_id);
+                let mut landed_at_present = false;
                 if let Some(list) = self.messages.get_mut(&message.channel_id) {
                     // A slice around an old reply doesn't reach the present.
                     if !detached && !list.iter().any(|m| m.id == message.id) {
@@ -2311,6 +2353,7 @@ impl VesktopApp {
                         // the timeline is behind the present moment.
                         let was_at_present =
                             self.last_seen.get(&message.channel_id) == list.last().map(|m| &m.id);
+                        landed_at_present = was_at_present;
                         list.push(message.clone());
                         const MAX_MESSAGES: usize = 400;
                         if list.len() > MAX_MESSAGES {
@@ -2324,6 +2367,11 @@ impl VesktopApp {
                                 .or_insert_with(|| message.id.clone());
                         }
                     }
+                }
+                // Watching live: the new message is read the moment it
+                // lands at the bottom (issue #62).
+                if selected && landed_at_present {
+                    self.ack_channel(&message.channel_id);
                 }
                 if selected && new_author {
                     self.request_channel_presences(&message.channel_id);
@@ -2745,6 +2793,20 @@ impl VesktopApp {
             UiEvent::DmProfileLoaded { user_id, profile } => {
                 self.dm_profiles_pending.remove(&user_id);
                 self.dm_profiles.insert(user_id, profile);
+            }
+            UiEvent::ReadAcked {
+                channel_id,
+                message_id,
+            } => {
+                // Another device read the channel: mirror the marker here
+                // unless we're the ones watching it (issue #62).
+                self.last_seen.insert(channel_id.clone(), message_id);
+                if self.selected_channel.as_deref() != Some(channel_id.as_str()) {
+                    self.unread.remove(&channel_id);
+                    self.mentions.remove(&channel_id);
+                    self.first_unread.remove(&channel_id);
+                    self.unread_jump.remove(&channel_id);
+                }
             }
             UiEvent::MemberListUpdate { update } => {
                 for member in update.members() {
@@ -4151,5 +4213,67 @@ mod tests {
             },
         );
         output.textures_delta.clear();
+    }
+
+    /// Issue #62: opening a channel acks its latest message once, a live
+    /// message read at the bottom acks again, and another device's
+    /// MESSAGE_ACK clears the background channel's unread state.
+    #[test]
+    fn read_state_acks_and_mirrors_other_devices() {
+        let (_rt, mut app, mut commands, _) = test_app();
+        app.me = Some(
+            serde_json::from_value(serde_json::json!({ "id": "me", "username": "eu" })).unwrap(),
+        );
+        app.channel_index
+            .insert("channel".into(), ChannelRef::Guild("g".into()));
+        app.channel_index
+            .insert("other".into(), ChannelRef::Guild("g".into()));
+        app.messages
+            .insert("channel".into(), vec![sample_message(1)]);
+        app.select_channel("channel".into());
+        let mut acks = || {
+            let mut found = Vec::new();
+            while let Ok(command) = commands.try_recv() {
+                if let Command::AckChannel {
+                    channel_id,
+                    message_id,
+                } = command
+                {
+                    found.push((channel_id, message_id));
+                }
+            }
+            found
+        };
+        assert_eq!(acks(), vec![("channel".into(), "1".into())]);
+        // Re-selecting an already-acked channel acks nothing.
+        app.select_channel("channel".into());
+        assert!(acks().is_empty());
+        // A live message landing at the present advances the marker.
+        app.handle_event(
+            UiEvent::MessageCreated {
+                message: sample_message(2),
+            },
+            true,
+        );
+        assert_eq!(acks(), vec![("channel".into(), "2".into())]);
+        // Another device reads a background channel: our unread state
+        // follows the account's marker.
+        app.select_channel("other".into());
+        app.handle_event(
+            UiEvent::MessageCreated {
+                message: sample_message(5),
+            },
+            true,
+        );
+        assert_eq!(app.unread.get("channel"), Some(&1));
+        app.handle_event(
+            UiEvent::ReadAcked {
+                channel_id: "channel".into(),
+                message_id: "5".into(),
+            },
+            true,
+        );
+        assert!(!app.unread.contains_key("channel"));
+        assert_eq!(app.last_seen.get("channel").map(String::as_str), Some("5"));
     }
 }

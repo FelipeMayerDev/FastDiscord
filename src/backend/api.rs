@@ -317,6 +317,31 @@ impl Api {
         Ok(Self::check_status(resp).await?.json::<Message>().await?)
     }
 
+    /// Confirms the channel read up to `message_id` (issue #62). The
+    /// returned version token rides back as gateway op 13, exactly the
+    /// official client's handshake.
+    pub async fn ack_message(&self, channel_id: &str, message_id: &str) -> ApiResult<String> {
+        #[derive(serde::Deserialize)]
+        struct Ack {
+            #[serde(default)]
+            token: Option<String>,
+        }
+        let resp = self
+            .http
+            .post(format!(
+                "{REST_BASE}/channels/{channel_id}/messages/{message_id}/ack"
+            ))
+            .header(reqwest::header::AUTHORIZATION, &self.token)
+            .json(&serde_json::json!({ "token": null }))
+            .send()
+            .await?;
+        Ok(Self::check_status(resp).await?
+            .json::<Ack>()
+            .await?
+            .token
+            .unwrap_or_default())
+    }
+
     pub async fn edit_message(
         &self,
         channel_id: &str,

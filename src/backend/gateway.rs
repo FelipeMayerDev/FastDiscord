@@ -44,12 +44,16 @@ pub async fn run(
 ) {
     let api = std::sync::Arc::new(Api::new(token));
     let (rest_tx, mut rest_rx) = tokio::sync::mpsc::unbounded_channel();
+    // Frames produced by background REST work (the read ack's op 13) queue
+    // here for the live socket.
+    let (frame_tx, mut frame_rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+    let rest_frames = frame_tx.clone();
     let rest_api = api.clone();
     let rest_events = event_tx.clone();
     // HTTP stays ordered, but cannot block voice commands or gateway heartbeats.
     let rest_task = tokio::spawn(async move {
         while let Some(command) = rest_rx.recv().await {
-            handle_rest_command(&rest_api, command, &rest_events).await;
+            handle_rest_command(&rest_api, command, &rest_events, &rest_frames).await;
         }
     });
     let mut backoff = Duration::from_secs(3);
@@ -65,6 +69,7 @@ pub async fn run(
             &voice_tx,
             &rest_tx,
             &mut ready_seen,
+            &mut frame_rx,
         )
         .await;
         match end {
@@ -104,11 +109,13 @@ async fn session(
     voice_tx: &UnboundedSender<Wire>,
     rest_tx: &UnboundedSender<Command>,
     ready: &mut bool,
+    frame_rx: &mut UnboundedReceiver<Value>,
 ) -> SessionEnd {
     // The gateway session id, from READY — user accounts get no
     // VOICE_STATE_UPDATE for their own op 4, so this is where the voice
     // handshake's session id comes from (docs/VOICE.md).
     let mut session_id = String::new();
+    let mut seq: Option<u64> = None;
     let gateway = match api.gateway_url().await {
         Ok(url) => format!("{}/?v=10&encoding=json", url.trim_end_matches('/')),
         Err(ApiError::Unauthorized) => {
@@ -147,7 +154,6 @@ async fn session(
 
     let mut heartbeat = tokio::time::interval(Duration::from_millis(heartbeat_ms));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut seq: Option<u64> = None;
     let mut acked = true;
 
     let token = api.token();
@@ -163,6 +169,14 @@ async fn session(
                     let _ = write.send(WsMessage::Close(None)).await;
                     return SessionEnd::Shutdown;
                 }
+            },
+            frame = frame_rx.recv() => match frame {
+                Some(frame) => {
+                    if let Err(err) = write.send(WsMessage::text(frame.to_string())).await {
+                        return SessionEnd::Reconnect(format!("falha ao enviar op 13: {err}"));
+                    }
+                }
+                None => return SessionEnd::Reconnect("canal de frames fechou".into()),
             },
             _ = heartbeat.tick() => {
                 if !acked {
@@ -443,6 +457,18 @@ fn dispatch(value: Value, event_tx: &EventTx, voice_tx: &UnboundedSender<Wire>, 
                 });
             }
         }
+        // Another device confirmed the read state up to `message_id`.
+        "MESSAGE_ACK" => {
+            if let (Some(channel_id), Some(message_id)) = (
+                data.get("channel_id").and_then(Value::as_str),
+                data.get("message_id").and_then(Value::as_str),
+            ) {
+                let _ = event_tx.send(UiEvent::ReadAcked {
+                    channel_id: channel_id.to_string(),
+                    message_id: message_id.to_string(),
+                });
+            }
+        }
         "TYPING_START" => {
             let channel_id = data.get("channel_id").and_then(Value::as_str);
             let user_id = data.get("user_id").and_then(Value::as_str);
@@ -718,6 +744,7 @@ fn identify_payload(token: &str) -> String {
     .to_string()
 }
 
+
 /// op 3 PRESENCE_UPDATE; a custom status is the type 4 activity, with
 /// the text in `state` as the official client sends it.
 fn presence_payload(status: &str, custom: &CustomStatus) -> String {
@@ -858,7 +885,12 @@ async fn handle_command(command: Command, rest_tx: &UnboundedSender<Command>, wr
     }
 }
 
-async fn handle_rest_command(api: &Api, command: Command, event_tx: &EventTx) {
+async fn handle_rest_command(
+    api: &Api,
+    command: Command,
+    event_tx: &EventTx,
+    frames: &UnboundedSender<Value>,
+) {
     match command {
         Command::SetPresence {
             status,
@@ -1072,6 +1104,20 @@ async fn handle_rest_command(api: &Api, command: Command, event_tx: &EventTx) {
                 }
             }
         }
+        Command::AckChannel {
+            channel_id,
+            message_id,
+        } => match api.ack_message(&channel_id, &message_id).await {
+            Ok(version) => {
+                // op 13 confirms the ack to the gateway session, with the
+                // version token the REST call returned (issue #62).
+                let _ = frames.send(json!({
+                    "op": 13,
+                    "d": { "channel_id": channel_id, "message_id": message_id, "version": version }
+                }));
+            }
+            Err(err) => log::warn!("falha ao ackar {channel_id}: {err}"),
+        },
         Command::LoadThreads { channel_id } => match api.archived_threads(&channel_id).await {
             Ok(threads) => event_tx.send(UiEvent::ThreadsUpserted { threads }),
             Err(err) => report(api, err, event_tx, "carregar tópicos").await,

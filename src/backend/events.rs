@@ -167,6 +167,12 @@ pub enum Command {
     LoadDmProfile {
         user_id: String,
     },
+    /// Confirm the channel read up to `message_id` (REST ack; the gateway
+    /// op 13 with the returned version token goes out from the backend).
+    AckChannel {
+        channel_id: String,
+        message_id: String,
+    },
     /// The thread browser or a forum opened: its archived public threads.
     LoadThreads {
         channel_id: String,
@@ -488,6 +494,12 @@ pub enum UiEvent {
     DmProfileLoaded {
         user_id: String,
         profile: Option<crate::model::UserProfile>,
+    },
+    /// MESSAGE_ACK from the gateway: another device read the channel up to
+    /// `message_id` (issue #62).
+    ReadAcked {
+        channel_id: String,
+        message_id: String,
     },
     MemberListUpdate {
         update: crate::member_list::MemberListUpdate,
