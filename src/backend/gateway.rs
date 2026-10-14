@@ -57,6 +57,10 @@ pub async fn run(
         }
     });
     let mut backoff = Duration::from_secs(3);
+    // The session survives across connections: a drop reconnects with op 6
+    // RESUME, which replays what was missed (issue #61).
+    let mut session_id = String::new();
+    let mut seq: Option<u64> = None;
 
     loop {
         // A session that died before READY usually means a rejected token;
@@ -69,6 +73,8 @@ pub async fn run(
             &voice_tx,
             &rest_tx,
             &mut ready_seen,
+            &mut session_id,
+            &mut seq,
             &mut frame_rx,
         )
         .await;
@@ -109,13 +115,13 @@ async fn session(
     voice_tx: &UnboundedSender<Wire>,
     rest_tx: &UnboundedSender<Command>,
     ready: &mut bool,
+    session_id: &mut String,
+    seq: &mut Option<u64>,
     frame_rx: &mut UnboundedReceiver<Value>,
 ) -> SessionEnd {
     // The gateway session id, from READY — user accounts get no
     // VOICE_STATE_UPDATE for their own op 4, so this is where the voice
     // handshake's session id comes from (docs/VOICE.md).
-    let mut session_id = String::new();
-    let mut seq: Option<u64> = None;
     let gateway = match api.gateway_url().await {
         Ok(url) => format!("{}/?v=10&encoding=json", url.trim_end_matches('/')),
         Err(ApiError::Unauthorized) => {
@@ -157,7 +163,10 @@ async fn session(
     let mut acked = true;
 
     let token = api.token();
-    if let Err(err) = write.send(WsMessage::text(identify_payload(&token))).await {
+    // A session that outlived the socket resumes with op 6, replaying the
+    // missed events; a fresh one identifies (issue #61).
+    let intro = session_intro(&token, session_id, *seq);
+    if let Err(err) = write.send(WsMessage::text(intro.to_string())).await {
         return SessionEnd::Reconnect(format!("falha ao identificar: {err}"));
     }
 
@@ -207,20 +216,34 @@ async fn session(
                         }
                         11 => acked = true,
                         7 => return SessionEnd::Reconnect("gateway pediu reconexão".into()),
-                        9 => return SessionEnd::Reconnect("sessão inválida, reconectando".into()),
+                        // d=false kills the session for good; d=true allows
+                        // resuming again on the next connection.
+                        9 => {
+                            if !value.pointer("/d").and_then(Value::as_bool).unwrap_or(false) {
+                                session_id.clear();
+                                *seq = None;
+                            }
+                            return SessionEnd::Reconnect("sessão inválida, reconectando".into());
+                        }
                         0 => {
                             if let Some(s) = value.get("s").and_then(Value::as_u64) {
-                                seq = Some(s);
+                                *seq = Some(s);
                             }
-                            if value.get("t").and_then(Value::as_str) == Some("READY") {
-                                *ready = true;
-                            }
-                            if value.get("t").and_then(Value::as_str) == Some("READY") {
-                                if let Some(id) = value.pointer("/d/session_id").and_then(Value::as_str) {
-                                    session_id = id.to_string();
+                            match value.get("t").and_then(Value::as_str) {
+                                Some("READY") => {
+                                    *ready = true;
+                                    if let Some(id) =
+                                        value.pointer("/d/session_id").and_then(Value::as_str)
+                                    {
+                                        *session_id = id.to_string();
+                                    }
                                 }
+                                // A resumed session replays what it missed
+                                // and never sends READY again.
+                                Some("RESUMED") => *ready = true,
+                                _ => {}
                             }
-                            dispatch(value, event_tx, voice_tx, &session_id);
+                            dispatch(value, event_tx, voice_tx, session_id);
                         }
                         _ => {
                             log::debug!(
@@ -744,6 +767,19 @@ fn identify_payload(token: &str) -> String {
     .to_string()
 }
 
+/// op 6 RESUME when the previous connection left a session behind — the
+/// gateway replays the missed events — or op 2 IDENTIFY otherwise
+/// (issue #61).
+fn session_intro(token: &str, session_id: &str, seq: Option<u64>) -> String {
+    match (session_id.is_empty(), seq) {
+        (false, Some(seq)) => json!({
+            "op": 6,
+            "d": { "token": token, "session_id": session_id, "seq": seq }
+        })
+        .to_string(),
+        _ => identify_payload(token),
+    }
+}
 
 /// op 3 PRESENCE_UPDATE; a custom status is the type 4 activity, with
 /// the text in `state` as the official client sends it.
@@ -1253,6 +1289,19 @@ async fn report(api: &Api, err: ApiError, event_tx: &EventTx, context: &str) {
 
 #[cfg(test)]
 mod tests {
+    /// Issue #61: a surviving session resumes with op 6; anything else
+    /// (fresh start, session without a sequence) identifies.
+    #[test]
+    fn resume_reuses_the_session_and_identify_starts_one() {
+        let value = |intro: String| serde_json::from_str::<Value>(&intro).unwrap();
+        assert_eq!(value(super::session_intro("t", "", None))["op"], 2);
+        assert_eq!(value(super::session_intro("t", "sess", None))["op"], 2);
+        let resume = value(super::session_intro("t", "sess", Some(90)));
+        assert_eq!(resume["op"], 6);
+        assert_eq!(resume["d"]["session_id"], "sess");
+        assert_eq!(resume["d"]["seq"], 90);
+    }
+
     #[tokio::test]
     async fn queued_http_does_not_delay_voice_join() {
         use futures_util::StreamExt;
