@@ -402,6 +402,10 @@ pub fn paint(app: &mut VesktopApp, ui: &mut egui::Ui) {
     let channel_names = app.channel_names();
     let mut load_older = false;
     let first_unread = app.first_unread.get(&channel_id).cloned();
+    // The frame the view lands on the divider isn't "read" yet, even though
+    // it still scrolls from the bottom; Discord keeps the divider until you
+    // actually reach the present.
+    let mut landed_on_unread = false;
 
     let scroll = ScrollArea::vertical()
         .auto_shrink(false)
@@ -464,7 +468,13 @@ pub fn paint(app: &mut VesktopApp, ui: &mut egui::Ui) {
                     date_separator(ui, &util::day_label_long(&message.timestamp));
                 }
                 if first_unread.as_deref() == Some(message.id.as_str()) {
-                    new_messages_divider(ui);
+                    let divider = new_messages_divider(ui);
+                    if app.unread_jump.remove(channel_id.as_str()) {
+                        // Land with the divider at the top, first unread
+                        // message right below it, like Discord.
+                        ui.scroll_to_rect(divider, Some(Align::Min));
+                        landed_on_unread = true;
+                    }
                 }
                 // Discord breathes between message groups: a new author or a
                 // reply opens a taller gap than a grouped continuation.
@@ -485,7 +495,7 @@ pub fn paint(app: &mut VesktopApp, ui: &mut egui::Ui) {
     let at_bottom =
         (scroll.state.offset.y + scroll.inner_rect.height()) >= scroll.content_size.y - 1.0;
     let detached = app.detached.contains(&channel_id);
-    if at_bottom && !detached && active_search(&tools).is_empty() {
+    if at_bottom && !detached && !landed_on_unread && active_search(&tools).is_empty() {
         if let Some(last) = app
             .messages
             .get(&channel_id)
@@ -1328,7 +1338,7 @@ fn date_separator(ui: &mut egui::Ui, label: &str) {
 }
 
 /// Red "NOVAS" divider, Discord-style: line across, label at the left.
-fn new_messages_divider(ui: &mut egui::Ui) {
+fn new_messages_divider(ui: &mut egui::Ui) -> egui::Rect {
     ui.add_space(6.0);
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 18.0), Sense::hover());
     let painter = ui.painter();
@@ -1353,6 +1363,7 @@ fn new_messages_divider(ui: &mut egui::Ui) {
         theme::RED,
     );
     ui.add_space(4.0);
+    rect
 }
 
 /// "Ir para o presente", pinned above the compose box while scrolled up.

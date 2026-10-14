@@ -264,6 +264,25 @@ fn dispatch(value: Value, event_tx: &EventTx, voice_tx: &UnboundedSender<Wire>, 
             seed_presences(&data["presences"], event_tx);
             seed_presences(&data["merged_presences"]["friends"], event_tx);
             seed_presences(&data["merged_presences"]["guilds"], event_tx);
+            // Server-side read markers for the "NOVAS" divider. Discord has
+            // shipped READY read_state both as a bare array and wrapped in
+            // `entries`; accept either. "0" means "never read".
+            let read_state = &data["read_state"];
+            let entries = read_state
+                .as_array()
+                .or_else(|| read_state.get("entries").and_then(Value::as_array));
+            let markers: Vec<(String, String)> = entries
+                .into_iter()
+                .flatten()
+                .filter_map(|entry| {
+                    let channel_id = entry.get("id")?.as_str()?.to_string();
+                    let last_message_id = entry.get("last_message_id")?.as_str()?.to_string();
+                    (last_message_id != "0").then_some((channel_id, last_message_id))
+                })
+                .collect();
+            if !markers.is_empty() {
+                event_tx.send(UiEvent::ReadState { markers });
+            }
             let user = data.pointer("/user").cloned().unwrap_or(Value::Null);
             if let Ok(user) = serde_json::from_value::<User>(user) {
                 event_tx.send(UiEvent::Ready { user });

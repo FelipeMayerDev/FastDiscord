@@ -172,6 +172,9 @@ pub struct VesktopApp {
     pub(crate) mentions: HashMap<String, u64>,
     /// First unread message per channel, for the red "NOVAS" divider.
     pub(crate) first_unread: HashMap<String, String>,
+    /// Channels opened behind the present whose view should land on the
+    /// "NOVAS" divider instead of the bottom, like Discord.
+    pub(crate) unread_jump: HashSet<String>,
     /// Last message the user has seen (timeline was at the bottom).
     pub(crate) last_seen: HashMap<String, String>,
     /// Per-channel, per-user instant of the last TYPING_START.
@@ -310,6 +313,7 @@ impl VesktopApp {
             unread: HashMap::new(),
             mentions: HashMap::new(),
             first_unread: HashMap::new(),
+            unread_jump: HashSet::new(),
             last_seen: HashMap::new(),
             typing: HashMap::new(),
             presence: HashMap::new(),
@@ -652,6 +656,7 @@ impl VesktopApp {
         self.unread.clear();
         self.mentions.clear();
         self.first_unread.clear();
+        self.unread_jump.clear();
         self.last_seen.clear();
         self.typing.clear();
         self.presence.clear();
@@ -732,6 +737,11 @@ impl VesktopApp {
         self.selected_channel = Some(channel_id.clone());
         self.unread.remove(&channel_id);
         self.mentions.remove(&channel_id);
+        // A pending divider from earlier in the session lands the view on
+        // it, like Discord.
+        if self.first_unread.contains_key(&channel_id) {
+            self.unread_jump.insert(channel_id.clone());
+        }
         self.compose_error = None;
         if let Some(ChannelRef::Guild(guild_id)) = self.channel_index.get(&channel_id) {
             self.settings
@@ -879,6 +889,7 @@ impl VesktopApp {
     pub(crate) fn mark_channel_read(&mut self, channel_id: &str, message_id: String) {
         self.last_seen.insert(channel_id.to_string(), message_id);
         self.first_unread.remove(channel_id);
+        self.unread_jump.remove(channel_id);
         self.unread.remove(channel_id);
         self.mentions.remove(channel_id);
     }
@@ -1678,6 +1689,15 @@ impl VesktopApp {
                     self.fetch_channel_if_needed(channel_id);
                 }
             }
+            UiEvent::ReadState { markers } => {
+                // Discord's snapshot seeds the read markers; anything the
+                // user already read in this session wins.
+                for (channel_id, message_id) in markers {
+                    self.last_seen
+                        .entry(channel_id)
+                        .or_insert(message_id);
+                }
+            }
             UiEvent::Disconnected { reason, retry_in } => {
                 self.disconnected_at = Some(std::time::Instant::now());
                 self.conn = ConnState::Disconnected(reason, retry_in)
@@ -1862,6 +1882,31 @@ impl VesktopApp {
                     // Catch-up pages and gateway echoes racing the REST
                     // response overlap the cache: merge and dedupe.
                     merge_messages(entry, messages);
+                }
+                // Opening a channel behind the present: the "NOVAS" divider
+                // goes at the first message after the read marker and the
+                // view lands on it, like Discord's open-at-unread.
+                if !older
+                    && !self.detached.contains(&channel_id)
+                    && let Some(marker) = self.last_seen.get(&channel_id).cloned()
+                {
+                    let first_after_marker = entry
+                        .iter()
+                        .find(|message| snowflake_cmp(&message.id, &marker).is_gt())
+                        .map(|message| message.id.clone());
+                    let behind_present = entry
+                        .last()
+                        .is_some_and(|last| snowflake_cmp(&last.id, &marker).is_gt());
+                    if behind_present
+                        && let Some(id) = first_after_marker
+                        && self
+                            .first_unread
+                            .entry(channel_id.clone())
+                            .or_insert(id.clone())
+                            == &id
+                    {
+                        self.unread_jump.insert(channel_id.clone());
+                    }
                 }
                 if self.selected_channel.as_deref() == Some(channel_id.as_str()) {
                     self.request_channel_presences(&channel_id);
@@ -2942,6 +2987,76 @@ mod tests {
 
     fn sample_message(id: u64) -> Message {
         serde_json::from_value(serde_json::json!({ "id": id.to_string(), "channel_id": "channel", "author": { "id": "9", "username": "member" } })).unwrap()
+    }
+
+    #[test]
+    fn read_state_seeds_markers_and_session_reads_win() {
+        let (_rt, mut app, _, _) = test_app();
+        app.handle_event(
+            UiEvent::ReadState {
+                markers: vec![("channel".into(), "100".into())],
+            },
+            true,
+        );
+        assert_eq!(app.last_seen.get("channel").unwrap(), "100");
+        // The READY snapshot must not clobber what was read this session.
+        app.mark_channel_read("channel", "200".into());
+        app.handle_event(
+            UiEvent::ReadState {
+                markers: vec![("channel".into(), "50".into())],
+            },
+            true,
+        );
+        assert_eq!(app.last_seen.get("channel").unwrap(), "200");
+    }
+
+    #[test]
+    fn opening_a_channel_behind_the_present_seeds_the_unread_divider() {
+        let (_rt, mut app, _, _) = test_app();
+        app.selected_channel = Some("channel".into());
+        app.handle_event(
+            UiEvent::ReadState {
+                markers: vec![("channel".into(), "40".into())],
+            },
+            true,
+        );
+        app.handle_event(
+            UiEvent::MessagesLoaded {
+                channel_id: "channel".into(),
+                messages: (30..=50).map(sample_message).collect(),
+                older: false,
+                newer: false,
+            },
+            true,
+        );
+        // The divider sits at the first message after the read marker and
+        // the view lands on it.
+        assert_eq!(app.first_unread.get("channel").unwrap(), "41");
+        assert!(app.unread_jump.contains("channel"));
+
+        // Reloading a page at the present seeds nothing.
+        app.mark_channel_read("channel", "60".into());
+        app.handle_event(
+            UiEvent::MessagesLoaded {
+                channel_id: "channel".into(),
+                messages: (51..=60).map(sample_message).collect(),
+                older: false,
+                newer: false,
+            },
+            true,
+        );
+        assert!(app.first_unread.get("channel").is_none());
+        assert!(!app.unread_jump.contains("channel"));
+    }
+
+    #[test]
+    fn reaching_the_present_clears_the_unread_divider() {
+        let (_rt, mut app, _, _) = test_app();
+        app.first_unread.insert("channel".into(), "41".into());
+        app.unread_jump.insert("channel".into());
+        app.mark_channel_read("channel", "50".into());
+        assert!(app.first_unread.get("channel").is_none());
+        assert!(!app.unread_jump.contains("channel"));
     }
 
     #[test]

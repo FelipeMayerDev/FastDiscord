@@ -210,6 +210,13 @@ pub enum UiEvent {
         older: bool,
         newer: bool,
     },
+    /// Discord's server-side read markers from READY (partial: only
+    /// channels Discord tracks), as (channel id, last read message id).
+    /// Seeds the red "NOVAS" divider for channels opened behind the
+    /// present.
+    ReadState {
+        markers: Vec<(String, String)>,
+    },
     /// A message fetch failed; frees the channel to be fetched again.
     MessagesFailed {
         channel_id: String,
