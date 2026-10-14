@@ -184,6 +184,9 @@ pub struct VesktopApp {
     /// The device behind each user's presence ("mobile" or "desktop"):
     /// the status dot becomes a phone for mobile-only users.
     pub(crate) presence_device: HashMap<String, String>,
+    /// Who reacted, by (message, emoji key), for the chips' tooltips;
+    /// `None` while the request is in flight.
+    pub(crate) reactors: HashMap<(String, String), Option<Vec<User>>>,
     /// When the last Disconnected event landed, to count the retry down.
     pub(crate) disconnected_at: Option<std::time::Instant>,
     /// Who is in which voice channel: guild → user → state.
@@ -326,6 +329,7 @@ impl VesktopApp {
             typing: HashMap::new(),
             presence: HashMap::new(),
             presence_device: HashMap::new(),
+            reactors: HashMap::new(),
             voice_states: HashMap::new(),
             voice: VoiceConn::Disconnected,
             voice_connected_at: None,
@@ -783,6 +787,9 @@ impl VesktopApp {
         added: bool,
     ) {
         let mine = self.me.as_ref().is_some_and(|me| me.id == user_id);
+        if let Some(key) = emoji.api_key() {
+            self.reactors.remove(&(message_id.to_string(), key));
+        }
         let Some(message) = self
             .messages
             .get_mut(channel_id)
@@ -837,11 +844,8 @@ impl VesktopApp {
         let Some(me) = self.me.as_ref().map(|me| me.id.clone()) else {
             return;
         };
-        let key = match (&emoji.id, &emoji.name) {
-            (Some(id), Some(name)) => format!("{name}:{id}"),
-            (Some(id), None) => format!("_:{id}"),
-            (None, Some(name)) => name.clone(),
-            (None, None) => return,
+        let Some(key) = emoji.api_key() else {
+            return;
         };
         self.apply_reaction(channel_id, message_id, &me, emoji, add);
         self.send(Command::ToggleReaction {
@@ -2259,6 +2263,13 @@ impl VesktopApp {
                     }
                 }
             }
+            UiEvent::Reactors {
+                message_id,
+                emoji,
+                users,
+            } => {
+                self.reactors.insert((message_id, emoji), Some(users));
+            }
             UiEvent::SendFailed { channel_id, error } => {
                 self.attachment_sending = false;
                 if self.selected_channel.as_deref() == Some(channel_id.as_str()) {
@@ -2591,6 +2602,14 @@ impl VesktopApp {
             UiEvent::MemberListUpdate { update } => {
                 for member in update.members() {
                     let status = member.presence.as_ref().map(|p| p.status.clone());
+                    match member
+                        .presence
+                        .as_ref()
+                        .and_then(|p| crate::model::presence_device(p.client_status.as_ref()))
+                    {
+                        Some(device) => self.presence_device.insert(member.user.id.clone(), device),
+                        None => self.presence_device.remove(&member.user.id),
+                    };
                     self.presence.insert(
                         member.user.id.clone(),
                         status.unwrap_or_else(|| "offline".into()),

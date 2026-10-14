@@ -15,11 +15,12 @@ fn markup_pipeline_end_to_end() {
             Style::Normal,
             Style::Mention,
             Style::Normal,
-            Style::Bold,
+            Style::Normal,
             Style::Normal,
             Style::Code
         ]
     );
+    assert!(segments[3].marks.bold && segments[3].text == "veja");
 }
 
 #[test]

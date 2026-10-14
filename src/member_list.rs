@@ -64,6 +64,8 @@ impl ListMember {
 pub struct ListPresence {
     #[serde(default)]
     pub status: String,
+    #[serde(default)]
+    pub client_status: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Deserialize)]

@@ -210,6 +210,21 @@ impl Api {
         Ok(())
     }
 
+    /// The first few users who reacted with an emoji, for the chip's
+    /// tooltip.
+    pub async fn reactors(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        emoji: &str,
+    ) -> ApiResult<Vec<User>> {
+        let path = format!(
+            "/channels/{channel_id}/messages/{message_id}/reactions/{}",
+            encode_emoji(emoji)
+        );
+        self.get_json(&path, &[("limit", "3".to_string())]).await
+    }
+
     pub async fn open_dm(&self, user_id: &str) -> ApiResult<Channel> {
         let resp = self
             .http

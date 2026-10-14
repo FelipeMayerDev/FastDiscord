@@ -44,6 +44,11 @@ pub const MENTION_TEXT: Color32 = Color32::from_rgb(0xc9, 0xcd, 0xfb);
 /// `--background-mentioned` and its left bar: a message that pings you.
 pub const MENTIONED_BG: Color32 = Color32::from_rgba_premultiplied(19, 14, 4, 20);
 pub const MENTIONED_BAR: Color32 = Color32::from_rgb(0xf0, 0xb2, 0x32);
+/// Markdown blocks: the quote's left bar, a hidden `||spoiler||` (text
+/// painted in its own background) and a revealed one.
+pub const QUOTE_BAR: Color32 = Color32::from_rgb(0x4e, 0x50, 0x58);
+pub const SPOILER: Color32 = Color32::from_rgb(0x1e, 0x1f, 0x22);
+pub const SPOILER_SHOWN: Color32 = Color32::from_rgb(0x41, 0x42, 0x48);
 
 /// Corner-radius tokens, from `--radius-sm/md/lg`.
 pub const RADIUS_SM: f32 = 8.0;

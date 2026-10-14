@@ -301,6 +301,16 @@ pub struct ReactionEmoji {
     pub animated: bool,
 }
 
+impl ReactionEmoji {
+    /// The reactions endpoints' key: the Unicode emoji, or `name:id`.
+    pub fn api_key(&self) -> Option<String> {
+        match (&self.id, &self.name) {
+            (Some(id), name) => Some(format!("{}:{id}", name.as_deref().unwrap_or("_"))),
+            (None, name) => name.clone(),
+        }
+    }
+}
+
 /// `message_reference`: which message a reply points at.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct MessageReference {
@@ -404,4 +414,21 @@ pub struct Profile {
     pub pronouns: String,
     pub bio: String,
     pub nick: String,
+}
+
+/// The device behind a presence's `client_status`, for the status icon:
+/// web/desktop keep the dot, then a phone, then a console (`embedded`
+/// is how Xbox/PlayStation sessions show up).
+pub fn presence_device(client_status: Option<&serde_json::Value>) -> Option<String> {
+    let on = |key| client_status.and_then(|cs| cs.get(key)).is_some();
+    let device = if on("desktop") || on("web") {
+        "desktop"
+    } else if on("mobile") {
+        "mobile"
+    } else if on("embedded") {
+        "console"
+    } else {
+        return None;
+    };
+    Some(device.to_string())
 }

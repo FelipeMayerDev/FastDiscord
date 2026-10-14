@@ -901,7 +901,11 @@ fn paint_content(
         if let Some(url) = util::embed_picture_url(embed) {
             inline_picture(app, ui, &url);
         }
-        if embed.title.is_none() && embed.description.is_none() {
+        // GIF/image embeds are only their picture in Discord: Giphy's
+        // carry a title that would otherwise show as a link below the GIF.
+        if embed.title.is_none() && embed.description.is_none()
+            || matches!(embed.kind.as_deref(), Some("gifv" | "image"))
+        {
             continue;
         }
         // Discord's embed: a darker 4px-rounded card with its color bar on
@@ -955,42 +959,175 @@ fn paint_content(
     crate::ui::threads::message_thread_summary(app, ui, message);
 }
 
-/// Discord's reaction chips under a message: emoji and count, tinted
-/// when we reacted; a click adds or removes ours.
+/// Discord's reaction chips under a message: emoji and count, outlined in
+/// blurple when we reacted (a click adds or removes ours), who reacted on
+/// hover, and a "+" chip to add another while the message is hovered.
 fn reaction_chips(app: &mut VesktopApp, ui: &mut egui::Ui, message: &Message) {
     if message.reactions.is_empty() {
         return;
     }
+    const HEIGHT: f32 = 24.0;
+    const EMOJI: f32 = 16.0;
+    let row_hovered = ui
+        .ctx()
+        .read_response(egui::Id::new(("msg_row", message.id.as_str())))
+        .is_some_and(|row| row.contains_pointer());
     let mut toggled = None;
+    let mut picked = None;
+    ui.add_space(4.0);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = Vec2::splat(4.0);
         for reaction in &message.reactions {
-            let emoji = crate::ui::threads::emoji_image(
+            let image = crate::ui::threads::emoji_image(
                 reaction.emoji.id.as_deref(),
                 reaction.emoji.name.as_deref(),
             );
-            let name = match &emoji {
-                Some(_) => String::new(),
-                None => reaction.emoji.name.clone().unwrap_or_default(),
+            let text_color = if reaction.me {
+                theme::MENTION_TEXT
+            } else {
+                theme::MUTED
             };
-            let response = crate::ui::threads::pill(
-                app,
-                ui,
-                format!("{name} {}", reaction.count).trim(),
-                FontId::proportional(13.0),
-                theme::TEXT,
-                emoji.as_deref(),
-                24.0,
-                |ui, response| crate::ui::threads::chip_fill(ui, response, reaction.me),
+            let count = ui.painter().layout_no_wrap(
+                reaction.count.to_string(),
+                FontId::new(14.0, theme::bold()),
+                text_color,
             );
+            let width = 8.0 + EMOJI + 6.0 + count.size().x + 8.0;
+            let (rect, response) = ui.allocate_exact_size(Vec2::new(width, HEIGHT), Sense::click());
+            let (fill, border) = if reaction.me {
+                (theme::BLURPLE.gamma_multiply(0.15), theme::BLURPLE)
+            } else if response.hovered() {
+                (theme::SIDEBAR, theme::SELECTED)
+            } else {
+                (theme::SIDEBAR, theme::SIDEBAR)
+            };
+            ui.painter().rect(
+                rect,
+                8.0,
+                fill,
+                egui::Stroke::new(1.0, border),
+                egui::StrokeKind::Inside,
+            );
+            let icon = egui::Rect::from_min_size(
+                pos2(rect.left() + 8.0, rect.center().y - EMOJI / 2.0),
+                Vec2::splat(EMOJI),
+            );
+            match image.and_then(|url| app.images.get(ui.ctx(), &app.handle, &url)) {
+                Some(texture) => Image::from_texture(&texture).paint_at(ui, icon),
+                None => {
+                    ui.painter().text(
+                        icon.center(),
+                        Align2::CENTER_CENTER,
+                        reaction.emoji.name.as_deref().unwrap_or("?"),
+                        FontId::proportional(EMOJI - 2.0),
+                        theme::TEXT,
+                    );
+                }
+            }
+            ui.painter().galley(
+                pos2(icon.right() + 6.0, rect.center().y - count.size().y / 2.0),
+                count,
+                text_color,
+            );
+            let response = response.on_hover_ui(|ui| {
+                ui.label(reactors_text(app, message, reaction));
+            });
             if response.clicked() {
                 toggled = Some((reaction.emoji.clone(), !reaction.me));
             }
+        }
+        let popup_id = egui::Id::new(("reaction_add", message.id.as_str()));
+        if row_hovered || egui::Popup::is_id_open(ui.ctx(), popup_id) {
+            let (rect, add) = ui.allocate_exact_size(Vec2::new(36.0, HEIGHT), Sense::click());
+            let color = if add.hovered() {
+                theme::TEXT
+            } else {
+                theme::MUTED
+            };
+            ui.painter().rect_filled(rect, 8.0, theme::SIDEBAR);
+            draw_smiley(ui.painter(), rect.center() - Vec2::new(3.0, 0.0), color);
+            ui.painter().text(
+                pos2(rect.right() - 7.0, rect.top() + 7.0),
+                Align2::CENTER_CENTER,
+                "+",
+                FontId::new(11.0, theme::bold()),
+                color,
+            );
+            let add = add.on_hover_text("Adicionar reação");
+            egui::Popup::from_toggle_button_response(&add)
+                .id(popup_id)
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                .align(egui::RectAlign::TOP_START)
+                .gap(8.0)
+                .show(|ui| {
+                    let id = egui::Id::new("reaction_picker");
+                    let (mut query, mut tab) = ui.ctx().data_mut(|data| {
+                        data.get_temp::<(String, Option<emojis::Group>)>(id)
+                            .unwrap_or_default()
+                    });
+                    picked = emoji_picker(app, ui, &mut query, &mut tab, add.clicked());
+                    ui.ctx().data_mut(|data| data.insert_temp(id, (query, tab)));
+                });
         }
     });
     if let Some((emoji, add)) = toggled {
         app.toggle_reaction(&message.channel_id, &message.id, emoji, add);
     }
+    // Re-adding one of ours is a no-op on both ends.
+    if let Some(emoji) = picked {
+        app.toggle_reaction(&message.channel_id, &message.id, emoji, true);
+    }
+}
+
+/// The chip's tooltip, Discord-style: "Ana, Bia e mais 3 reagiram com
+/// :fire:". The names load on first hover.
+fn reactors_text(
+    app: &mut VesktopApp,
+    message: &Message,
+    reaction: &crate::model::Reaction,
+) -> String {
+    let emoji = match (&reaction.emoji.id, reaction.emoji.name.as_deref()) {
+        (Some(_), Some(name)) => format!(":{name}:"),
+        (None, Some(name)) => emojis::get(name)
+            .and_then(|emoji| emoji.shortcode())
+            .map_or_else(|| name.to_string(), |code| format!(":{code}:")),
+        _ => String::new(),
+    };
+    let Some(key) = reaction.emoji.api_key() else {
+        return emoji;
+    };
+    let slot = (message.id.clone(), key.clone());
+    let Some(users) = app.reactors.get(&slot) else {
+        app.reactors.insert(slot, None);
+        app.send(crate::backend::events::Command::FetchReactors {
+            channel_id: message.channel_id.clone(),
+            message_id: message.id.clone(),
+            emoji: key,
+        });
+        return format!("Carregando… {emoji}");
+    };
+    let Some(users) = users else {
+        return format!("Carregando… {emoji}");
+    };
+    reactors_sentence(
+        users.iter().map(|user| user.display_name()).collect(),
+        reaction.count,
+        &emoji,
+    )
+}
+
+fn reactors_sentence(names: Vec<&str>, count: u64, emoji: &str) -> String {
+    let others = count.saturating_sub(names.len() as u64);
+    let who = match (names.as_slice(), others) {
+        ([], _) => return format!("{count} reagiram com {emoji}"),
+        ([one], 0) => return format!("{one} reagiu com {emoji}"),
+        (names, 0) => {
+            let (last, rest) = names.split_last().unwrap_or((&"", &[]));
+            format!("{} e {last}", rest.join(", "))
+        }
+        (names, others) => format!("{} e mais {others}", names.join(", ")),
+    };
+    format!("{who} reagiram com {emoji}")
 }
 
 /// Discord hides the link text when the message is nothing but a GIF/image
@@ -1019,6 +1156,27 @@ fn bare_url(url: &str) -> &str {
         .next()
         .unwrap_or("")
         .trim_end_matches('/')
+}
+
+#[cfg(test)]
+mod reactors_tests {
+    use super::reactors_sentence;
+
+    #[test]
+    fn names_who_reacted_like_discord() {
+        assert_eq!(
+            reactors_sentence(vec!["Ana"], 1, ":fire:"),
+            "Ana reagiu com :fire:"
+        );
+        assert_eq!(
+            reactors_sentence(vec!["Ana", "Bia", "Caio"], 3, ":fire:"),
+            "Ana, Bia e Caio reagiram com :fire:"
+        );
+        assert_eq!(
+            reactors_sentence(vec!["Ana", "Bia", "Caio"], 7, ":fire:"),
+            "Ana, Bia, Caio e mais 4 reagiram com :fire:"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1190,12 +1348,13 @@ mod topic_runs_tests {
         let sizes: Vec<f32> = runs
             .iter()
             .flat_map(|run| match run {
-                super::Inline::Text(job) => job
+                super::Inline::Text(job, _) => job
                     .sections
                     .iter()
                     .map(|section| section.format.font_id.size)
                     .collect::<Vec<_>>(),
                 super::Inline::Emoji { format, .. } => vec![format.font_id.size],
+                _ => vec![],
             })
             .collect();
         assert_eq!(sizes, vec![12.5, 12.5]);
@@ -1210,43 +1369,60 @@ mod invite_tests {
     fn links_resolve_unicode_positions_and_allow_only_web_urls() {
         let users = std::collections::HashMap::new();
         let channels = std::collections::HashMap::new();
-        let last_text = |text: &str| match super::content_runs(text, &users, &channels).pop() {
-            Some(super::Inline::Text(job)) => job,
+        let text = |text: &str| match super::content_runs(text, &users, &channels).pop() {
+            Some(super::Inline::Text(job, extras)) => (job, extras),
             _ => panic!("expected text"),
         };
-        let job = last_text("Olá 😀 https://example.com/ação e http://example.org");
+        let link_at = |job: &egui::text::LayoutJob, extras: &super::Extras, char_index| {
+            let start = super::section_at(job, char_index)?.byte_range.start.0;
+            super::link_target(extras, start).map(str::to_string)
+        };
+        let (job, extras) = text("Olá 😀 https://example.com/ação e http://example.org");
         assert!(job.text.starts_with(" https://"));
         assert_eq!(
-            super::link_at_char(&job, 1),
+            link_at(&job, &extras, 1).as_deref(),
             Some("https://example.com/ação")
         );
-        assert_eq!(super::link_at_char(&job, 0), None);
+        assert_eq!(link_at(&job, &extras, 0), None);
         let index = job.text.find("http://").unwrap();
         assert_eq!(
-            super::link_at_char(&job, job.text[..index].chars().count()),
+            link_at(&job, &extras, job.text[..index].chars().count()).as_deref(),
             Some("http://example.org")
         );
-        let code = super::content_runs(
-            "`https://example.com` javascript:alert(1) file:///tmp/test",
-            &users,
-            &channels,
+        // Masked links point at their target; code is never a link.
+        let (job, extras) = text("[site](https://example.com) `https://example.com`");
+        assert_eq!(
+            link_at(&job, &extras, 0).as_deref(),
+            Some("https://example.com")
         );
-        let Some(super::Inline::Text(code)) = code.into_iter().next() else {
-            panic!("expected text");
+        assert_eq!(link_at(&job, &extras, job.text.chars().count() - 1), None);
+        let unsafe_extras = super::Extras {
+            links: vec![(0, "javascript:alert(1)".into())],
+            spoilers: vec![],
         };
-        assert_eq!(super::link_at_char(&code, 0), None);
-        let mut unsafe_job = job.clone();
-        unsafe_job.text = "javascript:alert(1)".into();
-        unsafe_job.sections = vec![
-            job.sections
-                .iter()
-                .find(|s| s.format.underline.width > 0.0)
-                .unwrap()
-                .clone(),
-        ];
-        unsafe_job.sections[0].byte_range =
-            egui::text::ByteIndex(0)..egui::text::ByteIndex(unsafe_job.text.len());
-        assert_eq!(super::link_at_char(&unsafe_job, 0), None);
+        assert_eq!(super::link_target(&unsafe_extras, 0), None);
+    }
+
+    #[test]
+    fn quotes_and_code_blocks_become_blocks_and_spoilers_hide() {
+        let users = std::collections::HashMap::new();
+        let channels = std::collections::HashMap::new();
+        let runs = super::content_runs("oi\n> citado\n```\nx\n```\n||segredo||", &users, &channels);
+        let kinds: Vec<&str> = runs
+            .iter()
+            .map(|run| match run {
+                super::Inline::Text(..) => "text",
+                super::Inline::Emoji { .. } => "emoji",
+                super::Inline::Quote(_) => "quote",
+                super::Inline::CodeBlock(_) => "code",
+            })
+            .collect();
+        assert_eq!(kinds, vec!["text", "quote", "code", "text"]);
+        let Some(super::Inline::Text(job, extras)) = runs.last() else {
+            panic!("expected the spoiler text");
+        };
+        assert_eq!(job.sections[0].format.color, crate::theme::SPOILER);
+        assert_eq!(extras.spoilers, vec![(0, crate::theme::TEXT)]);
     }
 
     #[test]
@@ -1452,13 +1628,66 @@ fn typing_label(names: &[String]) -> String {
     }
 }
 
-/// Keep egui's wrapping and text selection, with links hit-tested per glyph.
-fn linked_content(ui: &mut egui::Ui, job: LayoutJob) {
+/// Per-section extras a `LayoutJob` can't carry, by section start byte:
+/// link targets (bare or masked) and hidden spoilers' real colors.
+#[derive(Default)]
+pub(crate) struct Extras {
+    links: Vec<(usize, String)>,
+    spoilers: Vec<(usize, Color32)>,
+}
+
+fn section_at(job: &LayoutJob, char_index: usize) -> Option<&egui::text::LayoutSection> {
+    let byte_index = job.text.char_indices().nth(char_index)?.0;
+    job.sections.iter().find(|section| {
+        section
+            .byte_range
+            .contains(&egui::text::ByteIndex(byte_index))
+    })
+}
+
+/// Which revealed-spoiler key a section has: its text and position, so a
+/// spoiler stays open across frames.
+fn spoiler_key(job: &LayoutJob, start: usize) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (&job.text, start).hash(&mut hasher);
+    hasher.finish()
+}
+
+const REVEALED_SPOILERS: &str = "revealed_spoilers";
+
+/// Keep egui's wrapping and text selection, with links and spoilers
+/// hit-tested per glyph: a link opens on click, a spoiler reveals.
+fn linked_content(ui: &mut egui::Ui, mut job: LayoutJob, extras: Extras) {
+    let revealed_id = egui::Id::new(REVEALED_SPOILERS);
+    let mut hidden = Vec::new();
+    if !extras.spoilers.is_empty() {
+        let revealed: std::collections::HashSet<u64> = ui
+            .ctx()
+            .data(|data| data.get_temp(revealed_id))
+            .unwrap_or_default();
+        for (start, color) in &extras.spoilers {
+            let key = spoiler_key(&job, *start);
+            let Some(section) = job
+                .sections
+                .iter_mut()
+                .find(|section| section.byte_range.start.0 == *start)
+            else {
+                continue;
+            };
+            if revealed.contains(&key) {
+                section.format.color = *color;
+                section.format.background = theme::SPOILER_SHOWN;
+            } else {
+                hidden.push((*start, key));
+            }
+        }
+    }
     let (pos, galley, response) = Label::new(job).sense(Sense::click()).layout_in_ui(ui);
     response.widget_info(|| {
         egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), galley.text())
     });
-    let hovered_link = if response.hovered() {
+    let hovered_section = if response.hovered() {
         ui.input(|input| input.pointer.hover_pos())
             .and_then(|pointer| {
                 let mut char_index = 0;
@@ -1469,8 +1698,8 @@ fn linked_content(ui: &mut egui::Ui, job: LayoutJob) {
                             .translate(pos.to_vec2() + row.pos.to_vec2())
                             .contains(pointer)
                         {
-                            return link_at_char(&galley.job, char_index + index)
-                                .map(str::to_string);
+                            return section_at(&galley.job, char_index + index)
+                                .map(|section| section.byte_range.start.0);
                         }
                     }
                     char_index += row.char_count_including_newline().0;
@@ -1480,6 +1709,13 @@ fn linked_content(ui: &mut egui::Ui, job: LayoutJob) {
     } else {
         None
     };
+    let spoiler = hovered_section
+        .and_then(|start| hidden.iter().find(|(hidden, _)| *hidden == start))
+        .map(|(_, key)| *key);
+    let link = hovered_section
+        .filter(|_| spoiler.is_none())
+        .and_then(|start| link_target(&extras, start))
+        .map(str::to_string);
     egui::text_selection::LabelSelectionState::label_text_selection(
         ui,
         &response,
@@ -1488,7 +1724,15 @@ fn linked_content(ui: &mut egui::Ui, job: LayoutJob) {
         theme::TEXT,
         egui::Stroke::NONE,
     );
-    if let Some(url) = hovered_link {
+    if let Some(key) = spoiler {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        if response.clicked() {
+            ui.ctx().data_mut(|data| {
+                data.get_temp_mut_or_default::<std::collections::HashSet<u64>>(revealed_id)
+                    .insert(key);
+            });
+        }
+    } else if let Some(url) = link {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         if response.clicked() {
             open_url(ui, Some(&url));
@@ -1499,30 +1743,25 @@ fn linked_content(ui: &mut egui::Ui, job: LayoutJob) {
     }
 }
 
-fn link_at_char(job: &LayoutJob, char_index: usize) -> Option<&str> {
-    let byte_index = job.text.char_indices().nth(char_index)?.0;
-    let section = job.sections.iter().find(|section| {
-        section
-            .byte_range
-            .contains(&egui::text::ByteIndex(byte_index))
-    })?;
-    if section.format.color != theme::BLURPLE || section.format.underline.width == 0.0 {
-        return None;
-    }
-    let text = &job.text[section.byte_range.start.0..section.byte_range.end.0];
-    let url = reqwest::Url::parse(text).ok()?;
-    (matches!(url.scheme(), "http" | "https") && url.host_str().is_some()).then_some(text)
+/// A section's link target, only for web URLs with a host.
+fn link_target(extras: &Extras, start: usize) -> Option<&str> {
+    let (_, url) = extras.links.iter().find(|(at, _)| *at == start)?;
+    let parsed = reqwest::Url::parse(url).ok()?;
+    (matches!(parsed.scheme(), "http" | "https") && parsed.host_str().is_some())
+        .then_some(url.as_str())
 }
 
 /// Message text between its emoji: styled text, or an emoji image with the
-/// text it falls back to.
+/// text it falls back to; quotes and code blocks are blocks of their own.
 pub(crate) enum Inline {
-    Text(LayoutJob),
+    Text(LayoutJob, Extras),
     Emoji {
         url: String,
         alt: String,
         format: TextFormat,
     },
+    Quote(Vec<Inline>),
+    CodeBlock(LayoutJob),
 }
 
 /// Message text: one selectable label when it has no emoji; otherwise its
@@ -1544,20 +1783,67 @@ pub(crate) fn paint_runs_with(
         .iter()
         .filter(|run| matches!(run, Inline::Emoji { .. }))
         .count();
-    if emojis == 0 {
+    let jumbo = allow_jumbo
+        && (1..=27).contains(&emojis)
+        && runs.iter().all(|run| match run {
+            Inline::Text(job, _) => job.text.trim().is_empty(),
+            Inline::Emoji { .. } => true,
+            Inline::Quote(_) | Inline::CodeBlock(_) => false,
+        });
+    let mut paragraph = Vec::new();
+    for run in runs {
+        match run {
+            Inline::Quote(inner) => {
+                paint_paragraph(app, ui, std::mem::take(&mut paragraph), jumbo);
+                paint_quote(app, ui, inner);
+            }
+            Inline::CodeBlock(job) => {
+                paint_paragraph(app, ui, std::mem::take(&mut paragraph), jumbo);
+                egui::Frame::new()
+                    .fill(theme::RAIL)
+                    .stroke(egui::Stroke::new(1.0, theme::SPOILER))
+                    .corner_radius(4.0)
+                    .inner_margin(8)
+                    .show(ui, |ui| {
+                        ui.set_max_width(ui.available_width());
+                        ui.add(Label::new(job).wrap());
+                    });
+            }
+            run => paragraph.push(run),
+        }
+    }
+    paint_paragraph(app, ui, paragraph, jumbo);
+}
+
+/// Discord's block quote: a rounded 4px bar beside the indented text.
+fn paint_quote(app: &mut VesktopApp, ui: &mut egui::Ui, runs: Vec<Inline>) {
+    let rect = ui
+        .horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            ui.add_space(16.0);
+            ui.vertical(|ui| paint_runs_with(app, ui, runs, false));
+        })
+        .response
+        .rect;
+    ui.painter().rect_filled(
+        egui::Rect::from_min_size(rect.min, Vec2::new(4.0, rect.height())),
+        2.0,
+        theme::QUOTE_BAR,
+    );
+}
+
+fn paint_paragraph(app: &mut VesktopApp, ui: &mut egui::Ui, runs: Vec<Inline>, jumbo: bool) {
+    if runs.is_empty() {
+        return;
+    }
+    if !runs.iter().any(|run| matches!(run, Inline::Emoji { .. })) {
         for run in runs {
-            if let Inline::Text(job) = run {
-                linked_content(ui, job);
+            if let Inline::Text(job, extras) = run {
+                linked_content(ui, job, extras);
             }
         }
         return;
     }
-    let jumbo = allow_jumbo
-        && emojis <= 27
-        && runs.iter().all(|run| match run {
-            Inline::Text(job) => job.text.trim().is_empty(),
-            Inline::Emoji { .. } => true,
-        });
     let size = if jumbo {
         48.0
     } else {
@@ -1565,7 +1851,7 @@ pub(crate) fn paint_runs_with(
         runs.iter()
             .map(|run| match run {
                 Inline::Emoji { format, .. } => format.font_id.size * 1.5,
-                Inline::Text(_) => 0.0,
+                _ => 0.0,
             })
             .fold(0.0_f32, f32::max)
             .round()
@@ -1575,13 +1861,14 @@ pub(crate) fn paint_runs_with(
         ui.spacing_mut().item_spacing.x = 0.0;
         for run in runs {
             match run {
-                Inline::Text(job) => linked_content(ui, job),
+                Inline::Text(job, extras) => linked_content(ui, job, extras),
                 Inline::Emoji { url, alt, format } => {
                     let name = emojis::get(&alt)
                         .and_then(emojis::Emoji::shortcode)
                         .map_or_else(|| alt.clone(), |code| format!(":{code}:"));
                     crate::ui::emoji::image(app, ui, &url, &alt, &format, size).on_hover_text(name);
                 }
+                Inline::Quote(_) | Inline::CodeBlock(_) => {}
             }
         }
     });
@@ -1597,6 +1884,51 @@ pub(crate) fn content_runs(
     content_runs_sized(text, users, channels, 14.5)
 }
 
+/// Runs being built: the finished ones plus the text job still growing.
+#[derive(Default)]
+struct RunBuilder {
+    runs: Vec<Inline>,
+    job: LayoutJob,
+    extras: Extras,
+}
+
+impl RunBuilder {
+    fn text(
+        &mut self,
+        text: &str,
+        format: TextFormat,
+        link: Option<&str>,
+        spoiler: Option<Color32>,
+    ) {
+        let start = self.job.text.len();
+        if let Some(url) = link {
+            self.extras.links.push((start, url.to_string()));
+        }
+        if let Some(color) = spoiler {
+            self.extras.spoilers.push((start, color));
+        }
+        self.job.append(text, 0.0, format);
+    }
+
+    fn push(&mut self, run: Inline) {
+        self.flush();
+        self.runs.push(run);
+    }
+
+    fn flush(&mut self) {
+        let job = std::mem::take(&mut self.job);
+        let extras = std::mem::take(&mut self.extras);
+        if !job.text.is_empty() {
+            self.runs.push(Inline::Text(job, extras));
+        }
+    }
+
+    fn finish(mut self) -> Vec<Inline> {
+        self.flush();
+        self.runs
+    }
+}
+
 /// The same pipeline at a different base size — channel topics and the
 /// forum guidelines use it at reading sizes smaller than a message.
 pub(crate) fn content_runs_sized(
@@ -1605,26 +1937,55 @@ pub(crate) fn content_runs_sized(
     channels: &HashMap<String, String>,
     size: f32,
 ) -> Vec<Inline> {
-    let mut runs = Vec::new();
-    let mut job = LayoutJob::default();
+    let mut outer = RunBuilder::default();
+    let mut quote = RunBuilder::default();
     for segment in markup::tokenize(text) {
+        if !segment.quote && !(quote.runs.is_empty() && quote.job.text.is_empty()) {
+            outer.push(Inline::Quote(std::mem::take(&mut quote).finish()));
+        }
+        let target = if segment.quote {
+            &mut quote
+        } else {
+            &mut outer
+        };
+        if segment.style == Style::CodeBlock {
+            let mut job = LayoutJob::default();
+            job.append(
+                &segment.text,
+                0.0,
+                TextFormat::simple(FontId::monospace(size - 1.5), theme::TEXT),
+            );
+            target.push(Inline::CodeBlock(job));
+            continue;
+        }
+        let base = match segment.size {
+            markup::Size::Normal => size,
+            markup::Size::H1 => size * 1.65,
+            markup::Size::H2 => size * 1.38,
+            markup::Size::H3 => size * 1.1,
+            markup::Size::Small => size * 0.83,
+        };
+        let marks = segment.marks;
+        let bold =
+            marks.bold || !matches!(segment.size, markup::Size::Normal | markup::Size::Small);
         let mut format = TextFormat {
-            font_id: FontId::proportional(size),
-            color: theme::TEXT,
+            font_id: if bold {
+                FontId::new(base, theme::bold())
+            } else {
+                FontId::proportional(base)
+            },
+            color: match segment.size {
+                markup::Size::Small => theme::MUTED,
+                _ if bold => theme::WHITE,
+                _ => theme::TEXT,
+            },
+            italics: marks.italic,
             ..Default::default()
         };
         let resolved = match segment.style {
-            Style::Normal => None,
-            Style::Bold => {
-                format.color = theme::WHITE;
-                None
-            }
-            Style::Italic => {
-                format.italics = true;
-                None
-            }
-            Style::Code | Style::CodeBlock => {
-                format.font_id = FontId::monospace(size - 1.5);
+            Style::Normal | Style::CodeBlock => None,
+            Style::Code => {
+                format.font_id = FontId::monospace(base - 1.5);
                 format.background = theme::INPUT;
                 None
             }
@@ -1648,40 +2009,61 @@ pub(crate) fn content_runs_sized(
             }
             Style::Link => {
                 format.color = theme::BLURPLE;
-                format.underline = egui::Stroke::new(1.0, theme::BLURPLE);
                 None
             }
         };
+        if marks.underline || segment.style == Style::Link {
+            format.underline = egui::Stroke::new(1.0, format.color);
+        }
+        if marks.strike {
+            format.strikethrough = egui::Stroke::new(1.0, format.color);
+        }
+        let link = (segment.style == Style::Link)
+            .then(|| segment.url.clone().unwrap_or_else(|| segment.text.clone()));
         let text = resolved.unwrap_or(segment.text);
+        if marks.spoiler {
+            // Hidden: the text in its own background until clicked. Emoji
+            // stay text so no image gives the spoiler away.
+            let real = format.color;
+            format.color = theme::SPOILER;
+            format.background = theme::SPOILER;
+            format.underline.color = theme::SPOILER;
+            format.strikethrough.color = theme::SPOILER;
+            let text = match crate::ui::emoji::custom(&text) {
+                Some((alt, _)) if segment.style == Style::Emoji => alt,
+                _ => text,
+            };
+            target.text(&text, format, link.as_deref(), Some(real));
+            continue;
+        }
         let custom = (segment.style == Style::Emoji)
             .then(|| crate::ui::emoji::custom(&text))
             .flatten();
         if let Some((alt, url)) = custom {
-            runs.push(Inline::Text(std::mem::take(&mut job)));
-            runs.push(Inline::Emoji { url, alt, format });
+            target.push(Inline::Emoji { url, alt, format });
             continue;
         }
-        if matches!(segment.style, Style::Code | Style::CodeBlock) {
-            job.append(&text, 0.0, format);
+        if matches!(segment.style, Style::Code | Style::Link) {
+            target.text(&text, format, link.as_deref(), None);
             continue;
         }
         for piece in crate::ui::emoji::split(&text) {
             match piece {
-                crate::ui::emoji::Piece::Text(text) => job.append(text, 0.0, format.clone()),
-                crate::ui::emoji::Piece::Emoji(emoji) => {
-                    runs.push(Inline::Text(std::mem::take(&mut job)));
-                    runs.push(Inline::Emoji {
-                        url: crate::ui::emoji::twemoji_url(emoji),
-                        alt: emoji.as_str().to_string(),
-                        format: format.clone(),
-                    });
+                crate::ui::emoji::Piece::Text(text) => {
+                    target.text(text, format.clone(), None, None)
                 }
+                crate::ui::emoji::Piece::Emoji(emoji) => target.push(Inline::Emoji {
+                    url: crate::ui::emoji::twemoji_url(emoji),
+                    alt: emoji.as_str().to_string(),
+                    format: format.clone(),
+                }),
             }
         }
     }
-    runs.push(Inline::Text(job));
-    runs.retain(|run| !matches!(run, Inline::Text(job) if job.text.is_empty()));
-    runs
+    if !(quote.runs.is_empty() && quote.job.text.is_empty()) {
+        outer.push(Inline::Quote(quote.finish()));
+    }
+    outer.finish()
 }
 
 /// The compose box pickers' popover: above its button, toggled by it,

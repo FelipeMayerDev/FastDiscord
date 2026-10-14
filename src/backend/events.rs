@@ -90,6 +90,12 @@ pub enum Command {
         emoji: String,
         add: bool,
     },
+    /// Who reacted with an emoji, for the chip's tooltip.
+    FetchReactors {
+        channel_id: String,
+        message_id: String,
+        emoji: String,
+    },
     /// Signal the user is typing, at most once every few seconds.
     SendTyping {
         channel_id: String,
@@ -276,6 +282,11 @@ pub enum UiEvent {
         user_id: String,
         emoji: crate::model::ReactionEmoji,
         added: bool,
+    },
+    Reactors {
+        message_id: String,
+        emoji: String,
+        users: Vec<crate::model::User>,
     },
     SendFailed {
         channel_id: String,

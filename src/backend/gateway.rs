@@ -246,26 +246,10 @@ fn seed_presences(value: &Value, event_tx: &EventTx) {
             .and_then(Value::as_str),
         value.get("status").and_then(Value::as_str),
     ) {
-        // The status dot reflects the device: a phone when the mobile
-        // client is the only one online, the usual dot for web/desktop.
-        let client_status = value.get("client_status");
-        let mobile = client_status
-            .and_then(|cs| cs.get("mobile"))
-            .and_then(Value::as_str)
-            .is_some();
-        let on_computer =
-            client_status.is_some_and(|cs| cs.get("desktop").is_some() || cs.get("web").is_some());
-        let device = if mobile && !on_computer {
-            Some("mobile".to_string())
-        } else if on_computer {
-            Some("desktop".to_string())
-        } else {
-            None
-        };
         event_tx.send(UiEvent::PresenceUpdate {
             user_id: user_id.to_owned(),
             status: status.to_owned(),
-            device,
+            device: crate::model::presence_device(value.get("client_status")),
         });
     }
 }
@@ -1018,6 +1002,20 @@ async fn handle_rest_command(api: &Api, command: Command, event_tx: &EventTx) {
                 log::warn!("falha ao reagir com {emoji}: {err}");
             }
         }
+        Command::FetchReactors {
+            channel_id,
+            message_id,
+            emoji,
+        } => match api.reactors(&channel_id, &message_id, &emoji).await {
+            Ok(users) => {
+                let _ = event_tx.send(UiEvent::Reactors {
+                    message_id,
+                    emoji,
+                    users,
+                });
+            }
+            Err(err) => log::warn!("falha ao buscar quem reagiu com {emoji}: {err}"),
+        },
         Command::SendTyping { channel_id } => {
             if let Err(err) = api.send_typing(&channel_id).await {
                 log::warn!("falha ao avisar digitação: {err}");
@@ -1329,7 +1327,8 @@ mod tests {
                 {"user": {"id": "2"}, "status": "online", "client_status": {"mobile": "online", "desktop": "idle"}},
                 {"user": {"id": "3"}, "status": "online", "client_status": {"web": "online"}},
                 {"user": {"id": "4"}, "status": "offline"},
-                {"user": {"id": "5"}, "status": "online"}
+                {"user": {"id": "5"}, "status": "online"},
+                {"user": {"id": "6"}, "status": "online", "client_status": {"embedded": "online"}}
             ]),
             &events,
         );
@@ -1345,6 +1344,7 @@ mod tests {
         assert_eq!(device(&mut rx), ("3".into(), Some("desktop".into())));
         assert_eq!(device(&mut rx), ("4".into(), None));
         assert_eq!(device(&mut rx), ("5".into(), None));
+        assert_eq!(device(&mut rx), ("6".into(), Some("console".into())));
     }
 
     use super::*;

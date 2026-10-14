@@ -656,6 +656,7 @@ fn preview_text(app: &VesktopApp, message: &Message) -> String {
     let text: String = crate::markup::tokenize(&message.content)
         .into_iter()
         .map(|segment| match segment.style {
+            _ if segment.marks.spoiler => "▒".repeat(segment.text.chars().count()),
             crate::markup::Style::Mention => message
                 .mentions
                 .iter()
@@ -711,7 +712,7 @@ impl VesktopApp {
 /// A rounded label: tags, badges, chips. `emoji` is a custom emoji painted
 /// before the text; `fill` sees the response, for hover.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn pill(
+fn pill(
     app: &mut VesktopApp,
     ui: &mut egui::Ui,
     text: &str,
@@ -785,7 +786,7 @@ fn draw_guidelines_icon(painter: &egui::Painter, center: egui::Pos2, color: Colo
     ));
 }
 
-pub(crate) fn chip_fill(ui: &egui::Ui, response: &egui::Response, selected: bool) -> Color32 {
+fn chip_fill(ui: &egui::Ui, response: &egui::Response, selected: bool) -> Color32 {
     if selected {
         theme::BLURPLE.gamma_multiply(0.6)
     } else {

@@ -117,6 +117,24 @@ pub fn presence_dot(
             ],
             egui::Stroke::new(1.0, background),
         );
+    } else if device == Some("console") {
+        // A gamepad: a wide body with round grips, buttons in the ring's
+        // color.
+        let painter = ui.painter();
+        let body = Rect::from_center_size(center, Vec2::new(radius * 2.1, radius * 1.2));
+        painter.rect_filled(body, radius * 0.5, color);
+        for side in [-1.0, 1.0] {
+            painter.circle_filled(
+                center + Vec2::new(side * radius * 0.7, radius * 0.35),
+                radius * 0.5,
+                color,
+            );
+            painter.circle_filled(
+                center + Vec2::new(side * radius * 0.55, -radius * 0.05),
+                radius * 0.18,
+                background,
+            );
+        }
     } else {
         ui.painter().circle_filled(center, radius, color);
     }
